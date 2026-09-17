@@ -17,10 +17,6 @@ concurrency:
   group: github-pages
   cancel-in-progress: true
 
-environment:
-  name: github-pages
-  url: ${{ steps.deployment.outputs.page_url }}
-
 jobs:
   build:
     name: Build documentation site
@@ -38,6 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f docs/index.html
+          test -f docs/CNAME
           mkdir -p site
           cp -R docs/. site/
           touch site/.nojekyll
@@ -51,6 +48,9 @@ jobs:
     name: Deploy documentation
     needs: build
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Deploy to GitHub Pages
