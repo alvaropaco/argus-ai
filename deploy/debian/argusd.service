@@ -1,0 +1,20 @@
+[Unit]
+Description=ARGUS AI Infrastructure Runtime
+Documentation=https://argus.0x-ai.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/argusd
+Restart=always
+RestartSec=5
+
+# Baseline hardening; capabilities should be added only when required
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
