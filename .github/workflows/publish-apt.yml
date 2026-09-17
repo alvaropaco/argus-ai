@@ -1,0 +1,215 @@
+name: Publish APT Repository
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag (for example v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apt-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Build Debian package (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            linker: ''
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag='${{ inputs.tag }}'
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install AArch64 cross compiler
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure target linker
+        if: matrix.arch == 'arm64'
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: apt-${{ matrix.arch }}
+
+      - name: Verify source
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Build release binaries
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build Debian package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo deb --package argus-ai --target ${{ matrix.target }} --no-build
+          mkdir -p dist
+          find target/${{ matrix.target }}/debian -maxdepth 1 -name '*.deb' -type f -exec cp {} dist/ \;
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+
+  publish:
+    name: Publish APT repository
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag='${{ inputs.tag }}'
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: apt-pages
+        continue-on-error: true
+
+      - name: Initialize gh-pages directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apt-pages
+          touch apt-pages/.nojekyll
+          mkdir -p apt-pages/pool/main/a/argus
+
+      - name: Download Debian packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+          path: apt-pages/pool/main/a/argus
+
+      - name: Install reprepro
+        run: sudo apt-get update && sudo apt-get install -y reprepro gnupg
+
+      - name: Import APT signing key
+        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p .gnupg
+          chmod 700 .gnupg
+          export GNUPGHOME="$PWD/.gnupg"
+          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Prepare reprepro configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apt-pages/conf
+          cp deploy/apt/conf/distributions apt-pages/conf/distributions
+          if [[ -n "${APT_GPG_KEY_ID:-}" ]]; then
+            echo "SignWith: ${APT_GPG_KEY_ID}" >> apt-pages/conf/distributions
+          fi
+        env:
+          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+
+      - name: Import packages into repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$PWD/.gnupg"
+          cd apt-pages
+          reprepro includedeb stable pool/main/a/argus/*.deb
+
+      - name: Export public key
+        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$PWD/.gnupg"
+          gpg --armor --export > apt-pages/argus-archive-keyring.asc
+          gpg --export > apt-pages/argus-archive-keyring.gpg
+
+      - name: Generate repository checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apt-pages
+          find dists pool -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+
+      - name: Publish gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apt-pages
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -m "apt: publish ${{ steps.meta.outputs.tag }}" || exit 0
+          git push origin HEAD:gh-pages
