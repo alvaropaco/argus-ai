@@ -1,0 +1,34 @@
+[package]
+name = "argus-daemon"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS privileged daemon (argusd)"
+
+[[bin]]
+name = "argusd"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+argus-domain = { workspace = true }
+argus-ipc = { workspace = true }
+argus-observability = { workspace = true }
+argus-state = { workspace = true }
+argus-policy = { workspace = true }
+argus-executor = { workspace = true }
+argus-events = { workspace = true }
+
+[dev-dependencies]
+semver = { workspace = true }
+
+[lints]
+workspace = true

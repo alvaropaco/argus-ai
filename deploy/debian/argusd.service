@@ -10,11 +10,31 @@ ExecStart=/usr/bin/argusd
 Restart=always
 RestartSec=5
 
-# Baseline hardening; capabilities should be added only when required
+# systemd creates and keeps these writable even under ProtectSystem=strict.
+StateDirectory=argus
+RuntimeDirectory=argus
+
+# Least privilege. The bootstrap argusd performs only read-only operations,
+# so it needs no capabilities; add specific ones only when privileged
+# capabilities are introduced (see research.md § 2 and ADR-016).
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 PrivateTmp=true
-ProtectHome=true
+PrivateDevices=true
 ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

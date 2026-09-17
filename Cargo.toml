@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/argus-domain",
+    "crates/argus-core",
+    "crates/argus-cli",
+    "crates/argus-tui",
+    "crates/argus-daemon",
+    "crates/argus-ipc",
+    "crates/argus-policy",
+    "crates/argus-executor",
+    "crates/argus-events",
+    "crates/argus-state",
+    "crates/argus-observability",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/alvaropaco/argus-ai"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "signal", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+semver = { version = "1", features = ["serde"] }
+anyhow = "1"
+async-trait = "0.1"
+argus-domain = { path = "crates/argus-domain" }
+argus-ipc = { path = "crates/argus-ipc" }
+argus-observability = { path = "crates/argus-observability" }
+argus-policy = { path = "crates/argus-policy" }
+argus-executor = { path = "crates/argus-executor" }
+argus-state = { path = "crates/argus-state" }
+argus-events = { path = "crates/argus-events" }
+argus-tui = { path = "crates/argus-tui" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
