@@ -9,43 +9,50 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: docs-pages
+  group: github-pages
   cancel-in-progress: true
 
+environment:
+  name: github-pages
+  url: ${{ steps.deployment.outputs.page_url }}
+
 jobs:
-  publish:
-    name: Publish GitHub Pages documentation
+  build:
+    name: Build documentation site
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Checkout gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          path: site
-        continue-on-error: true
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
       - name: Prepare site
         shell: bash
         run: |
           set -euo pipefail
+          test -f docs/index.html
           mkdir -p site
+          cp -R docs/. site/
           touch site/.nojekyll
-          cp docs/index.html site/index.html
 
-      - name: Publish documentation
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd site
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add index.html .nojekyll
-          git commit -m 'docs: publish documentation' || exit 0
-          git push origin HEAD:gh-pages
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy documentation
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
