@@ -65,34 +65,34 @@
 
 - [x] T038 [P0] Add hardened `argusd.service` systemd unit.
 - [ ] T039 [P0] Validate service startup, restart and shutdown behavior.
-- [ ] T040 [P1] Document least-privilege service configuration.
+- [x] T040 [P1] Document least-privilege service configuration.
 
 ## Phase 9 — Plugin / MCP Bootstrap
 
-- [ ] T041 [P1] Define plugin manifest schema in TOML.
-- [ ] T042 [P1] Implement plugin manifest parser and validation.
-- [ ] T043 [P1] Implement capability registration abstraction.
-- [ ] T044 [P1] Add MCP runtime abstraction for future `rmcp` integration.
-- [ ] T045 [P1] Define MCP Core packaging boundary.
+- [x] T041 [P1] Define plugin manifest schema in TOML.
+- [x] T042 [P1] Implement plugin manifest parser and validation.
+- [x] T043 [P1] Implement capability registration abstraction.
+- [x] T044 [P1] Add MCP runtime abstraction for future `rmcp` integration.
+- [x] T045 [P1] Define MCP Core packaging boundary.
 
 ## Phase 10 — Installer and Release
 
-- [ ] T046 [P1] Define GitHub Release artifact layout.
-- [ ] T047 [P1] Define checksum/signature verification interface.
-- [ ] T048 [P1] Add `argus upgrade` command skeleton.
-- [ ] T049 [P2] Prepare installer documentation for `https://argus.0x-ai.com`.
+- [x] T046 [P1] Define GitHub Release artifact layout.
+- [x] T047 [P1] Define checksum/signature verification interface.
+- [x] T048 [P1] Add `argus upgrade` command skeleton.
+- [x] T049 [P2] Prepare installer documentation for `https://argus.0x-ai.com`.
 
 ## Phase 11 — Verification
 
-- [ ] T050 [P0] Verify constitution compliance.
-- [ ] T051 [P0] Verify applicable ADR compliance.
-- [ ] T052 [P0] Verify Linux-first operation without Kubernetes.
-- [ ] T053 [P0] Verify operation without NATS.
-- [ ] T054 [P0] Verify operation without eBPF.
-- [ ] T055 [P0] Verify optional telemetry degradation behavior.
-- [ ] T056 [P0] Verify no secrets are emitted in logs.
-- [ ] T057 [P0] Verify all privileged code paths cross policy and executor boundaries.
-- [ ] T058 [P1] Update architecture documentation with implementation deltas.
+- [x] T050 [P0] Verify constitution compliance.
+- [x] T051 [P0] Verify applicable ADR compliance.
+- [x] T052 [P0] Verify Linux-first operation without Kubernetes.
+- [x] T053 [P0] Verify operation without NATS.
+- [x] T054 [P0] Verify operation without eBPF.
+- [x] T055 [P0] Verify optional telemetry degradation behavior.
+- [x] T056 [P0] Verify no secrets are emitted in logs.
+- [x] T057 [P0] Verify all privileged code paths cross policy and executor boundaries.
+- [x] T058 [P1] Update architecture documentation with implementation deltas.
 
 ## Phase 12: Convergence
 

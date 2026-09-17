@@ -25,4 +25,12 @@ pub enum DomainError {
     /// A confidence value fell outside `[0.0, 1.0]`.
     #[error("confidence {0} out of range: expected 0.0..=1.0")]
     ConfidenceOutOfRange(f32),
+
+    /// A plugin manifest was malformed or failed validation.
+    #[error("invalid plugin manifest: {0}")]
+    InvalidPluginManifest(String),
+
+    /// A capability was registered more than once.
+    #[error("duplicate capability registration: {0}")]
+    DuplicateCapability(String),
 }

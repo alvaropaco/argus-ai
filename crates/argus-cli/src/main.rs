@@ -35,6 +35,8 @@ enum Command {
     Config,
     /// Launch the interactive setup TUI.
     Init,
+    /// Upgrade ARGUS (verifies artifacts before install).
+    Upgrade,
 }
 
 #[tokio::main]
@@ -43,8 +45,18 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None | Some(Command::Init) => argus_tui::run(&cli.socket).await,
+        Some(Command::Upgrade) => run_upgrade(),
         Some(cmd) => run_query(&cli.socket, cmd).await,
     }
+}
+
+fn run_upgrade() -> Result<()> {
+    println!(
+        "argus {} — self-update is not yet implemented in the bootstrap.",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("Artifact verification is provided by `argus-install` (ADR-017).");
+    Ok(())
 }
 
 async fn run_query(socket: &PathBuf, cmd: Command) -> Result<()> {
@@ -58,7 +70,7 @@ async fn run_query(socket: &PathBuf, cmd: Command) -> Result<()> {
         Command::Capabilities => argus_ipc::Operation::CapabilitiesList,
         Command::Plugins => argus_ipc::Operation::PluginsList,
         Command::Config => argus_ipc::Operation::ConfigGet,
-        Command::Init => unreachable!("init is handled before run_query"),
+        Command::Init | Command::Upgrade => unreachable!("handled before run_query"),
     };
 
     let response = client

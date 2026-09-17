@@ -14,7 +14,10 @@ mod error;
 mod event;
 mod health;
 mod id;
+mod mcp;
 mod observation;
+mod plugin;
+mod registry;
 mod validate;
 
 pub use authorization::{
@@ -26,4 +29,7 @@ pub use error::DomainError;
 pub use event::{DomainEvent, EventType, Severity};
 pub use health::{HealthState, HealthStatus};
 pub use id::{CapabilityId, EnvironmentId, ResourceId};
+pub use mcp::McpRuntime;
 pub use observation::{Observation, ObservedValue, Provenance};
+pub use plugin::{Compatibility, PluginManifest, PluginType};
+pub use registry::CapabilityRegistry;

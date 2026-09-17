@@ -1,0 +1,15 @@
+[package]
+name = "argus-install"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS installer and release artifact verification"
+
+[dependencies]
+semver = { workspace = true }
+serde = { workspace = true }
+sha2 = "0.10"
+
+[lints]
+workspace = true

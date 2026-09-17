@@ -84,7 +84,7 @@ impl fmt::Display for ResourceId {
 }
 
 /// A typed, policy-checkable operation identifier, e.g. `host.status.read`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CapabilityId(String);
 
 impl CapabilityId {

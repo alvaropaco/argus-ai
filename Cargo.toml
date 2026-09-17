@@ -12,6 +12,7 @@ members = [
     "crates/argus-events",
     "crates/argus-state",
     "crates/argus-observability",
+    "crates/argus-install",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
+toml = "0.8"
 anyhow = "1"
 async-trait = "0.1"
 argus-domain = { path = "crates/argus-domain" }
@@ -41,6 +43,7 @@ argus-executor = { path = "crates/argus-executor" }
 argus-state = { path = "crates/argus-state" }
 argus-events = { path = "crates/argus-events" }
 argus-tui = { path = "crates/argus-tui" }
+argus-install = { path = "crates/argus-install" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
