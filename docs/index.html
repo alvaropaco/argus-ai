@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="ARGUS AI — autonomous infrastructure operations runtime for Linux and Unix.">
+<title>ARGUS AI — Autonomous Infrastructure Operations</title>
+<style>
+:root{--bg:#0b0d10;--panel:#12161b;--panel2:#171c22;--text:#e8edf2;--muted:#9ba7b4;--line:#29313a;--accent:#7dd3fc;--accent2:#38bdf8;--code:#0a0c0f;--max:1120px}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.wrap{max-width:var(--max);margin:auto;padding:0 24px}header{border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(11,13,16,.92);backdrop-filter:blur(12px);z-index:5}.nav{height:64px;display:flex;align-items:center;justify-content:space-between}.brand{font-weight:800;letter-spacing:.08em}.navlinks{display:flex;gap:22px;font-size:14px}.hero{padding:96px 0 72px;max-width:900px}.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.12em;font-size:12px}.hero h1{font-size:clamp(42px,7vw,76px);line-height:1.02;margin:14px 0 20px;letter-spacing:-.04em}.hero p{font-size:20px;color:var(--muted);max-width:780px}.buttons{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}.button{display:inline-block;padding:11px 18px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}.button.primary{background:var(--accent2);border-color:var(--accent2);color:#03131b;font-weight:700}section{padding:64px 0;border-top:1px solid var(--line)}h2{font-size:32px;line-height:1.15;margin:0 0 12px}h3{margin-top:28px}.lead{color:var(--muted);max-width:760px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:28px}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px}.card h3{margin:0 0 8px}.card p{color:var(--muted);margin:0}pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:18px;overflow:auto;color:#dbe7ef}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}.arch{display:grid;grid-template-columns:1fr 1fr;gap:20px}.toc{display:flex;gap:18px;flex-wrap:wrap;margin-top:20px;font-size:14px}@media(max-width:760px){.grid,.arch{grid-template-columns:1fr}.navlinks{display:none}.hero{padding-top:64px}}
+</style>
+</head>
+<body>
+<header><div class="wrap nav"><a class="brand" href="#top">ARGUS AI</a><nav class="navlinks"><a href="#overview">Overview</a><a href="#architecture">Architecture</a><a href="#install">Install</a><a href="#development">Development</a><a href="https://github.com/alvaropaco/argus-ai">GitHub</a></nav></div></header>
+<main id="top"><div class="wrap">
+<section class="hero" style="border-top:0"><div class="eyebrow">Autonomous Infrastructure Operations</div><h1>Observe. Reason. Heal. Evolve.</h1><p>ARGUS AI is a Rust-native autonomous infrastructure operations runtime for Linux and Unix. It discovers environments, builds an evidence-backed infrastructure model, reasons about incidents, plans changes, enforces policy, executes permitted actions, and validates outcomes.</p><div class="buttons"><a class="button primary" href="#install">Get started</a><a class="button" href="https://github.com/alvaropaco/argus-ai">View source</a></div><div class="toc"><a href="#overview">What is ARGUS?</a><a href="#architecture">Architecture</a><a href="#security">Security</a><a href="#development">Development</a></div></section>
+<section id="overview"><h2>What is ARGUS?</h2><p class="lead">ARGUS is an infrastructure control plane designed to operate heterogeneous systems continuously. Kubernetes is supported, but is not a prerequisite or the definition of the product.</p><div class="grid"><article class="card"><h3>Discover</h3><p>Understand hosts, kernels, processes, cgroups, namespaces, containers, services, networks, storage, databases, Kubernetes workloads and dependencies.</p></article><article class="card"><h3>Reason</h3><p>Combine observations, telemetry, history, policies and LLM reasoning to form hypotheses and operational plans.</p></article><article class="card"><h3>Operate</h3><p>Execute typed capabilities through a privileged, policy-controlled Rust boundary and verify the resulting state.</p></article></div></section>
+<section id="architecture"><h2>Architecture</h2><p class="lead">The runtime separates intelligence from authority. Infrastructure-specific functionality lives behind adapters, capabilities and plugins.</p><div class="arch"><div><h3>Autonomous control loop</h3><pre><code>Observe
+  ↓
+Correlate
+  ↓
+Detect / Diagnose
+  ↓
+Plan
+  ↓
+Policy
+  ↓
+Execute
+  ↓
+Validate
+  ↓
+Learn / Record
+  └──────────────→ Observe</code></pre></div><div><h3>Security boundary</h3><pre><code>AI / Agent
+    │
+    │ Capability Request
+    ▼
+Policy Engine
+    │
+    │ Authorized Action
+    ▼
+argusd
+    │
+    ▼
+Executor
+    │
+    ▼
+Linux / Unix / Cloud / K8s</code></pre></div></div><h3>Domain model</h3><pre><code>Environment
+ ├── Host ── Kernel / CPU / Memory / Storage / Network
+ ├── Process ── cgroup / namespace / socket / filesystem
+ ├── Service
+ ├── Container
+ ├── Workload
+ ├── Dependency
+ ├── Endpoint
+ ├── Observation / Evidence
+ ├── Incident / Hypothesis
+ ├── Intent / Plan / Action / Execution
+ ├── Capability / Policy
+ ├── Agent / Plugin
+ └── Event</code></pre><p>Linux kernel interfaces are treated as first-class sources of truth. Kubernetes adds a control-plane/domain layer and is correlated down to nodes, containers, cgroups, PIDs, namespaces and kernel evidence where possible.</p></section>
+<section id="security"><h2>Security model</h2><p class="lead">LLM output is data, never authority. Autonomous operation is constrained by deterministic policy and execution controls.</p><div class="grid"><article class="card"><h3>Least privilege</h3><p>The privileged daemon owns sensitive operations. Capabilities declare the access they require.</p></article><article class="card"><h3>Policy before execution</h3><p>Actions are evaluated for principal, target, risk, blast radius, autonomy level, approvals and operational constraints.</p></article><article class="card"><h3>Auditability</h3><p>Plans, policy decisions, actions, executions and evidence form an auditable operational history.</p></article></div></section>
+<section id="install"><h2>Installation</h2><p class="lead">The product is intended to run as a native Linux/Unix service. Additional package channels are being prepared alongside the source distribution.</p><h3>Installer</h3><pre><code>curl -fsSL https://argus.0x-ai.com | sh
+argus init</code></pre><h3>APT</h3><pre><code>sudo apt update
+sudo apt install argus</code></pre><h3>Rust</h3><pre><code>cargo install argus-ai</code></pre><p>APT and release packages are published through the project's automated release pipeline. Package availability depends on the current release.</p></section>
+<section id="development"><h2>Development</h2><p class="lead">ARGUS is organized as a Rust workspace with explicit architectural boundaries and specification-driven development.</p><pre><code>argus-ai/
+├── .specify/              # SpecKit constitution and templates
+├── docs/adr/              # Architectural decisions
+├── docs/architecture/     # Architecture and domain model
+├── specs/                 # Feature specifications
+├── crates/                # Rust workspace
+├── deploy/                # Packaging and deployment
+└── .github/workflows/     # CI, security and releases</code></pre><h3>Quality gates</h3><pre><code>cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+cargo build
+cargo audit</code></pre><h3>Core principles</h3><ul><li>Rust-native core and privileged execution boundary.</li><li>AI reasoning is separated from privileged authority.</li><li>Kernel-native evidence is preferred over CLI parsing.</li><li>Kubernetes is an adapter/control-plane domain, not a prerequisite.</li><li>Plugins extend capabilities without coupling infrastructure-specific logic to the core.</li><li>Observed evidence remains distinct from inferred state.</li></ul></section>
+<section><h2>Project status</h2><p class="lead">ARGUS is under active development. Architecture, ADRs, specifications, CI/CD and packaging foundations are being established before the core runtime implementation is completed.</p><div class="buttons"><a class="button primary" href="https://github.com/alvaropaco/argus-ai">GitHub repository</a><a class="button" href="https://github.com/alvaropaco/argus-ai/releases">Releases</a></div></section>
+</div></main><footer><div class="wrap" style="padding:28px 24px;color:var(--muted);font-size:13px">ARGUS AI · Autonomous Infrastructure Operations Runtime</div></footer>
+</body></html>
