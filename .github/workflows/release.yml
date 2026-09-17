@@ -30,7 +30,6 @@ jobs:
             asset: linux-x86_64
           - target: aarch64-unknown-linux-gnu
             asset: linux-aarch64
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,6 +38,7 @@ jobs:
         id: meta
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
@@ -50,11 +50,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross compiler
+      - name: Install AArch64 cross compiler
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure AArch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -74,19 +83,22 @@ jobs:
           version="${tag#v}"
           mkdir -p dist
 
-          tar -C "target/${{ matrix.target }}/release" -czf \
-            "dist/argus-${version}-${{ matrix.asset }}.tar.gz" \
-            argus argusd 2>/dev/null || true
+          binaries=()
+          for candidate in argus argusd; do
+            if [[ -f "target/${{ matrix.target }}/release/${candidate}" ]]; then
+              binaries+=("${candidate}")
+            fi
+          done
 
-          if [[ ! -f "dist/argus-${version}-${{ matrix.asset }}.tar.gz" ]]; then
+          if [[ ${#binaries[@]} -eq 0 ]]; then
             binary="$(find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -perm -111 -print -quit)"
             test -n "$binary"
-            tar -C "$(dirname "$binary")" -czf \
-              "dist/argus-${version}-${{ matrix.asset }}.tar.gz" \
-              "$(basename "$binary")"
+            binaries+=("$(basename "$binary")")
           fi
 
-          sha256sum dist/* > "dist/argus-${version}-${{ matrix.asset }}.sha256"
+          tar -C "target/${{ matrix.target }}/release" \
+            -czf "dist/argus-${version}-${{ matrix.asset }}.tar.gz" \
+            "${binaries[@]}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -98,7 +110,6 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,6 +118,7 @@ jobs:
         id: meta
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
@@ -123,8 +135,8 @@ jobs:
       - name: Generate checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd release-assets
-          rm -f *.sha256
           sha256sum *.tar.gz > SHA256SUMS
 
       - name: Create release
