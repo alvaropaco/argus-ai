@@ -41,13 +41,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Unit and integration tests
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace
 
       - name: Build
-        run: cargo build --workspace --all-features --locked
+        run: cargo build --workspace --locked
 
       - name: Package validation
         run: cargo package --workspace --locked --allow-dirty

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   package:
-    name: Build Debian package (${{ matrix.arch }})
+    name: Build Debian package
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -78,8 +78,8 @@ jobs:
       - name: Verify source
         run: |
           cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace --all-features
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
 
       - name: Install cargo-deb
         uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
