@@ -31,28 +31,53 @@ pub struct ProviderCatalog;
 
 impl ProviderCatalog {
     pub const OPENAI: ProviderDefinition = ProviderDefinition {
-        id: "openai", name: "OpenAI", description: "OpenAI API",
-        default_base_url: Some("https://api.openai.com/v1"), default_model: "gpt-5.6",
+        id: "openai",
+        name: "OpenAI",
+        description: "OpenAI API",
+        default_base_url: Some("https://api.openai.com/v1"),
+        default_model: "gpt-5.6",
     };
+
     pub const ANTHROPIC: ProviderDefinition = ProviderDefinition {
-        id: "anthropic", name: "Anthropic", description: "Claude API",
-        default_base_url: Some("https://api.anthropic.com"), default_model: "claude-sonnet",
+        id: "anthropic",
+        name: "Anthropic",
+        description: "Claude API",
+        default_base_url: Some("https://api.anthropic.com"),
+        default_model: "claude-sonnet",
     };
+
     pub const OLLAMA: ProviderDefinition = ProviderDefinition {
-        id: "ollama", name: "Ollama", description: "Local Ollama server",
-        default_base_url: Some("http://localhost:11434"), default_model: "llama3.1",
+        id: "ollama",
+        name: "Ollama",
+        description: "Local Ollama server",
+        default_base_url: Some("http://localhost:11434"),
+        default_model: "llama3.1",
     };
+
     pub const LITELLM: ProviderDefinition = ProviderDefinition {
-        id: "litellm", name: "LiteLLM", description: "OpenAI-compatible LLM gateway",
-        default_base_url: Some("http://localhost:4000"), default_model: "gpt-5.6",
+        id: "litellm",
+        name: "LiteLLM",
+        description: "OpenAI-compatible LLM gateway",
+        default_base_url: Some("http://localhost:4000"),
+        default_model: "gpt-5.6",
     };
+
     pub const DEEPSEEK: ProviderDefinition = ProviderDefinition {
-        id: "deepseek", name: "DeepSeek", description: "DeepSeek Platform API",
-        default_base_url: Some("https://api.deepseek.com"), default_model: "deepseek-flash",
+        id: "deepseek",
+        name: "DeepSeek",
+        description: "DeepSeek Platform API",
+        default_base_url: Some("https://api.deepseek.com"),
+        default_model: "deepseek-flash",
     };
 
     pub fn all() -> &'static [ProviderDefinition] {
-        &[Self::OPENAI, Self::ANTHROPIC, Self::OLLAMA, Self::LITELLM, Self::DEEPSEEK]
+        &[
+            Self::OPENAI,
+            Self::ANTHROPIC,
+            Self::OLLAMA,
+            Self::LITELLM,
+            Self::DEEPSEEK,
+        ]
     }
 }
 
@@ -75,14 +100,18 @@ mod tests {
 
     #[test]
     fn deepseek_defaults_are_platform_defaults() {
-        assert_eq!(ProviderCatalog::DEEPSEEK.default_base_url, Some("https://api.deepseek.com"));
+        assert_eq!(
+            ProviderCatalog::DEEPSEEK.default_base_url,
+            Some("https://api.deepseek.com")
+        );
         assert_eq!(ProviderCatalog::DEEPSEEK.default_model, "deepseek-flash");
     }
 
     #[test]
     fn config_serde_round_trip() {
         let config = ModelProviderConfig {
-            provider: "litellm".into(), model: "gpt-5.6".into(),
+            provider: "litellm".into(),
+            model: "gpt-5.6".into(),
             fallback_models: vec!["deepseek/deepseek-flash".into()],
             base_url: Some("http://localhost:4000".into()),
         };
