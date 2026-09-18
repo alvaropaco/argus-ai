@@ -351,7 +351,9 @@ fn json_len(value: &serde_json::Value) -> String {
 
 fn centered(area: Rect, width: u16, height_percent: u16) -> Rect {
     let width = width.min(area.width);
-    let height = (area.height * height_percent / 100).max(12).min(area.height);
+    let height = (area.height * height_percent / 100)
+        .max(12)
+        .min(area.height);
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
