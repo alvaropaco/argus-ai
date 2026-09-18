@@ -121,12 +121,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-cli"
-version = "0.1.1"
+name = "argus-ai-cli"
+version = "0.1.2"
 dependencies = [
  "anyhow",
+ "argus-ai-tui",
  "argus-ipc",
- "argus-tui",
  "clap",
  "serde_json",
  "tokio",
@@ -134,8 +134,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-core"
-version = "0.1.1"
+name = "argus-ai-core"
+version = "0.1.2"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -143,8 +143,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-ai-tui"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "argus-ipc",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "argus-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "argus-domain",
@@ -166,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "argus-domain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "semver",
@@ -179,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "argus-events"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "argus-domain",
  "async-trait",
@@ -192,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "argus-executor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "argus-domain",
  "argus-policy",
@@ -206,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "argus-install"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "semver",
  "serde",
@@ -215,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "argus-ipc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "argus-domain",
  "semver",
@@ -228,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "argus-observability"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -242,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "argus-policy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "argus-domain",
  "chrono",
@@ -253,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "argus-state"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "argus-domain",
  "async-trait",
@@ -265,21 +280,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "argus-tui"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "argus-ipc",
- "crossterm",
- "ratatui",
- "serde",
- "serde_json",
- "tokio",
- "toml",
  "uuid",
 ]
 

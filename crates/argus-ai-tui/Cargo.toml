@@ -1,5 +1,5 @@
 [package]
-name = "argus-tui"
+name = "argus-ai-tui"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

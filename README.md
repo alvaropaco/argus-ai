@@ -94,7 +94,7 @@ ARGUS_VERSION=0.1.0 curl -fsSL https://argus.0x-ai.com | sh
 ### Cargo (crates.io)
 
 ```bash
-cargo install argus-cli argus-daemon
+cargo install argus-ai-cli argus-daemon
 ```
 
 This installs the `argus` CLI and the `argusd` daemon from crates.io.
