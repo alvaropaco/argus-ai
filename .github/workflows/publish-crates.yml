@@ -121,7 +121,7 @@ jobs:
               continue
             fi
             echo "Publishing ${package} ${version}..."
-            cargo publish --package "${package}" --locked
+            cargo publish --package "${package}"
             echo "Waiting briefly for crates.io index propagation..."
             sleep 10
           done
