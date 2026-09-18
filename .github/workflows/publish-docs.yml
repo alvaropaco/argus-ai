@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'install.sh'
   workflow_dispatch:
 
 concurrency:
@@ -34,6 +35,8 @@ jobs:
           test -f docs/CNAME
           mkdir -p site
           cp -R docs/. site/
+          cp install.sh site/install.sh
+          chmod 755 site/install.sh
           touch site/.nojekyll
 
       - name: Upload Pages artifact
