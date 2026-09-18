@@ -88,7 +88,7 @@ tarball from GitHub Releases, verifies its SHA-256 checksum, and installs
 Install a specific version:
 
 ```bash
-ARGUS_VERSION=0.1.0 curl -fsSL https://argus.0x-ai.com | sh
+ARGUS_VERSION=0.1.2 curl -fsSL https://argus.0x-ai.com | sh
 ```
 
 ### Cargo (crates.io)
@@ -102,10 +102,10 @@ This installs the `argus` CLI and the `argusd` daemon from crates.io.
 ### APT (Debian/Ubuntu)
 
 ```bash
-curl -fsSL https://argus.0x-ai.com/apt/argus-archive-keyring.gpg \
+curl -fsSL https://argus.0x-ai.com/argus-archive-keyring.asc \
   | sudo gpg --dearmor -o /usr/share/keyrings/argus-archive-keyring.gpg
 
-echo "deb [signed-by=/usr/share/keyrings/argus-archive-keyring.gpg] https://argus.0x-ai.com/apt stable main" \
+echo "deb [signed-by=/usr/share/keyrings/argus-archive-keyring.gpg] https://argus.0x-ai.com stable main" \
   | sudo tee /etc/apt/sources.list.d/argus.list
 
 sudo apt-get update
