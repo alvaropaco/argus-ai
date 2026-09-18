@@ -57,14 +57,14 @@
 ## Phase 7 — Observability
 
 - [x] T034 [P0] Configure `tracing` subscriber and structured logging.
-- [ ] T035 [P1] Initialize OpenTelemetry instrumentation boundary.
+- [x] T035 [P1] Initialize OpenTelemetry instrumentation boundary.
 - [x] T036 [P1] Add correlation/request IDs to daemon operations.
 - [x] T037 [P1] Emit startup, readiness, degraded and shutdown events.
 
 ## Phase 8 — Linux Service Packaging
 
 - [x] T038 [P0] Add hardened `argusd.service` systemd unit.
-- [ ] T039 [P0] Validate service startup, restart and shutdown behavior.
+- [x] T039 [P0] Validate service startup, restart and shutdown behavior.
 - [x] T040 [P1] Document least-privilege service configuration.
 
 ## Phase 9 — Plugin / MCP Bootstrap

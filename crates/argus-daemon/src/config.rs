@@ -16,6 +16,9 @@ pub struct DaemonConfig {
     /// (read-only bootstrap operations only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorized_uids: Option<Vec<u32>>,
+    /// Optional OpenTelemetry OTLP endpoint; `None` disables trace export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_endpoint: Option<String>,
     /// Log output format.
     pub log_format: LogFormat,
 }
@@ -27,6 +30,7 @@ impl Default for DaemonConfig {
             state_path: "/var/lib/argus/argus.db".to_string(),
             environment_name: "default".to_string(),
             authorized_uids: None,
+            otel_endpoint: None,
             log_format: LogFormat::Text,
         }
     }

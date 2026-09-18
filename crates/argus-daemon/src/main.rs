@@ -17,7 +17,8 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = parse_config()?;
-    init(config.log_format).context("failed to initialize tracing")?;
+    init(config.log_format, config.otel_endpoint.as_deref())
+        .context("failed to initialize tracing")?;
 
     tracing::info!(socket = %config.socket_path, "starting argusd");
 
@@ -115,6 +116,10 @@ fn parse_config() -> Result<DaemonConfig> {
                 let raw = args.next().context("--authorized-uids requires a value")?;
                 config.authorized_uids = Some(parse_uids(&raw)?);
             }
+            "--otel-endpoint" => {
+                config.otel_endpoint =
+                    Some(args.next().context("--otel-endpoint requires a value")?);
+            }
             "--log-format" => {
                 let raw = args.next().context("--log-format requires a value")?;
                 config.log_format = match raw.as_str() {
@@ -146,6 +151,6 @@ fn parse_uids(raw: &str) -> Result<Vec<u32>> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: argusd [--socket PATH] [--state PATH] [--environment NAME] [--authorized-uids UID,..] [--log-format text|json]"
+        "Usage: argusd [--socket PATH] [--state PATH] [--environment NAME] [--authorized-uids UID,..] [--otel-endpoint URL] [--log-format text|json]"
     );
 }
