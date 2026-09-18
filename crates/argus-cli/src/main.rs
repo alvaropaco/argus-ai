@@ -44,7 +44,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None | Some(Command::Init) => argus_tui::run(&cli.socket).await,
+        None => argus_tui::run(&cli.socket).await,
+        Some(Command::Init) => {
+            let defaults = argus_tui::SetupConfig {
+                socket_path: cli.socket.to_string_lossy().into_owned(),
+                ..argus_tui::SetupConfig::default()
+            };
+            argus_tui::run_setup(defaults)
+        }
         Some(Command::Upgrade) => run_upgrade(),
         Some(cmd) => run_query(&cli.socket, cmd).await,
     }

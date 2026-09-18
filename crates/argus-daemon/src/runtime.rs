@@ -4,13 +4,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use argus_domain::{
-    AuthorizationRequest, BlastRadius, CapabilityId, CapabilityRequest, EnvironmentId,
-    HealthStatus, PolicyOutcome, RiskClass,
+    AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId, CapabilityRegistry,
+    CapabilityRequest, EnvironmentId, HealthStatus, PluginManifest, PolicyOutcome, Reversibility,
+    RiskClass,
 };
 use argus_executor::{BootstrapExecutor, CapabilityProvider, ExecutionError, Executor};
 use argus_policy::{BootstrapPolicyEvaluator, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
 use chrono::Utc;
+use semver::Version;
 use serde_json::Value;
 
 use crate::config::DaemonConfig;
@@ -23,6 +25,8 @@ pub struct Daemon {
     repository: Arc<dyn DomainRepository>,
     policy: BootstrapPolicyEvaluator,
     executor: BootstrapExecutor,
+    registry: CapabilityRegistry,
+    plugins: Vec<PluginManifest>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -84,6 +88,13 @@ impl Daemon {
             config: config.clone(),
         });
 
+        let mut registry = CapabilityRegistry::new();
+        for descriptor in bootstrap_descriptors() {
+            registry
+                .register(descriptor)
+                .expect("bootstrap descriptors are unique");
+        }
+
         Ok(Self {
             started_at: Instant::now(),
             environment_id,
@@ -91,6 +102,8 @@ impl Daemon {
             repository,
             policy: BootstrapPolicyEvaluator::new(),
             executor: BootstrapExecutor::new(provider),
+            registry,
+            plugins: Vec::new(),
         })
     }
 
@@ -120,16 +133,25 @@ impl Daemon {
     }
 
     pub fn plugins(&self) -> Value {
-        serde_json::json!([])
+        serde_json::json!(
+            self.plugins
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+        )
     }
 
     pub fn capabilities(&self) -> Value {
         serde_json::json!(
-            bootstrap_capabilities()
-                .iter()
-                .map(|c| c.as_str())
+            self.registry
+                .list()
+                .map(|d| d.id().as_str())
                 .collect::<Vec<_>>()
         )
+    }
+
+    pub fn registry(&self) -> &CapabilityRegistry {
+        &self.registry
     }
 
     /// Routes a capability request through the policy and executor boundaries.
@@ -163,4 +185,22 @@ fn bootstrap_capabilities() -> Vec<CapabilityId> {
     .into_iter()
     .map(|c| CapabilityId::new(c).expect("bootstrap capability ids are valid"))
     .collect()
+}
+
+fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
+    bootstrap_capabilities()
+        .into_iter()
+        .map(|id| {
+            CapabilityDescriptor::new(
+                id.clone(),
+                "argusd",
+                id.as_str(),
+                RiskClass::Read,
+                Version::new(0, 1, 0),
+                serde_json::json!({}),
+                serde_json::json!({}),
+                Reversibility::None,
+            )
+        })
+        .collect()
 }

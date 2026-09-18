@@ -108,14 +108,23 @@ async fn capabilities_lists_bootstrap_set() {
         .unwrap();
 
     assert!(resp.ok);
+    let mut caps: Vec<String> = resp
+        .result
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    caps.sort();
     assert_eq!(
-        resp.result.unwrap(),
-        json!([
-            "host.status.read",
-            "argus.health.read",
-            "argus.config.read",
-            "argus.plugins.list"
-        ])
+        caps,
+        vec![
+            "argus.config.read".to_string(),
+            "argus.health.read".to_string(),
+            "argus.plugins.list".to_string(),
+            "host.status.read".to_string(),
+        ]
     );
     cleanup(&path);
 }

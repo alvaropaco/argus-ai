@@ -19,6 +19,7 @@ chrono = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+semver = { workspace = true }
 argus-domain = { workspace = true }
 argus-ipc = { workspace = true }
 argus-observability = { workspace = true }
@@ -26,9 +27,6 @@ argus-state = { workspace = true }
 argus-policy = { workspace = true }
 argus-executor = { workspace = true }
 argus-events = { workspace = true }
-
-[dev-dependencies]
-semver = { workspace = true }
 
 [lints]
 workspace = true

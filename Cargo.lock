@@ -272,8 +272,10 @@ dependencies = [
  "argus-ipc",
  "crossterm",
  "ratatui",
+ "serde",
  "serde_json",
  "tokio",
+ "toml",
  "uuid",
 ]
 

@@ -100,3 +100,8 @@
 - [x] T060 [P0] Wire `argusd` to persist environment identity and health through `DomainRepository` (`SqliteRepository`) instead of ephemeral in-memory state per plan §2/§5 (partial)
 - [x] T061 [P0] Route daemon capability dispatch through the `PolicyEvaluator` and `Executor` boundaries (currently only uid-check + direct handlers) per plan §7/§8/Constitution Principle 3 (partial)
 - [x] T062 [P1] Reconcile CI `--all-features` with the optional `lancedb` feature so the default CI path does not recompile the heavy LanceDB/datafusion tree per T003 (partial)
+
+## Phase 13: Convergence
+
+- [x] T063 [P1] Provide an interactive `argus init` configuration/setup flow (not just a read-only status viewer) per FR-002/plan §9 (partial)
+- [x] T064 [P2] Wire `CapabilityRegistry` and plugin manifests into the daemon so `capabilities.list`/`plugins.list` are registry-driven rather than hardcoded per T043/plan §9 (partial)

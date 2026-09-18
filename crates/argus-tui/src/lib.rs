@@ -5,10 +5,13 @@
 
 mod app;
 mod data;
+mod setup;
 
 use std::path::Path;
 
 use anyhow::Result;
+
+pub use setup::{SetupConfig, run as run_setup};
 
 /// Runs the interactive TUI, fetching runtime state from `argusd`.
 pub async fn run(socket_path: &Path) -> Result<()> {
