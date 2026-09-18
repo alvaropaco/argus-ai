@@ -417,12 +417,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
     ];
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), area);
 }
 
 fn draw_provider(f: &mut Frame, area: Rect, state: &SetupState) {
@@ -606,7 +601,9 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &SetupState) {
 
 fn centered(area: Rect, width: u16, height_percent: u16) -> Rect {
     let width = width.min(area.width);
-    let height = (area.height * height_percent / 100).max(16).min(area.height);
+    let height = (area.height * height_percent / 100)
+        .max(16)
+        .min(area.height);
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
