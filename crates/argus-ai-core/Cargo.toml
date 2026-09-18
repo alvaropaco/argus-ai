@@ -10,6 +10,11 @@ description = "ARGUS core runtime: lifecycle, coordination, and control-loop orc
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

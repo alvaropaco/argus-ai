@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -35,15 +35,16 @@ semver = { version = "1", features = ["serde"] }
 toml = "0.8"
 anyhow = "1"
 async-trait = "0.1"
-argus-domain = { version = "0.1.2", path = "crates/argus-domain" }
-argus-ipc = { version = "0.1.2", path = "crates/argus-ipc" }
-argus-observability = { version = "0.1.2", path = "crates/argus-observability" }
-argus-policy = { version = "0.1.2", path = "crates/argus-policy" }
-argus-executor = { version = "0.1.2", path = "crates/argus-executor" }
-argus-state = { version = "0.1.2", path = "crates/argus-state" }
-argus-events = { version = "0.1.2", path = "crates/argus-events" }
-argus-ai-tui = { version = "0.1.2", path = "crates/argus-ai-tui" }
-argus-install = { version = "0.1.2", path = "crates/argus-install" }
+argus-domain = { version = "0.1.3", path = "crates/argus-domain" }
+argus-ai-core = { version = "0.1.3", path = "crates/argus-ai-core" }
+argus-ipc = { version = "0.1.3", path = "crates/argus-ipc" }
+argus-observability = { version = "0.1.3", path = "crates/argus-observability" }
+argus-policy = { version = "0.1.3", path = "crates/argus-policy" }
+argus-executor = { version = "0.1.3", path = "crates/argus-executor" }
+argus-state = { version = "0.1.3", path = "crates/argus-state" }
+argus-events = { version = "0.1.3", path = "crates/argus-events" }
+argus-ai-tui = { version = "0.1.3", path = "crates/argus-ai-tui" }
+argus-install = { version = "0.1.3", path = "crates/argus-install" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

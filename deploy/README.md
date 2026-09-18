@@ -36,5 +36,24 @@ before extraction, and installs `argus`/`argusd` plus the systemd unit.
 ## Packaging
 
 - `deploy/debian/argusd.service` — hardened systemd unit.
+- `deploy/debian/argusd.default` — optional `/etc/default/argusd` override of the
+  daemon binary path (`ARGUSD_BINARY`) for non-packaged installs.
 - `deploy/apt/` — Debian repository metadata and signing (see
   `deploy/apt/README.md`).
+
+## Cargo installs
+
+`cargo install --path crates/argus-daemon` puts `argusd` in `~/.cargo/bin`, which
+the hardened unit cannot execute (it masks `/home` via `ProtectHome=true`). To
+keep systemd working, either:
+
+- install into the packaged location so the unit needs no changes:
+
+  ```bash
+  cargo install --root /usr --path crates/argus-ai-cli
+  cargo install --root /usr --path crates/argus-daemon
+  ```
+
+- or point the unit at a cargo binary by writing `/etc/default/argusd`
+  (copy `deploy/debian/argusd.default`), which sets `ARGUSD_BINARY` and
+  `ARGUSD_OPTS`.

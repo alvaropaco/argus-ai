@@ -19,7 +19,10 @@ API="https://api.github.com/repos/${REPO}"
 DEFAULT_VERSION="latest"
 
 # Installation destinations.
-BIN_DIR="/usr/local/bin"
+#
+# Must match the systemd unit's `ExecStart` and the cargo-deb default
+# (`/usr/bin`) so the packaged service can always find the binaries.
+BIN_DIR="/usr/bin"
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
 SYSTEMD_UNIT_NAME="argusd.service"
 
@@ -32,7 +35,7 @@ Usage: install.sh [--version VERSION] [--prefix DIR]
 
 Options:
   --version VERSION   Install a specific version (default: latest).
-  --prefix DIR        Install binaries into DIR (default: /usr/local/bin).
+  --prefix DIR        Install binaries into DIR (default: /usr/bin).
 
 Environment:
   ARGUS_VERSION       Version to install (overrides --version).

@@ -6,7 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/argusd
+
+# The daemon binary path is overridable via /etc/default/argusd (e.g. for a
+# cargo-installed build). Defaults to the packaged location in /usr/bin.
+EnvironmentFile=-/etc/default/argusd
+Environment=ARGUSD_BINARY=/usr/bin/argusd
+ExecStart=${ARGUSD_BINARY}
 Restart=always
 RestartSec=5
 
