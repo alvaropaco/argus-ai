@@ -88,7 +88,7 @@ tarball from GitHub Releases, verifies its SHA-256 checksum, and installs
 Install a specific version:
 
 ```bash
-ARGUS_VERSION=0.1.3 curl -fsSL https://argus.0x-ai.com | sh
+ARGUS_VERSION=0.1.4 curl -fsSL https://argus.0x-ai.com | sh
 ```
 
 ### Cargo (crates.io)
