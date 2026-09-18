@@ -67,8 +67,8 @@ esac
 # Resolve version → release tag.
 if [[ "$VERSION" == "latest" ]]; then
     log "resolving latest version"
-    tag="$(curl -fsSL "${API}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
-    test -n "$tag" || { err "could not resolve latest version"; exit 1; }
+    tag="$(curl -fsSL --proto '=https' "${API}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
+    [[ -n "$tag" ]] || { err "could not resolve latest version"; exit 1; }
 else
     tag="v${VERSION#v}"
 fi
@@ -96,13 +96,11 @@ mkdir -p "$PREFIX"
 tar -xzf "${workdir}/${tarball}" -C "$PREFIX"
 
 # Install the systemd unit when running as root on a systemd host.
-if [[ "$(id -u)" -eq 0 ]] && command -v systemctl >/dev/null 2>&1; then
-    if [[ -f "${PREFIX}/argusd.service" ]]; then
-        log "installing ${SYSTEMD_UNIT_NAME}"
-        install -m 644 "${PREFIX}/argusd.service" "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
-        systemctl daemon-reload
-        log "start with: systemctl enable --now ${SYSTEMD_UNIT_NAME}"
-    fi
+if [[ "$(id -u)" -eq 0 ]] && command -v systemctl >/dev/null 2>&1 && [[ -f "${PREFIX}/argusd.service" ]]; then
+    log "installing ${SYSTEMD_UNIT_NAME}"
+    install -m 644 "${PREFIX}/argusd.service" "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
+    systemctl daemon-reload
+    log "start with: systemctl enable --now ${SYSTEMD_UNIT_NAME}"
 fi
 
 log "done:"
