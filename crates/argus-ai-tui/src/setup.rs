@@ -417,7 +417,10 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
     ];
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), area);
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn draw_provider(f: &mut Frame, area: Rect, state: &SetupState) {
