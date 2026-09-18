@@ -7,9 +7,9 @@
 # running as root on a systemd host).
 #
 # Usage:
-#   curl -fsSL https://argus.0x-ai.com | sh
-#   ARGUS_VERSION=0.1.0 sh install.sh
-#   sh install.sh --version 0.1.0
+#   curl -fsSL https://argus.0x-ai.com/install.sh | bash
+#   ARGUS_VERSION=0.1.0 bash install.sh
+#   bash install.sh --version 0.1.0
 #
 set -euo pipefail
 
