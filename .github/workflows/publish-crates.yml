@@ -104,7 +104,7 @@ jobs:
               order.append(n)
           for n in sorted(pkgs):
               visit(n)
-          print("\n".join(order))
+          print("\n".join(f"{n} {pkgs[n]['version']}" for n in order))
           PYEOF
           )
 
@@ -113,8 +113,14 @@ jobs:
             exit 1
           fi
 
-          for package in "${packages[@]}"; do
-            echo "Publishing ${package}..."
+          for entry in "${packages[@]}"; do
+            package="${entry%% *}"
+            version="${entry##* }"
+            if curl -fsS "https://crates.io/api/v1/crates/${package}/${version}" >/dev/null 2>&1; then
+              echo "Skipping ${package} ${version} (already published)."
+              continue
+            fi
+            echo "Publishing ${package} ${version}..."
             cargo publish --package "${package}" --locked
             echo "Waiting briefly for crates.io index propagation..."
             sleep 10
