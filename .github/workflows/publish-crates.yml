@@ -86,12 +86,29 @@ jobs:
             exit 1
           fi
 
+          cargo metadata --format-version 1 --no-deps > /tmp/argus-packages.json
           packages=()
           while IFS= read -r package; do
             packages+=("$package")
-          done < <(
-            cargo metadata --format-version 1 --no-deps \
-              | python3 -c 'import json,sys; m=json.load(sys.stdin); print("\\n".join(p["name"] for p in m["packages"]))'
+          done < <(python3 <<'PYEOF'
+          import json
+          m = json.load(open("/tmp/argus-packages.json"))
+          pkgs = {p["name"]: p for p in m["packages"]}
+          def deps(p):
+              return sorted(d["name"] for d in p.get("dependencies", []) if d.get("path"))
+          order = []
+          seen = set()
+          def visit(n):
+              if n in seen:
+                  return
+              seen.add(n)
+              for d in deps(pkgs[n]):
+                  visit(d)
+              order.append(n)
+          for n in sorted(pkgs):
+              visit(n)
+          print("\n".join(order))
+          PYEOF
           )
 
           if [[ ${#packages[@]} -eq 0 ]]; then
