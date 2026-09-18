@@ -97,7 +97,16 @@ ARGUS_VERSION=0.1.3 curl -fsSL https://argus.0x-ai.com | sh
 cargo install argus-ai-cli argus-daemon
 ```
 
-This installs the `argus` CLI and the `argusd` daemon from crates.io.
+This installs the `argus` CLI and the `argusd` daemon from crates.io into
+`~/.cargo/bin`. To use the packaged systemd unit (which expects `/usr/bin/argusd`),
+either install with `--root /usr`:
+
+```bash
+cargo install --root /usr argus-ai-cli argus-daemon
+```
+
+or point the unit at the cargo binary via `/etc/default/argusd` (see
+[Configuration](#configuration)).
 
 ### APT (Debian/Ubuntu)
 
@@ -157,8 +166,12 @@ argus config          # non-secret configuration
 
 ```bash
 argus            # status dashboard
-argus init       # interactive setup (writes argus.toml)
+argus init       # interactive setup: writes argus.toml + argus.secrets.toml
 ```
+
+`argus init` opens a setup wizard covering the bootstrap paths plus the AI
+provider configuration (provider, model, fallback models, base URL, and API
+token). See [Configuration](#configuration).
 
 ### Self-update
 
@@ -180,6 +193,57 @@ argus upgrade     # verifies artifacts before install (bootstrap skeleton)
 | `--log-format` | `text` | `text` or `json` |
 
 Log filtering uses `RUST_LOG` (default `argus=info`).
+
+### `argus init` files
+
+The setup wizard writes two files to the current directory:
+
+- **`argus.toml`** — non-secret bootstrap and AI provider settings:
+
+  ```toml
+  socket_path = "/run/argus/argusd.sock"
+  state_path = "/var/lib/argus/argus.db"
+  environment_name = "default"
+
+  [model]
+  provider = "openai"
+  model = "gpt-4.1"
+  fallback_models = ["gpt-4.1-mini"]
+  # base_url = "https://api.openai.com/v1"   # optional
+  ```
+
+- **`argus.secrets.toml`** — the provider API token, written with mode `0600`:
+
+  ```toml
+  api_token = "sk-..."
+  ```
+
+Secrets are deliberately kept out of `argus.toml` and out of `argus config`
+(which redacts secret values by construction).
+
+### Model providers
+
+Providers are replaceable adapters behind the `ModelProvider` trait in
+`argus-ai-core` ([ADR-014](docs/adr/0014-llm-provider-abstraction.md)). The
+`provider` id (`openai`, `anthropic`, `ollama`, …) selects the adapter;
+`model` and `fallback_models` select the primary and fallback models. The
+bootstrap ships the abstraction and configuration boundary; completion,
+streaming, and tool calling arrive with the AI/planning runtime.
+
+### systemd unit
+
+The packaged `argusd.service` runs `/usr/bin/argusd`. To run a binary installed
+elsewhere, override the path in `/etc/default/argusd`:
+
+```sh
+ARGUSD_BINARY=/home/user/.cargo/bin/argusd
+```
+
+then reload and restart:
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart argusd
+```
 
 ## Security model
 

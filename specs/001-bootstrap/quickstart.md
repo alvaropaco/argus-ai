@@ -34,52 +34,73 @@ argus --version
 
 **Expected:** prints `argus <semver>` (acceptance criterion 1).
 
-## Scenario 3 — Daemon starts and becomes ready (no systemd)
+## Scenario 3 — Interactive setup (`argus init`)
 
 ```bash
-argusd --config /tmp/argus/config.toml &
-argus health            # or: argus status
+argus init
 ```
 
-**Expected:** `argusd` initializes state (LanceDB), starts the local event bus, emits
-`argus.started` then `argus.ready`, and `argus health` returns `state: "Ready"` over
-the Unix socket (acceptance criteria 4 & 5).
+**Expected:** a wizard opens with the bootstrap paths (socket, state,
+environment) and the AI provider fields (provider, model, fallback models, base
+URL, API token — masked on screen). Saving (Enter/Ctrl-S) writes two files to
+the current directory:
 
-## Scenario 4 — Privileged requests are rejected
+- `argus.toml` — non-secret config, including a `[model]` section;
+- `argus.secrets.toml` — the API token, mode `0600`.
+
+The token never appears in `argus.toml` or in `argus config` output.
+
+## Scenario 4 — Daemon starts and becomes ready (no systemd)
 
 ```bash
-# as a peer not in the authorized UID set (or an unknown operation)
-argus exec '{"operation":"host.process.signal", …}'
+argusd --socket /tmp/argus/argusd.sock --state /tmp/argus/argus.db &
+argus --socket /tmp/argus/argusd.sock health   # or: status
 ```
 
-**Expected:** `DENIED` / `UNAUTHORIZED` / `UNKNOWN_OPERATION` — no privileged
-operation crosses the policy/executor boundary (acceptance criterion 5, spec § 8).
+**Expected:** `argusd` initializes state (SQLite interim backend), starts the
+local event bus, emits `argus.started` then `argus.ready`, and
+`argus health` returns `state: "Ready"` over the Unix socket (acceptance
+criteria 4 & 5).
 
-## Scenario 5 — Graceful degradation (optional components absent)
+## Scenario 5 — Privileged requests are rejected
+
+The bootstrap exposes only read-only capabilities; there is no privileged
+execution path yet:
+
+```bash
+argus capabilities
+```
+
+**Expected:** only the four read-only capabilities are listed
+(`host.status.read`, `argus.health.read`, `argus.config.read`,
+`argus.plugins.list`); no privileged operation crosses the policy/executor
+boundary (acceptance criterion 5, spec § 8).
+
+## Scenario 6 — Graceful degradation (optional components absent)
 
 Run with no NATS configured and no OpenTelemetry exporter:
 
 ```bash
-argusd --config /tmp/argus/minimal.toml
+argusd --socket /tmp/argus/minimal.sock --state /tmp/argus/minimal.db
 ```
 
-**Expected:** daemon reports `Ready` (or `Degraded` only if LanceDB init fails),
+**Expected:** daemon reports `Ready` (or `Degraded` only if state init fails),
 local structured logs continue, and the local event bus still delivers
 `argus.ready`/`plugin.*` events (acceptance criterion 6, FR-006).
 
-## Scenario 6 — Plugin/MCP discovery boundary
+## Scenario 7 — Plugin/MCP discovery boundary
 
 ```bash
-argus plugins list
-argus capabilities list
+argus plugins
+argus capabilities
 ```
 
-**Expected:** `capabilities.list` returns the four bootstrap capabilities
+**Expected:** `argus capabilities` returns the four bootstrap capabilities
 (`host.status.read`, `argus.health.read`, `argus.config.read`, `argus.plugins.list`);
 a failing plugin surfaces as `plugin.failed` + `state: Failed` while the core stays
 available (spec § 9, acceptance criterion 9).
 
-## Scenario 7 — systemd packaging (Linux + systemd)
+## Scenario 8 — systemd packaging (Linux + systemd)
 
 ```bash
 sudo systemctl enable --now argusd
@@ -91,7 +112,10 @@ argus health
 `ProtectHome`, `PrivateTmp`) is active; `argusd` starts, health is queryable, and an
 unexpected exit is restarted by systemd (acceptance criteria 3 & 8, spec § 9).
 
-## Scenario 8 — Observability
+The unit runs `/usr/bin/argusd`; to use a binary installed elsewhere, set
+`ARGUSD_BINARY` in `/etc/default/argusd` (see `deploy/debian/argusd.default`).
+
+## Scenario 9 — Observability
 
 With `tracing` configured, exercise `argus health` and confirm structured logs carry
 a `correlation_id` matching the request; with OTLP configured, confirm a trace/span
