@@ -1,0 +1,19 @@
+[package]
+name = "argus-ipc"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Versioned Unix-socket IPC protocol between argus and argusd"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+semver = { workspace = true }
+tracing = { workspace = true }
+argus-domain = { workspace = true }
+
+[lints]
+workspace = true

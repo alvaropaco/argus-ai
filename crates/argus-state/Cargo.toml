@@ -1,0 +1,33 @@
+[package]
+name = "argus-state"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS persistence abstraction (DomainRepository) over SQLite, with optional LanceDB"
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+argus-domain = { workspace = true }
+
+# Optional LanceDB backend (the ADR-011 target), disabled by default so the
+# default build stays lean. lancedb 0.38.0 has an upstream compile bug
+# (`job.rs` references `Error::Http`, gated behind `remote`), hence the feature.
+futures = { version = "0.3", optional = true }
+lancedb = { version = "0.38.0", features = ["remote"], optional = true }
+
+[features]
+default = []
+lancedb = ["dep:lancedb", "dep:futures"]
+
+[dev-dependencies]
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

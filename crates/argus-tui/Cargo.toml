@@ -1,0 +1,21 @@
+[package]
+name = "argus-tui"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS terminal user interface (Ratatui + Crossterm), presentation only"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+argus-ipc = { workspace = true }
+
+[lints]
+workspace = true

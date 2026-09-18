@@ -1,0 +1,21 @@
+[package]
+name = "argus-events"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Transport-independent domain events and the local event bus"
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+argus-domain = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

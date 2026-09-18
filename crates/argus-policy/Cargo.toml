@@ -1,0 +1,19 @@
+[package]
+name = "argus-policy"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS policy boundary: deterministic authorization evaluation"
+
+[dependencies]
+argus-domain = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+semver = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

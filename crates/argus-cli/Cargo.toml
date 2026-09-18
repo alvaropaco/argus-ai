@@ -1,0 +1,23 @@
+[package]
+name = "argus-cli"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS command-line interface"
+
+[[bin]]
+name = "argus"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+argus-ipc = { workspace = true }
+argus-tui = { workspace = true }
+
+[lints]
+workspace = true

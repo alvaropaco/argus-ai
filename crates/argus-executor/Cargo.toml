@@ -1,0 +1,22 @@
+[package]
+name = "argus-executor"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS typed, policy-authorized execution boundary"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+argus-domain = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+semver = { workspace = true }
+argus-policy = { workspace = true }
+
+[lints]
+workspace = true
