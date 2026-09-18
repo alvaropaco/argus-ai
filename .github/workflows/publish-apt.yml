@@ -96,7 +96,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo deb --package argus-ai --target ${{ matrix.target }} --no-build
+          cargo deb --package argus-cli --target ${{ matrix.target }} --no-build
+          cargo deb --package argus-daemon --target ${{ matrix.target }} --no-build
           mkdir -p dist
           find target/${{ matrix.target }}/debian -maxdepth 1 -name '*.deb' -type f -exec cp {} dist/ \;
 

@@ -81,24 +81,18 @@ jobs:
           set -euo pipefail
           tag='${{ steps.meta.outputs.tag }}'
           version="${tag#v}"
-          mkdir -p dist
+          mkdir -p dist stage
 
-          binaries=()
           for candidate in argus argusd; do
             if [[ -f "target/${{ matrix.target }}/release/${candidate}" ]]; then
-              binaries+=("${candidate}")
+              cp "target/${{ matrix.target }}/release/${candidate}" stage/
             fi
           done
 
-          if [[ ${#binaries[@]} -eq 0 ]]; then
-            binary="$(find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -perm -111 -print -quit)"
-            test -n "$binary"
-            binaries+=("$(basename "$binary")")
-          fi
+          # Bundle the systemd unit so the installer can set up the service.
+          cp deploy/debian/argusd.service stage/
 
-          tar -C "target/${{ matrix.target }}/release" \
-            -czf "dist/argus-${version}-${{ matrix.asset }}.tar.gz" \
-            "${binaries[@]}"
+          tar -C stage -czf "dist/argus-${version}-${{ matrix.asset }}.tar.gz" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
