@@ -30,3 +30,15 @@ argus-events = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.deb]
+name = "argusd"
+maintainer = "ARGUS AI <maintainers@argus.0x-ai.com>"
+section = "utils"
+priority = "optional"
+extended-description = "ARGUS autonomous infrastructure operations runtime daemon"
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "../../deploy/debian"
+unit-name = "argusd"
+enable = true
