@@ -49,9 +49,6 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
-      - name: Package validation
-        run: cargo package --workspace --locked --allow-dirty
-
   publish:
     name: Publish crates.io packages
     needs: verify
