@@ -185,12 +185,10 @@ pub fn run(defaults: SetupConfig) -> Result<()> {
                         state.set_field_value(value);
                     }
                 }
-                KeyCode::Char(c) => {
-                    if state.step != Step::Provider && state.field_count() > 0 {
-                        let mut value = state.field_value();
-                        value.push(c);
-                        state.set_field_value(value);
-                    }
+                KeyCode::Char(c) if state.step != Step::Provider && state.field_count() > 0 => {
+                    let mut value = state.field_value();
+                    value.push(c);
+                    state.set_field_value(value);
                 }
                 _ => {}
             }
