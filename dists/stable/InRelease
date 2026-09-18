@@ -4,35 +4,35 @@ Hash: SHA512
 Origin: ARGUS AI
 Label: ARGUS AI
 Codename: stable
-Date: Fri, 18 Sep 2026 16:20:57 UTC
+Date: Fri, 18 Sep 2026 17:41:40 UTC
 Architectures: amd64 arm64
 Components: main
 Description: Official ARGUS AI APT repository
 MD5Sum:
- a65717bb27e98a797ada406865429af3 1117 main/binary-amd64/Packages
- dfc34dc1e360b8720190e978d9e2fcb4 563 main/binary-amd64/Packages.gz
+ 1b14d5b473a7aae8778f4092abc5f582 1117 main/binary-amd64/Packages
+ d982136a9adf63fb401ca3fda181c03e 565 main/binary-amd64/Packages.gz
  8a930c486a9b4e1018e19f85f21b1c4d 115 main/binary-amd64/Release
- 76bcccc048cc2817b118b804176abe0a 1129 main/binary-arm64/Packages
- e2c6fba9a92626a10b3422cdba7a3b8e 559 main/binary-arm64/Packages.gz
+ ab8375a432876ac4fda5076153c6934b 1129 main/binary-arm64/Packages
+ ea560570f5964179a64cac8fe4742b13 563 main/binary-arm64/Packages.gz
  a829804015b1cc356982f0b8da55dd61 115 main/binary-arm64/Release
 SHA1:
- beed9de9b1f1323d781c033818bb67621d2f1fc2 1117 main/binary-amd64/Packages
- eb23f14ec96bd425e351fdd111902e8d21015689 563 main/binary-amd64/Packages.gz
+ 66d526d94f1e3f7035afa400b98ed12a981a9b9b 1117 main/binary-amd64/Packages
+ 64a61510a8ac92807b56c1cc2b6343963b13fc18 565 main/binary-amd64/Packages.gz
  bbf1f1414df391a9c916b726f84c7f537fa41ac1 115 main/binary-amd64/Release
- 33a3439fa69beac203b5cb1689a40e423d2dabaf 1129 main/binary-arm64/Packages
- b7f20dad37a5dd1e817dc326349f51aa062687c0 559 main/binary-arm64/Packages.gz
+ 18c61e4b7b460f126b5e8c4d9babf4188ff8779f 1129 main/binary-arm64/Packages
+ 1fd2db23d0d2ba5c8cc5af5e97ee0d7b37914eb5 563 main/binary-arm64/Packages.gz
  d3f7e0ce686bb810b5116dab44e2738e830447b3 115 main/binary-arm64/Release
 SHA256:
- 9a88443f6d31bd3e94ddfd15bc827af458bba1770fe6df42f96e033d69aa82ae 1117 main/binary-amd64/Packages
- cd1fa78aaed7f51da7c96a8faacf4f48d2b2b22c0d590813408691b2673019dc 563 main/binary-amd64/Packages.gz
+ 46f4452536798672d22a4a04b64abffafc4d47c5ca18ef6fcb7efc358dca387c 1117 main/binary-amd64/Packages
+ 4fd5d3f352fc5110c2affe7bd9ce9b80baf88ff03bca3adce2e434ad98beb4e6 565 main/binary-amd64/Packages.gz
  0aa0b5aec7247d5231d59b65f10719c924620e6447735050814d2fed1f20b1e8 115 main/binary-amd64/Release
- e67346e309d6ca7eeb5cd146cc66a1a07d76579cabfb84e6cf81d37aa4a98e94 1129 main/binary-arm64/Packages
- 143543a8387779f637f694708f3fe1bf9f954c974466aa0fcae6e63d144bc5b5 559 main/binary-arm64/Packages.gz
+ a2e52967579af2811e8b9a12d2aa6683f089f278b4e6fbee647cd2efd93477ea 1129 main/binary-arm64/Packages
+ 3191aeabc7adba113339237096628296112184d8679cb59ad562a76829b65b48 563 main/binary-arm64/Packages.gz
  a5edbc59edc3f36e5a6124d83ae3c6fdddcf9b5ce2a60c2dec668af9f97b364f 115 main/binary-arm64/Release
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQTMp//8F3eEHgsQvjfqczJSO46WawUCaq1k6QAKCRDqczJSO46W
-a+VEAP450Rx4WyOcqGNt8PkX29tRE3TfHuc/pFXCAwk20DsjAAD/dsljIk1AL3ZQ
-5zZ6VnpwYdKZMhl7wxpEB3nU138kRg8=
-=gpp8
+iHUEARYKAB0WIQTMp//8F3eEHgsQvjfqczJSO46WawUCaq131AAKCRDqczJSO46W
+a8vSAQDIo+yjF5LEibl1/iHJRIn8BKWcd/Rw+JDCg1+UlCpFpgEAkek/7QiVu9Ox
+GUxlnDmF5EMmsl4CyN1NxAIQUIOFeAM=
+=JJDk
 -----END PGP SIGNATURE-----
