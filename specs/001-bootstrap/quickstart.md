@@ -112,8 +112,8 @@ argus health
 `ProtectHome`, `PrivateTmp`) is active; `argusd` starts, health is queryable, and an
 unexpected exit is restarted by systemd (acceptance criteria 3 & 8, spec § 9).
 
-The unit runs `/usr/bin/argusd`; to use a binary installed elsewhere, set
-`ARGUSD_BINARY` in `/etc/default/argusd` (see `deploy/debian/argusd.default`).
+The unit runs `/usr/bin/argusd`; to use a binary installed elsewhere, override
+`ExecStart` with a drop-in (`systemctl edit argusd`).
 
 ## Scenario 9 — Observability
 

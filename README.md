@@ -105,7 +105,7 @@ either install with `--root /usr`:
 cargo install --root /usr argus-ai-cli argus-daemon
 ```
 
-or point the unit at the cargo binary via `/etc/default/argusd` (see
+or override the unit's `ExecStart` with a systemd drop-in (see
 [Configuration](#configuration)).
 
 ### APT (Debian/Ubuntu)
@@ -233,16 +233,23 @@ streaming, and tool calling arrive with the AI/planning runtime.
 ### systemd unit
 
 The packaged `argusd.service` runs `/usr/bin/argusd`. To run a binary installed
-elsewhere, override the path in `/etc/default/argusd`:
-
-```sh
-ARGUSD_BINARY=/home/user/.cargo/bin/argusd
-```
-
-then reload and restart:
+elsewhere, override `ExecStart` with a drop-in:
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl restart argusd
+sudo systemctl edit argusd
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/home/user/.cargo/bin/argusd
+```
+
+(For a binary under `/home`, also relax `ProtectHome` in the same drop-in.)
+Then restart:
+
+```bash
+sudo systemctl restart argusd
 ```
 
 ## Security model

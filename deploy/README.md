@@ -36,8 +36,6 @@ before extraction, and installs `argus`/`argusd` plus the systemd unit.
 ## Packaging
 
 - `deploy/debian/argusd.service` — hardened systemd unit.
-- `deploy/debian/argusd.default` — optional `/etc/default/argusd` override of the
-  daemon binary path (`ARGUSD_BINARY`) for non-packaged installs.
 - `deploy/apt/` — Debian repository metadata and signing (see
   `deploy/apt/README.md`).
 
@@ -54,6 +52,14 @@ keep systemd working, either:
   cargo install --root /usr --path crates/argus-daemon
   ```
 
-- or point the unit at a cargo binary by writing `/etc/default/argusd`
-  (copy `deploy/debian/argusd.default`), which sets `ARGUSD_BINARY` and
-  `ARGUSD_OPTS`.
+- or override `ExecStart` with a systemd drop-in
+  (`systemctl edit argusd` creates `/etc/systemd/system/argusd.service.d/override.conf`):
+
+  ```ini
+  [Service]
+  ExecStart=
+  ExecStart=/home/user/.cargo/bin/argusd
+  ```
+
+  Note: with a binary under `/home`, you must also relax `ProtectHome` in the
+  drop-in (`ProtectHome=read-only` or `false`).
