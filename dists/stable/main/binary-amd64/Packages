@@ -1,0 +1,34 @@
+Package: argus
+Version: 0.1.0-1
+Architecture: amd64
+Homepage: https://github.com/alvaropaco/argus-ai
+Maintainer: ARGUS AI <maintainers@argus.0x-ai.com>
+Installed-Size: 1907
+Depends: libc6 (>= 2.39)
+Priority: optional
+Section: utils
+Filename: pool/main/a/argus/argus_0.1.0-1_amd64.deb
+Size: 656876
+SHA256: 1c92116237eca22b597e308971ba08b6c3ac2f538b87a6596c39f6c89cee6984
+SHA1: 2b10ea96229edbe62c2ae9fa935bfd040bf86e99
+MD5sum: 7bf8908a467d87ef24a9d92e92f2efb1
+Description: ARGUS command-line interface
+ ARGUS autonomous infrastructure operations CLI
+
+Package: argusd
+Version: 0.1.0-1
+Architecture: amd64
+Homepage: https://github.com/alvaropaco/argus-ai
+Maintainer: ARGUS AI <maintainers@argus.0x-ai.com>
+Installed-Size: 5692
+Depends: libc6 (>= 2.34)
+Priority: optional
+Section: utils
+Filename: pool/main/a/argusd/argusd_0.1.0-1_amd64.deb
+Size: 2033780
+SHA256: bbce82082b293599ae714ab187d5d1a211ec0ebe790eb58da309a97b68e589d9
+SHA1: d97c11a175e023223273a6891d08f247df1de640
+MD5sum: c108d255c22a0ae7436f84251bfe5db6
+Description: ARGUS privileged daemon (argusd)
+ ARGUS autonomous infrastructure operations runtime daemon
+

@@ -1,0 +1,7 @@
+Origin: ARGUS AI
+Label: ARGUS AI
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: Official ARGUS AI APT repository
+SignWith: CCA7FFFC1777841E0B10BE37EA7332523B8E966B

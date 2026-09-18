@@ -1,0 +1,5 @@
+Component: main
+Origin: ARGUS AI
+Label: ARGUS AI
+Architecture: amd64
+Description: Official ARGUS AI APT repository
