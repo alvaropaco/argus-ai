@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # ARGUS installer
 #
@@ -7,11 +7,11 @@
 # running as root on a systemd host).
 #
 # Usage:
-#   curl -fsSL https://argus.0x-ai.com/install.sh | bash
-#   ARGUS_VERSION=0.1.0 bash install.sh
-#   bash install.sh --version 0.1.0
+#   curl -fsSL https://argus.0x-ai.com/install.sh | sh
+#   ARGUS_VERSION=0.1.0 sh install.sh
+#   sh install.sh --version 0.1.0
 #
-set -euo pipefail
+set -eu
 
 REPO="alvaropaco/argus-ai"
 GITHUB="https://github.com/${REPO}"
@@ -42,7 +42,7 @@ EOF
 VERSION="${ARGUS_VERSION:-$DEFAULT_VERSION}"
 PREFIX="${BIN_DIR}"
 
-while [[ $# -gt 0 ]]; do
+while [ "$#" -gt 0 ]; do
     case "$1" in
         --version) VERSION="${2:?--version requires a value}"; shift 2 ;;
         --prefix)  PREFIX="${2:?--prefix requires a value}"; shift 2 ;;
@@ -65,10 +65,10 @@ case "$arch" in
 esac
 
 # Resolve version → release tag.
-if [[ "$VERSION" == "latest" ]]; then
+if [ "$VERSION" = "latest" ]; then
     log "resolving latest version"
     tag="$(curl -fsSL --proto '=https' "${API}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
-    [[ -n "$tag" ]] || { err "could not resolve latest version"; exit 1; }
+    if [ -z "$tag" ]; then err "could not resolve latest version"; exit 1; fi
 else
     tag="v${VERSION#v}"
 fi
@@ -96,7 +96,7 @@ mkdir -p "$PREFIX"
 tar -xzf "${workdir}/${tarball}" -C "$PREFIX"
 
 # Install the systemd unit when running as root on a systemd host.
-if [[ "$(id -u)" -eq 0 ]] && command -v systemctl >/dev/null 2>&1 && [[ -f "${PREFIX}/argusd.service" ]]; then
+if [ "$(id -u)" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -f "${PREFIX}/argusd.service" ]; then
     log "installing ${SYSTEMD_UNIT_NAME}"
     install -m 644 "${PREFIX}/argusd.service" "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
     systemctl daemon-reload
