@@ -3,18 +3,57 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="ARGUS AI — autonomous infrastructure operations runtime for Linux and Unix.">
-<title>ARGUS AI — Autonomous Infrastructure Operations</title>
+<meta name="description" content="ARGUS AI — AI-native, open-source DevOps and autonomous infrastructure operations.">
+<title>ARGUS AI — AI-Native DevOps</title>
 <style>
-:root{--bg:#0b0d10;--panel:#12161b;--panel2:#171c22;--text:#e8edf2;--muted:#9ba7b4;--line:#29313a;--accent:#7dd3fc;--accent2:#38bdf8;--code:#0a0c0f;--max:1120px}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.wrap{max-width:var(--max);margin:auto;padding:0 24px}header{border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(11,13,16,.92);backdrop-filter:blur(12px);z-index:5}.nav{height:64px;display:flex;align-items:center;justify-content:space-between}.brand{font-weight:800;letter-spacing:.08em}.navlinks{display:flex;gap:22px;font-size:14px}.hero{padding:96px 0 72px;max-width:900px}.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.12em;font-size:12px}.hero h1{font-size:clamp(42px,7vw,76px);line-height:1.02;margin:14px 0 20px;letter-spacing:-.04em}.hero p{font-size:20px;color:var(--muted);max-width:780px}.buttons{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}.button{display:inline-block;padding:11px 18px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}.button.primary{background:var(--accent2);border-color:var(--accent2);color:#03131b;font-weight:700}section{padding:64px 0;border-top:1px solid var(--line)}h2{font-size:32px;line-height:1.15;margin:0 0 12px}h3{margin-top:28px}.lead{color:var(--muted);max-width:760px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:28px}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px}.card h3{margin:0 0 8px}.card p{color:var(--muted);margin:0}pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:18px;overflow:auto;color:#dbe7ef}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}.arch{display:grid;grid-template-columns:1fr 1fr;gap:20px}.toc{display:flex;gap:18px;flex-wrap:wrap;margin-top:20px;font-size:14px}@media(max-width:760px){.grid,.arch{grid-template-columns:1fr}.navlinks{display:none}.hero{padding-top:64px}}
+:root{--bg:#071016;--bg2:#09141b;--panel:rgba(10,20,27,.82);--panel2:#0d1921;--text:#f2f5f7;--muted:#9baab5;--line:#1d303b;--orange:#ff641f;--orange2:#ff8a24;--green:#65d38a;--max:1240px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.34;background-image:linear-gradient(rgba(89,139,160,.12) 1px,transparent 1px),linear-gradient(90deg,rgba(89,139,160,.12) 1px,transparent 1px);background-size:76px 76px;mask-image:linear-gradient(to bottom,#000,transparent 88%);z-index:-1}
+a{color:inherit;text-decoration:none}.wrap{max-width:var(--max);margin:auto;padding:0 28px}
+header{height:78px;border-bottom:1px solid var(--line);background:rgba(7,16,22,.84);backdrop-filter:blur(16px);position:sticky;top:0;z-index:20}.nav{height:100%;display:flex;align-items:center;gap:38px}.brand img{display:block;width:164px;height:auto}.navlinks{display:flex;align-items:center;justify-content:center;gap:34px;flex:1}.navlinks a{color:#c9d2d8;font-size:14px}.navlinks a:hover{color:#fff}.navlinks a.active{color:var(--orange);font-weight:700}
+.nav-actions{display:flex;align-items:center;gap:12px}.github,.button{border:1px solid var(--line);border-radius:12px;padding:11px 18px;background:rgba(11,22,29,.8);color:#e9eef1;font-weight:600}.github:hover,.button:hover{border-color:#35505e}.button.primary{background:linear-gradient(135deg,var(--orange2),var(--orange));border-color:transparent;color:white;box-shadow:0 10px 30px rgba(255,91,25,.18)}.icon{width:17px;height:17px;vertical-align:-3px;margin-right:8px}
+.hero{text-align:center;padding:58px 0 68px}.hero-logo{width:min(620px,78vw);margin:0 auto 20px}.hero-logo img{width:100%;display:block}.kicker{display:inline-flex;padding:5px 11px;border:1px solid #3a3029;border-radius:999px;background:rgba(255,100,31,.07);color:#ff9a61;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.hero h1{font-size:clamp(34px,5vw,58px);line-height:1.08;letter-spacing:-.045em;margin:20px 0 14px}.hero h1 span{color:var(--orange)}.hero p{max-width:790px;margin:0 auto;color:var(--muted);font-size:18px;line-height:1.7}.buttons{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:28px}.button{padding:13px 22px}.button.primary{min-width:165px}
+.features{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;padding:10px 0 52px}.feature{text-align:center;padding:18px 10px}.feature-icon{width:46px;height:46px;display:grid;place-items:center;margin:0 auto 10px;border:1px solid #29404d;border-radius:11px;background:#0c1921;color:var(--orange)}.feature svg{width:22px;height:22px}.feature strong{display:block;font-size:15px}.feature small{color:var(--muted);font-size:12px}
+.section{padding:72px 0;border-top:1px solid var(--line)}.eyebrow{color:var(--orange);font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.section h2{font-size:clamp(30px,4vw,42px);line-height:1.12;letter-spacing:-.035em;margin:9px 0 14px}.lead{max-width:760px;color:var(--muted);font-size:17px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:stretch}.terminal{border:1px solid #273c48;border-radius:15px;background:#071017;box-shadow:0 20px 70px rgba(0,0,0,.28);overflow:hidden}.terminal-head{height:40px;display:flex;align-items:center;gap:7px;padding:0 14px;border-bottom:1px solid #1b2b34;color:#7f929e;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.dot{width:9px;height:9px;border-radius:50%;background:#ef5b52}.dot.y{background:#f1b94e}.dot.g{background:#69c56d}.terminal-body{padding:20px;color:#dce6eb;font:13px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace}.ok{color:var(--green)}.prompt{color:var(--orange)}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:28px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}.card h3{margin:0 0 8px;font-size:17px}.card p{margin:0;color:var(--muted)}
+.arch{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:28px}pre{margin:0;background:#050b0f;border:1px solid var(--line);border-radius:12px;padding:20px;overflow:auto;color:#dbe5ea}code{font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}.pill{display:inline-block;margin:4px 5px 0 0;padding:5px 9px;border:1px solid var(--line);border-radius:999px;color:#b8c6cd;font-size:12px}
+footer{border-top:1px solid var(--line);padding:30px 0 42px;color:#73838d;font-size:13px}
+@media(max-width:900px){.navlinks{display:none}.nav{justify-content:space-between}.features{grid-template-columns:repeat(3,1fr)}.two-col,.arch{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.wrap{padding:0 18px}header{height:68px}.brand img{width:132px}.github{display:none}.features,.cards{grid-template-columns:1fr 1fr}.hero{padding-top:42px}.hero p{font-size:16px}.section{padding:54px 0}}
 </style>
 </head>
 <body>
-<header><div class="wrap nav"><a class="brand" href="#top">ARGUS AI</a><nav class="navlinks"><a href="#overview">Overview</a><a href="#architecture">Architecture</a><a href="#install">Install</a><a href="#development">Development</a><a href="https://github.com/alvaropaco/argus-ai">GitHub</a></nav></div></header>
+<header><div class="wrap nav">
+<a class="brand" href="#top"><img src="argus-logo.svg" alt="ARGUS AI"></a>
+<nav class="navlinks"><a class="active" href="#top">Home</a><a href="#overview">Features</a><a href="#architecture">Architecture</a><a href="#install">Docs</a><a href="#community">Community</a><a href="https://github.com/alvaropaco/argus-ai">GitHub</a></nav>
+<div class="nav-actions"><a class="github" href="https://github.com/alvaropaco/argus-ai">GitHub</a><a class="button primary" href="#install">Get Started →</a></div>
+</div></header>
+
 <main id="top"><div class="wrap">
-<section class="hero" style="border-top:0"><div class="eyebrow">Autonomous Infrastructure Operations</div><h1>Observe. Reason. Heal. Evolve.</h1><p>ARGUS AI is a Rust-native autonomous infrastructure operations runtime for Linux and Unix. It discovers environments, builds an evidence-backed infrastructure model, reasons about incidents, plans changes, enforces policy, executes permitted actions, and validates outcomes.</p><div class="buttons"><a class="button primary" href="#install">Get started</a><a class="button" href="https://github.com/alvaropaco/argus-ai">View source</a></div><div class="toc"><a href="#overview">What is ARGUS?</a><a href="#architecture">Architecture</a><a href="#security">Security</a><a href="#development">Development</a></div></section>
-<section id="overview"><h2>What is ARGUS?</h2><p class="lead">ARGUS is an infrastructure control plane designed to operate heterogeneous systems continuously. Kubernetes is supported, but is not a prerequisite or the definition of the product.</p><div class="grid"><article class="card"><h3>Discover</h3><p>Understand hosts, kernels, processes, cgroups, namespaces, containers, services, networks, storage, databases, Kubernetes workloads and dependencies.</p></article><article class="card"><h3>Reason</h3><p>Combine observations, telemetry, history, policies and LLM reasoning to form hypotheses and operational plans.</p></article><article class="card"><h3>Operate</h3><p>Execute typed capabilities through a privileged, policy-controlled Rust boundary and verify the resulting state.</p></article></div></section>
-<section id="architecture"><h2>Architecture</h2><p class="lead">The runtime separates intelligence from authority. Infrastructure-specific functionality lives behind adapters, capabilities and plugins.</p><div class="arch"><div><h3>Autonomous control loop</h3><pre><code>Observe
+<section class="hero">
+<div class="hero-logo"><img src="argus-logo.svg" alt="ARGUS AI"></div>
+<div class="kicker">Open Source · Local First · Modular</div>
+<h1><span>AI-Native DevOps</span> for a More Secure Tomorrow</h1>
+<p>ARGUS brings AI agents, observability, security and automation together to continuously understand, operate and protect your infrastructure.</p>
+<div class="buttons"><a class="button primary" href="#install">🚀 Get Started →</a><a class="button" href="https://github.com/alvaropaco/argus-ai">◉ View on GitHub</a></div>
+</section>
+
+<section class="features" aria-label="ARGUS highlights">
+<div class="feature"><div class="feature-icon">〉_</div><strong>AI Agents</strong><small>Automate operations</small></div>
+<div class="feature"><div class="feature-icon">♢</div><strong>Security First</strong><small>Built-in protection</small></div>
+<div class="feature"><div class="feature-icon">◇</div><strong>Modular</strong><small>Plugin-based architecture</small></div>
+<div class="feature"><div class="feature-icon">⚙</div><strong>Local-First</strong><small>Runs on your infrastructure</small></div>
+<div class="feature"><div class="feature-icon">♧</div><strong>Open Source</strong><small>Community driven</small></div>
+</section>
+
+<section class="section" id="overview"><div class="two-col">
+<div><div class="eyebrow">What is ARGUS?</div><h2>Your AI-Powered Infrastructure Companion</h2><p class="lead">ARGUS is a Rust-native autonomous infrastructure operations runtime. It discovers your environment, correlates evidence, reasons about incidents, plans changes, enforces policy, executes permitted actions and validates the outcome.</p><div class="buttons" style="justify-content:flex-start"><a class="button primary" href="#architecture">Explore Architecture →</a></div></div>
+<div class="terminal"><div class="terminal-head"><span class="dot"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:8px">argus</span><span style="margin-left:auto;color:#65d38a">● Connected</span></div><div class="terminal-body"><div><span class="prompt">$</span> argus status</div><br><div>ARGUS v0.1.0</div><div class="ok">✓ Agents: Running</div><div class="ok">✓ Security: Active</div><div class="ok">✓ Infrastructure: Healthy</div><div class="ok">✓ Observability: Enabled</div><br><div style="color:#718590">Autonomous control loop ready.</div></div></div>
+</div></section>
+
+<section class="section" id="architecture"><div class="eyebrow">Architecture</div><h2>Intelligence separated from authority</h2><p class="lead">AI can reason and propose. Deterministic policy and the privileged Rust boundary decide what may execute.</p>
+<div class="arch"><pre><code><span class="prompt">Observe</span>
   ↓
 Correlate
   ↓
@@ -29,7 +68,7 @@ Execute
 Validate
   ↓
 Learn / Record
-  └──────────────→ Observe</code></pre></div><div><h3>Security boundary</h3><pre><code>AI / Agent
+  └──────────────→ Observe</code></pre><pre><code>AI / Agent
     │
     │ Capability Request
     ▼
@@ -43,36 +82,17 @@ argusd
 Executor
     │
     ▼
-Linux / Unix / Cloud / K8s</code></pre></div></div><h3>Domain model</h3><pre><code>Environment
- ├── Host ── Kernel / CPU / Memory / Storage / Network
- ├── Process ── cgroup / namespace / socket / filesystem
- ├── Service
- ├── Container
- ├── Workload
- ├── Dependency
- ├── Endpoint
- ├── Observation / Evidence
- ├── Incident / Hypothesis
- ├── Intent / Plan / Action / Execution
- ├── Capability / Policy
- ├── Agent / Plugin
- └── Event</code></pre><p>Linux kernel interfaces are treated as first-class sources of truth. Kubernetes adds a control-plane/domain layer and is correlated down to nodes, containers, cgroups, PIDs, namespaces and kernel evidence where possible.</p></section>
-<section id="security"><h2>Security model</h2><p class="lead">LLM output is data, never authority. Autonomous operation is constrained by deterministic policy and execution controls.</p><div class="grid"><article class="card"><h3>Least privilege</h3><p>The privileged daemon owns sensitive operations. Capabilities declare the access they require.</p></article><article class="card"><h3>Policy before execution</h3><p>Actions are evaluated for principal, target, risk, blast radius, autonomy level, approvals and operational constraints.</p></article><article class="card"><h3>Auditability</h3><p>Plans, policy decisions, actions, executions and evidence form an auditable operational history.</p></article></div></section>
-<section id="install"><h2>Installation</h2><p class="lead">The product is intended to run as a native Linux/Unix service. Additional package channels are being prepared alongside the source distribution.</p><h3>Installer</h3><pre><code>curl -fsSL https://argus.0x-ai.com | sh
-argus init</code></pre><h3>APT</h3><pre><code>sudo apt update
-sudo apt install argus</code></pre><h3>Rust</h3><pre><code>cargo install argus-ai</code></pre><p>APT and release packages are published through the project's automated release pipeline. Package availability depends on the current release.</p></section>
-<section id="development"><h2>Development</h2><p class="lead">ARGUS is organized as a Rust workspace with explicit architectural boundaries and specification-driven development.</p><pre><code>argus-ai/
-├── .specify/              # SpecKit constitution and templates
-├── docs/adr/              # Architectural decisions
-├── docs/architecture/     # Architecture and domain model
-├── specs/                 # Feature specifications
-├── crates/                # Rust workspace
-├── deploy/                # Packaging and deployment
-└── .github/workflows/     # CI, security and releases</code></pre><h3>Quality gates</h3><pre><code>cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
-cargo build
-cargo audit</code></pre><h3>Core principles</h3><ul><li>Rust-native core and privileged execution boundary.</li><li>AI reasoning is separated from privileged authority.</li><li>Kernel-native evidence is preferred over CLI parsing.</li><li>Kubernetes is an adapter/control-plane domain, not a prerequisite.</li><li>Plugins extend capabilities without coupling infrastructure-specific logic to the core.</li><li>Observed evidence remains distinct from inferred state.</li></ul></section>
-<section><h2>Project status</h2><p class="lead">ARGUS is under active development. Architecture, ADRs, specifications, CI/CD and packaging foundations are being established before the core runtime implementation is completed.</p><div class="buttons"><a class="button primary" href="https://github.com/alvaropaco/argus-ai">GitHub repository</a><a class="button" href="https://github.com/alvaropaco/argus-ai/releases">Releases</a></div></section>
-</div></main><footer><div class="wrap" style="padding:28px 24px;color:var(--muted);font-size:13px">ARGUS AI · Autonomous Infrastructure Operations Runtime</div></footer>
+Linux / Unix / Cloud / K8s</code></pre></div>
+<div class="cards"><article class="card"><h3>Kernel-native evidence</h3><p>Prefer first-class Linux kernel interfaces over fragile CLI parsing wherever possible.</p></article><article class="card"><h3>Pluggable capabilities</h3><p>Adapters, agents and plugins extend the runtime without coupling infrastructure-specific logic to the core.</p></article><article class="card"><h3>Evidence-backed state</h3><p>Observed evidence remains distinct from inferred state, hypotheses and AI-generated reasoning.</p></article></div>
+</section>
+
+<section class="section" id="security"><div class="eyebrow">Security</div><h2>Autonomy with guardrails</h2><p class="lead">LLM output is treated as data, never authority. Every sensitive operation crosses explicit capability and policy boundaries.</p><div class="cards"><article class="card"><h3>Least privilege</h3><p>The privileged daemon owns sensitive operations. Capabilities declare the access they require.</p></article><article class="card"><h3>Policy before execution</h3><p>Evaluate principal, target, risk, blast radius, autonomy level, approvals and operational constraints.</p></article><article class="card"><h3>Full audit trail</h3><p>Plans, policy decisions, actions, executions and evidence form an auditable operational history.</p></article></div></section>
+
+<section class="section" id="install"><div class="eyebrow">Get Started</div><h2>Install ARGUS</h2><p class="lead">Run ARGUS as a native Linux/Unix service. Release packages and additional installation channels are being prepared.</p><div class="cards"><article class="card"><h3>Installer</h3><pre><code>curl -fsSL https://argus.0x-ai.com | sh
+argus init</code></pre></article><article class="card"><h3>APT</h3><pre><code>sudo apt update
+sudo apt install argus</code></pre></article><article class="card"><h3>From source</h3><pre><code>cargo install argus-ai</code></pre></article></div></section>
+
+<section class="section" id="community"><div class="eyebrow">Open Source</div><h2>Built in the open</h2><p class="lead">ARGUS is under active development. Architecture, ADRs, specifications, CI/CD and packaging foundations are being established around a Rust workspace.</p><div style="margin-top:22px"><span class="pill">Rust</span><span class="pill">AI Agents</span><span class="pill">DevOps</span><span class="pill">Observability</span><span class="pill">Security</span><span class="pill">Linux</span><span class="pill">Kubernetes</span><span class="pill">Open Source</span></div><div class="buttons" style="justify-content:flex-start"><a class="button primary" href="https://github.com/alvaropaco/argus-ai">Explore GitHub →</a><a class="button" href="https://github.com/alvaropaco/argus-ai/releases">Releases</a></div></section>
+</div></main>
+<footer><div class="wrap">ARGUS AI · AI-Native DevOps for a More Secure Tomorrow</div></footer>
 </body></html>
