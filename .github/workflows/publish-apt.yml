@@ -157,15 +157,18 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y reprepro gnupg
 
       - name: Import APT signing key
-        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          mkdir -p .gnupg
-          chmod 700 .gnupg
-          export GNUPGHOME="$PWD/.gnupg"
-          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          if [[ -z "${APT_GPG_PRIVATE_KEY:-}" ]]; then
+            echo "APT_GPG_PRIVATE_KEY not set; repository will be unsigned."
+          else
+            mkdir -p .gnupg
+            chmod 700 .gnupg
+            export GNUPGHOME="$PWD/.gnupg"
+            printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          fi
 
       - name: Prepare reprepro configuration
         shell: bash
@@ -188,15 +191,16 @@ jobs:
           reprepro includedeb stable pool/main/a/argus/*.deb
 
       - name: Export public key
-        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          export GNUPGHOME="$PWD/.gnupg"
-          gpg --armor --export > apt-pages/argus-archive-keyring.asc
-          gpg --export > apt-pages/argus-archive-keyring.gpg
+          if [[ -n "${APT_GPG_PRIVATE_KEY:-}" ]]; then
+            export GNUPGHOME="$PWD/.gnupg"
+            gpg --armor --export > apt-pages/argus-archive-keyring.asc
+            gpg --export > apt-pages/argus-archive-keyring.gpg
+          fi
 
       - name: Generate repository checksums
         shell: bash
