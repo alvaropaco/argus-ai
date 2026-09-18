@@ -4,7 +4,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -238,10 +238,7 @@ fn card(f: &mut Frame, area: Rect, title: &str, value: &str, style: Style) {
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                value,
-                style.add_modifier(Modifier::BOLD),
-            )),
+            Line::from(Span::styled(value, style.add_modifier(Modifier::BOLD))),
         ])
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true }),
