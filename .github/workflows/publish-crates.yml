@@ -116,7 +116,7 @@ jobs:
           for entry in "${packages[@]}"; do
             package="${entry%% *}"
             version="${entry##* }"
-            if curl -fsS "https://crates.io/api/v1/crates/${package}/${version}" >/dev/null 2>&1; then
+            if curl -fsS -A "argus-release" "https://crates.io/api/v1/crates/${package}/${version}" >/dev/null 2>&1; then
               echo "Skipping ${package} ${version} (already published)."
               continue
             fi
