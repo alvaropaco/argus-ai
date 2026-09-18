@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -303,10 +303,7 @@ fn draw_header(f: &mut Frame, area: Rect) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  First-time setup",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("  First-time setup", Style::default().fg(Color::DarkGray)),
         ]),
         Line::from("Configure the local runtime and AI provider."),
     ];
@@ -363,11 +360,7 @@ fn draw_step(f: &mut Frame, area: Rect, state: &SetupState) {
             area,
             "Environment",
             "Give this ARGUS installation a name.",
-            vec![(
-                "Name",
-                state.config.environment_name.clone(),
-                false,
-            )],
+            vec![("Name", state.config.environment_name.clone(), false)],
             state.field,
         ),
         Step::Provider => draw_provider(f, area, state),
@@ -410,9 +403,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from("ARGUS is ready to be configured."),
         Line::from(""),
-        Line::from(
-            "You will configure the environment, AI provider, model, and local storage.",
-        ),
+        Line::from("You will configure the environment, AI provider, model, and local storage."),
         Line::from(""),
         Line::from(Span::styled(
             "Secrets are stored separately from the main configuration.",
@@ -426,7 +417,12 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
     ];
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn draw_provider(f: &mut Frame, area: Rect, state: &SetupState) {
@@ -455,7 +451,11 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &SetupState) {
         };
         lines.push(Line::from(vec![
             Span::styled(
-                if i == state.provider_index { "› " } else { "  " },
+                if i == state.provider_index {
+                    "› "
+                } else {
+                    "  "
+                },
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(provider.name, style),
@@ -524,10 +524,7 @@ fn draw_form(
         };
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(
-                    *label,
-                    Style::default().fg(Color::DarkGray),
-                )),
+                Line::from(Span::styled(*label, Style::default().fg(Color::DarkGray))),
                 Line::from(Span::styled(displayed, style)),
             ])
             .block(Block::default().borders(Borders::BOTTOM)),
@@ -579,18 +576,12 @@ fn draw_review(f: &mut Frame, area: Rect, state: &SetupState) {
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: true }),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn labeled(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label:<12}"),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("{label:<12}"), Style::default().fg(Color::DarkGray)),
         Span::raw(value.to_owned()),
     ])
 }
