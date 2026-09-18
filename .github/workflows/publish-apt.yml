@@ -11,9 +11,6 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-
 concurrency:
   group: apt-release
   cancel-in-progress: false
@@ -35,15 +32,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve version
         id: meta
         shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            tag='${{ inputs.tag }}'
+            tag="${INPUT_TAG}"
           else
             tag="${GITHUB_REF_NAME}"
           fi
@@ -52,7 +51,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -72,7 +71,7 @@ jobs:
           EOF
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: apt-${{ matrix.arch }}
 
@@ -83,7 +82,7 @@ jobs:
           cargo test --workspace --all-features
 
       - name: Install cargo-deb
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
         with:
           tool: cargo-deb
 
@@ -102,7 +101,7 @@ jobs:
           find target/${{ matrix.target }}/debian -maxdepth 1 -name '*.deb' -type f -exec cp {} dist/ \;
 
       - name: Upload Debian package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: deb-${{ matrix.arch }}
           path: dist/*.deb
@@ -111,17 +110,21 @@ jobs:
     name: Publish APT repository
     needs: package
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve version
         id: meta
         shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            tag='${{ inputs.tag }}'
+            tag="${INPUT_TAG}"
           else
             tag="${GITHUB_REF_NAME}"
           fi
@@ -129,7 +132,7 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout gh-pages branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: gh-pages
           path: apt-pages
@@ -144,7 +147,7 @@ jobs:
           mkdir -p apt-pages/pool/main/a/argus
 
       - name: Download Debian packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: deb-*
           merge-multiple: true
