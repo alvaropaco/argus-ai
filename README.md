@@ -83,7 +83,9 @@ curl -fsSL https://argus.0x-ai.com | sh
 
 The installer detects your OS/architecture, downloads the matching release
 tarball from GitHub Releases, verifies its SHA-256 checksum, and installs
-`argus`, `argusd`, and the systemd unit.
+`argus`, `argusd`, and the systemd unit. When run as root on a systemd host, it
+also enables and starts `argusd`. Set `ARGUS_NO_START=1` to install without
+starting the daemon.
 
 Install a specific version:
 
