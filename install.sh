@@ -39,6 +39,7 @@ Options:
 
 Environment:
   ARGUS_VERSION       Version to install (overrides --version).
+  ARGUS_NO_START      Set to 1 to install the unit without starting argusd.
 EOF
 }
 
@@ -98,12 +99,24 @@ log "installing to ${PREFIX}"
 mkdir -p "$PREFIX"
 tar -xzf "${workdir}/${tarball}" -C "$PREFIX"
 
-# Install the systemd unit when running as root on a systemd host.
-if [ "$(id -u)" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -f "${PREFIX}/argusd.service" ]; then
-    log "installing ${SYSTEMD_UNIT_NAME}"
-    install -m 644 "${PREFIX}/argusd.service" "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
-    systemctl daemon-reload
-    log "start with: systemctl enable --now ${SYSTEMD_UNIT_NAME}"
+# Install and start the systemd unit when running as root on a systemd host.
+if [ -f "${PREFIX}/argusd.service" ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        err "not running as root; skipping systemd unit install (re-run with sudo to enable the service)"
+    elif ! command -v systemctl >/dev/null 2>&1; then
+        log "systemd not detected; start the daemon manually with: argusd"
+    else
+        log "installing ${SYSTEMD_UNIT_NAME}"
+        install -m 644 "${PREFIX}/argusd.service" "${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
+        systemctl daemon-reload
+        if [ "${ARGUS_NO_START:-0}" = "1" ]; then
+            log "service installed; start with: systemctl enable --now ${SYSTEMD_UNIT_NAME}"
+        else
+            log "enabling and starting ${SYSTEMD_UNIT_NAME}"
+            systemctl enable --now "${SYSTEMD_UNIT_NAME}" \
+                || err "could not start service; run: systemctl enable --now ${SYSTEMD_UNIT_NAME}"
+        fi
+    fi
 fi
 
 log "done:"
