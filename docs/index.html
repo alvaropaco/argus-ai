@@ -26,7 +26,7 @@ footer{border-top:1px solid var(--line);padding:30px 0 42px;color:#73838d;font-s
 <body>
 <header><div class="wrap nav">
 <a class="brand" href="#top"><img src="argus-logo.svg" alt="ARGUS AI"></a>
-<nav class="navlinks"><a class="active" href="#top">Home</a><a href="#overview">Features</a><a href="#architecture">Architecture</a><a href="#install">Docs</a><a href="#community">Community</a><a href="https://github.com/alvaropaco/argus-ai">GitHub</a></nav>
+<nav class="navlinks"><a class="active" href="#top">Home</a><a href="#overview">Features</a><a href="#architecture">Architecture</a><a href="#install">Install</a><a href="#usage">Usage</a><a href="#community">Community</a><a href="https://github.com/alvaropaco/argus-ai">GitHub</a></nav>
 <div class="nav-actions"><a class="github" href="https://github.com/alvaropaco/argus-ai">GitHub</a><a class="button primary" href="#install">Get Started →</a></div>
 </div></header>
 
@@ -49,7 +49,7 @@ footer{border-top:1px solid var(--line);padding:30px 0 42px;color:#73838d;font-s
 
 <section class="section" id="overview"><div class="two-col">
 <div><div class="eyebrow">What is ARGUS?</div><h2>Your AI-Powered Infrastructure Companion</h2><p class="lead">ARGUS is a Rust-native autonomous infrastructure operations runtime. It discovers your environment, correlates evidence, reasons about incidents, plans changes, enforces policy, executes permitted actions and validates the outcome.</p><div class="buttons" style="justify-content:flex-start"><a class="button primary" href="#architecture">Explore Architecture →</a></div></div>
-<div class="terminal"><div class="terminal-head"><span class="dot"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:8px">argus</span><span style="margin-left:auto;color:#65d38a">● Connected</span></div><div class="terminal-body"><div><span class="prompt">$</span> argus status</div><br><div>ARGUS v0.1.0</div><div class="ok">✓ Agents: Running</div><div class="ok">✓ Security: Active</div><div class="ok">✓ Infrastructure: Healthy</div><div class="ok">✓ Observability: Enabled</div><br><div style="color:#718590">Autonomous control loop ready.</div></div></div>
+<div class="terminal"><div class="terminal-head"><span class="dot"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:8px">argus</span><span style="margin-left:auto;color:#65d38a">● Connected</span></div><div class="terminal-body"><div><span class="prompt">$</span> argus status</div><div>{</div><div>&nbsp;&nbsp;"health": { "state": "ready" },</div><div>&nbsp;&nbsp;"environment_id": "073321ec-66ef-488e-…",</div><div>&nbsp;&nbsp;"plugin_count": 0,</div><div>&nbsp;&nbsp;"uptime_seconds": 24</div><div>}</div><br><div><span class="prompt">$</span> argus capabilities</div><div class="ok">host.status.read</div><div class="ok">argus.health.read</div><div class="ok">argus.config.read</div><div class="ok">argus.plugins.list</div></div></div>
 </div></section>
 
 <section class="section" id="architecture"><div class="eyebrow">Architecture</div><h2>Intelligence separated from authority</h2><p class="lead">AI can reason and propose. Deterministic policy and the privileged Rust boundary decide what may execute.</p>
@@ -88,9 +88,32 @@ Linux / Unix / Cloud / K8s</code></pre></div>
 
 <section class="section" id="security"><div class="eyebrow">Security</div><h2>Autonomy with guardrails</h2><p class="lead">LLM output is treated as data, never authority. Every sensitive operation crosses explicit capability and policy boundaries.</p><div class="cards"><article class="card"><h3>Least privilege</h3><p>The privileged daemon owns sensitive operations. Capabilities declare the access they require.</p></article><article class="card"><h3>Policy before execution</h3><p>Evaluate principal, target, risk, blast radius, autonomy level, approvals and operational constraints.</p></article><article class="card"><h3>Full audit trail</h3><p>Plans, policy decisions, actions, executions and evidence form an auditable operational history.</p></article></div></section>
 
-<section class="section" id="install"><div class="eyebrow">Get Started</div><h2>Install ARGUS</h2><p class="lead">Run ARGUS as a native Linux/Unix service. Release packages and additional installation channels are being prepared.</p><div class="cards"><article class="card"><h3>Installer</h3><pre><code>curl -fsSL https://argus.0x-ai.com/install.sh | sh
-argus init</code></pre></article><article class="card"><h3>APT</h3><pre><code>sudo apt update
-sudo apt install argus</code></pre></article><article class="card"><h3>From source</h3><pre><code>cargo install argus-ai</code></pre></article></div></section>
+<section class="section" id="install"><div class="eyebrow">Get Started</div><h2>Install ARGUS</h2><p class="lead">ARGUS ships as two binaries — <code>argus</code> (CLI/TUI) and <code>argusd</code> (privileged daemon) — plus a hardened systemd unit. Linux (x86_64 or aarch64), no Kubernetes/NATS/eBPF required.</p>
+<div class="cards">
+<article class="card"><h3>1 · Installer script (recommended)</h3><pre><code>curl -fsSL https://argus.0x-ai.com/install.sh | sudo sh</code></pre><p>Downloads the release tarball, verifies its SHA-256 checksum, installs to <code>/usr/bin</code>, and enables + starts <code>argusd</code>. Set <code>ARGUS_NO_START=1</code> to install without starting.</p></article>
+<article class="card"><h3>2 · APT (Debian/Ubuntu)</h3><pre><code>curl -fsSL https://argus.0x-ai.com/argus-archive-keyring.asc | sudo gpg --dearmor -o /usr/share/keyrings/argus-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/argus-archive-keyring.gpg] https://argus.0x-ai.com stable main" | sudo tee /etc/apt/sources.list.d/argus.list
+sudo apt update &amp;&amp; sudo apt install -y argus argusd</code></pre></article>
+<article class="card"><h3>3 · Cargo (crates.io)</h3><pre><code>cargo install argus-ai-cli argus-daemon</code></pre><p>Installs to <code>~/.cargo/bin</code>. For the systemd unit, install with <code>--root /usr</code>, or start <code>argusd</code> manually.</p></article>
+<article class="card"><h3>4 · From source</h3><pre><code>git clone https://github.com/alvaropaco/argus-ai.git
+cd argus-ai
+cargo build --release
+# binaries in target/release/{argus,argusd}</code></pre></article>
+</div></section>
+
+<section class="section" id="usage"><div class="eyebrow">Usage</div><h2>Configure and run</h2><p class="lead">After installing, initialize ARGUS, make sure the daemon is running, and inspect your environment.</p>
+<div class="cards">
+<article class="card"><h3>1 · Initialize</h3><pre><code>argus init</code></pre><p>Interactive wizard: environment, AI provider, model, and API token. Writes <code>argus.toml</code> plus <code>argus.secrets.toml</code> (mode <code>0600</code>) — secrets are kept separate.</p></article>
+<article class="card"><h3>2 · Start the daemon</h3><pre><code>systemctl enable --now argusd
+# or, without systemd:
+argusd</code></pre><p><code>argusd</code> binds <code>/run/argus/argusd.sock</code> and stores state in <code>/var/lib/argus/argus.db</code>.</p></article>
+<article class="card"><h3>3 · Query</h3><pre><code>argus health
+argus status
+argus capabilities
+argus plugins
+argus config</code></pre></article>
+<article class="card"><h3>4 · Dashboard (TUI)</h3><pre><code>argus</code></pre><p>The TUI connects to <code>argusd</code>; if it reports “connect to argusd”, the daemon isn’t running — start it with step 2.</p></article>
+</div></section>
 
 <section class="section" id="community"><div class="eyebrow">Open Source</div><h2>Built in the open</h2><p class="lead">ARGUS is under active development. Architecture, ADRs, specifications, CI/CD and packaging foundations are being established around a Rust workspace.</p><div style="margin-top:22px"><span class="pill">Rust</span><span class="pill">AI Agents</span><span class="pill">DevOps</span><span class="pill">Observability</span><span class="pill">Security</span><span class="pill">Linux</span><span class="pill">Kubernetes</span><span class="pill">Open Source</span></div><div class="buttons" style="justify-content:flex-start"><a class="button primary" href="https://github.com/alvaropaco/argus-ai">Explore GitHub →</a><a class="button" href="https://github.com/alvaropaco/argus-ai/releases">Releases</a></div></section>
 </div></main>
