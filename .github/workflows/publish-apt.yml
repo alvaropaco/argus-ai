@@ -104,8 +104,8 @@ jobs:
           mkdir -p dist
           find target/${{ matrix.target }}/debian -maxdepth 1 -name '*.deb' -type f -exec cp {} dist/ \;
 
-          expected_cli="argus_${DEB_VERSION}-1_${{ matrix.arch }}.deb"
-          expected_daemon="argusd_${DEB_VERSION}-1_${{ matrix.arch }}.deb"
+          expected_cli="argus_${DEB_VERSION}_${{ matrix.arch }}.deb"
+          expected_daemon="argusd_${DEB_VERSION}_${{ matrix.arch }}.deb"
           test -f "dist/$expected_cli"
           test -f "dist/$expected_daemon"
           echo "Built Debian packages:"
