@@ -90,7 +90,7 @@ starting the daemon.
 Install a specific version:
 
 ```bash
-ARGUS_VERSION=0.1.4 curl -fsSL https://argus.0x-ai.com | sh
+ARGUS_VERSION=0.1.7 curl -fsSL https://argus.0x-ai.com | sh
 ```
 
 ### Cargo (crates.io)
