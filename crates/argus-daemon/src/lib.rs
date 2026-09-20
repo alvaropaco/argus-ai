@@ -4,6 +4,7 @@
 //! execution controls; the AI layer must not receive unrestricted root access.
 
 pub mod config;
+pub mod control;
 pub mod handler;
 pub mod runtime;
 

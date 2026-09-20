@@ -97,6 +97,13 @@ impl CapabilityId {
     /// Bootstrap capability: list plugins.
     pub const ARGUS_PLUGINS_LIST: &'static str = "argus.plugins.list";
 
+    /// Executable capability: restart a systemd service.
+    pub const HOST_SERVICE_RESTART: &'static str = "host.service.restart";
+    /// Executable capability: stop a systemd service.
+    pub const HOST_SERVICE_STOP: &'static str = "host.service.stop";
+    /// Executable capability: start a systemd service.
+    pub const HOST_SERVICE_START: &'static str = "host.service.start";
+
     /// Constructs a capability id, validating the dotted-path grammar.
     pub fn new(path: &str) -> Result<Self, DomainError> {
         if !is_dotted_path(path) {
