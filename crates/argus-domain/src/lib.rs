@@ -17,6 +17,7 @@ mod id;
 mod mcp;
 mod observation;
 mod plugin;
+mod reasoning;
 mod registry;
 mod validate;
 
@@ -32,4 +33,8 @@ pub use id::{CapabilityId, EnvironmentId, ResourceId};
 pub use mcp::McpRuntime;
 pub use observation::{Observation, ObservedValue, Provenance};
 pub use plugin::{Compatibility, PluginManifest, PluginType};
+pub use reasoning::{
+    Action, AutonomyMode, Execution, ExecutionStatus, Hypothesis, HypothesisStatus, Intent, Plan,
+    PlanStatus,
+};
 pub use registry::CapabilityRegistry;

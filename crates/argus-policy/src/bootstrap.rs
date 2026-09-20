@@ -6,10 +6,11 @@ use argus_domain::{AuthorizationRequest, CapabilityId, PolicyDecision};
 
 use crate::PolicyEvaluator;
 
-/// The default policy for the bootstrap runtime.
+/// The default policy for the runtime.
 ///
-/// It allows exactly the four read-only bootstrap capabilities and denies
-/// everything else (including privileged operations) by default.
+/// It allows the read-only bootstrap capabilities and the reversible, low-risk
+/// service capabilities, and denies everything else (including privileged
+/// operations) by default.
 pub struct BootstrapPolicyEvaluator {
     allowed: HashSet<CapabilityId>,
 }
@@ -17,19 +18,22 @@ pub struct BootstrapPolicyEvaluator {
 impl BootstrapPolicyEvaluator {
     pub fn new() -> Self {
         let allowed = [
-            CapabilityId::new(CapabilityId::HOST_STATUS_READ),
-            CapabilityId::new(CapabilityId::ARGUS_HEALTH_READ),
-            CapabilityId::new(CapabilityId::ARGUS_CONFIG_READ),
-            CapabilityId::new(CapabilityId::ARGUS_PLUGINS_LIST),
+            CapabilityId::HOST_STATUS_READ,
+            CapabilityId::ARGUS_HEALTH_READ,
+            CapabilityId::ARGUS_CONFIG_READ,
+            CapabilityId::ARGUS_PLUGINS_LIST,
+            CapabilityId::HOST_SERVICE_RESTART,
+            CapabilityId::HOST_SERVICE_STOP,
+            CapabilityId::HOST_SERVICE_START,
         ]
         .into_iter()
-        .map(|id| id.expect("bootstrap capability ids are valid"))
+        .map(|id| CapabilityId::new(id).expect("capability ids are valid"))
         .collect();
 
         Self { allowed }
     }
 
-    /// The read-only capabilities the bootstrap policy permits.
+    /// The capabilities the policy permits (read-only and low-risk service actions).
     pub fn allowed_capabilities(&self) -> impl Iterator<Item = &CapabilityId> {
         self.allowed.iter()
     }
@@ -119,6 +123,19 @@ mod tests {
         let policy = BootstrapPolicyEvaluator::new();
         let decision = policy.evaluate(&request_for("host.process.signal", RiskClass::HighRisk));
         assert_eq!(decision.outcome, PolicyOutcome::Deny);
+    }
+
+    #[test]
+    fn low_risk_service_capabilities_are_allowed() {
+        let policy = BootstrapPolicyEvaluator::new();
+        for capability in [
+            CapabilityId::HOST_SERVICE_RESTART,
+            CapabilityId::HOST_SERVICE_STOP,
+            CapabilityId::HOST_SERVICE_START,
+        ] {
+            let decision = policy.evaluate(&request_for(capability, RiskClass::LowRisk));
+            assert_eq!(decision.outcome, PolicyOutcome::Allow, "{capability}");
+        }
     }
 
     #[test]

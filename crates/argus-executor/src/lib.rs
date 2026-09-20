@@ -8,8 +8,12 @@ mod action;
 mod bootstrap;
 mod executor;
 mod provider;
+mod service;
 
 pub use action::{AuthorizedAction, ExecutionError, ExecutionResult};
 pub use bootstrap::BootstrapExecutor;
 pub use executor::Executor;
 pub use provider::CapabilityProvider;
+pub use service::{
+    MockServiceController, ServiceController, ServiceError, SystemdServiceController,
+};

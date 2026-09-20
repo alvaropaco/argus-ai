@@ -181,6 +181,9 @@ fn bootstrap_capabilities() -> Vec<CapabilityId> {
         CapabilityId::ARGUS_HEALTH_READ,
         CapabilityId::ARGUS_CONFIG_READ,
         CapabilityId::ARGUS_PLUGINS_LIST,
+        CapabilityId::HOST_SERVICE_RESTART,
+        CapabilityId::HOST_SERVICE_STOP,
+        CapabilityId::HOST_SERVICE_START,
     ]
     .into_iter()
     .map(|c| CapabilityId::new(c).expect("bootstrap capability ids are valid"))
@@ -191,16 +194,30 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
     bootstrap_capabilities()
         .into_iter()
         .map(|id| {
+            let (risk, reversibility) = if is_service_capability(&id) {
+                (RiskClass::LowRisk, Reversibility::Reversible)
+            } else {
+                (RiskClass::Read, Reversibility::None)
+            };
             CapabilityDescriptor::new(
                 id.clone(),
                 "argusd",
                 id.as_str(),
-                RiskClass::Read,
+                risk,
                 Version::new(0, 1, 0),
                 serde_json::json!({}),
                 serde_json::json!({}),
-                Reversibility::None,
+                reversibility,
             )
         })
         .collect()
+}
+
+fn is_service_capability(id: &CapabilityId) -> bool {
+    matches!(
+        id.as_str(),
+        CapabilityId::HOST_SERVICE_RESTART
+            | CapabilityId::HOST_SERVICE_STOP
+            | CapabilityId::HOST_SERVICE_START
+    )
 }
