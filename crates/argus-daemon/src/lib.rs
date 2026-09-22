@@ -7,6 +7,7 @@ pub mod cloud;
 pub mod config;
 pub mod control;
 pub mod handler;
+pub mod privileged;
 pub mod runtime;
 
 pub use cloud::{
@@ -14,4 +15,5 @@ pub use cloud::{
     SessionCredential,
 };
 pub use config::DaemonConfig;
+pub use privileged::{PrivilegedError, PrivilegedLimiter};
 pub use runtime::{Daemon, DispatchError};
