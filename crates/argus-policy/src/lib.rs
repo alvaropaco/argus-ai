@@ -5,8 +5,10 @@
 //! point for a future Cedar-backed evaluator without coupling domain contracts
 //! to Cedar types (ADR-010).
 
+mod approval;
 mod bootstrap;
 
+pub use approval::ApprovalStore;
 pub use bootstrap::BootstrapPolicyEvaluator;
 
 use argus_domain::{AuthorizationRequest, PolicyDecision};

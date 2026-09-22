@@ -17,6 +17,20 @@ impl Principal {
         Self { uid, gid }
     }
 
+    /// The principal attributed to a request that arrived over the cloud channel.
+    ///
+    /// It carries no local uid or gid, because pairing grants cloud identity and
+    /// not infrastructure authority: the cloud is a request origin, never an
+    /// authorization grant (ADR-0020 §1, §5). A policy that consults the principal
+    /// therefore sees an unattributed caller, exactly as it would for any other
+    /// unverified client.
+    pub fn cloud() -> Self {
+        Self {
+            uid: None,
+            gid: None,
+        }
+    }
+
     pub fn uid(&self) -> Option<u32> {
         self.uid
     }
