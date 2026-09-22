@@ -39,8 +39,8 @@ use argus_domain::{
     AppliedConfigurationState, ApplyStatus, AuthorizationRequest, CapabilityDescriptor,
     CapabilityId, CapabilityPublication, CapabilityRequest, CloudCommand, CloudCommandStatus,
     CloudConnection, CloudConnectivityState, DecisionOutcome, DomainEvent, EnvironmentId,
-    ExecutionDecision, ManagedConfiguration, PolicyDecision, PolicyOutcome, Principal,
-    RefusalReason, RequestContext,
+    EventType, ExecutionDecision, ManagedConfiguration, PolicyDecision, PolicyOutcome, Principal,
+    RefusalReason, RequestContext, Severity,
 };
 use argus_events::LocalEventBus;
 use argus_executor::{AuthorizedAction, Executor};
@@ -1249,6 +1249,20 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
     command.completed_at = Some(Utc::now());
     let _ = deps.repository.put_cloud_command(&command).await;
 
+    record_command_audit(
+        deps,
+        command_id,
+        descriptor.id().as_str(),
+        match status {
+            CommandResultStatus::Acknowledged => "acknowledged",
+            CommandResultStatus::Refused => "refused",
+            CommandResultStatus::Failed => "failed",
+        },
+        reason.as_deref(),
+        command.result.as_ref(),
+    )
+    .await;
+
     send_command_result(transport, command_id, status, result, reason, correlation).await;
 }
 
@@ -1284,6 +1298,16 @@ async fn refuse_command(
     );
     command.refuse(reason, Utc::now());
     let _ = deps.repository.put_cloud_command(&command).await;
+
+    record_command_audit(
+        deps,
+        payload.command_id,
+        &payload.capability_id,
+        "refused",
+        Some(reason.describe()),
+        None,
+    )
+    .await;
 
     send_command_result(
         transport,
@@ -1375,6 +1399,43 @@ async fn record_execution_decision(
             decided_at: decision.decided_at,
         })
         .await;
+}
+
+/// Records an invocation in the audit trail on the same basis as a local
+/// operation, so cloud-issued and local actions are auditable on identical terms
+/// (FR-042, SC-016).
+async fn record_command_audit(
+    deps: &SupervisorDeps,
+    command_id: Uuid,
+    capability: &str,
+    outcome: &str,
+    detail: Option<&str>,
+    evidence: Option<&Value>,
+) {
+    let severity = if outcome == "acknowledged" {
+        Severity::Info
+    } else {
+        Severity::Warning
+    };
+
+    let event = DomainEvent::new(
+        Uuid::new_v4(),
+        EventType::new("cloud.command.outcome").expect("valid event type"),
+        Utc::now(),
+        "argusd",
+        capability,
+        severity,
+        Some(command_id),
+        None,
+        serde_json::json!({
+            "command_id": command_id.to_string(),
+            "outcome": outcome,
+            "detail": detail,
+            "evidence": evidence,
+        }),
+    );
+
+    let _ = deps.repository.put_audit_event(&event).await;
 }
 
 /// Settles commands left unfinished by a previous run.
