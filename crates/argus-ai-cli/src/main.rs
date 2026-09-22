@@ -64,6 +64,10 @@ enum CloudCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Refuse every host-changing invocation from the cloud until re-enabled.
+    DisableExecution,
+    /// Resume host-changing invocations from the cloud.
+    EnableExecution,
 }
 
 #[tokio::main]
@@ -130,7 +134,22 @@ async fn run_cloud(socket: &PathBuf, command: CloudCommand) -> Result<()> {
                 .await?;
             report(response)
         }
+        CloudCommand::DisableExecution => set_privileged_execution(socket, false).await,
+        CloudCommand::EnableExecution => set_privileged_execution(socket, true).await,
     }
+}
+
+/// Sets the local kill switch and reports the resulting state.
+async fn set_privileged_execution(socket: &PathBuf, enabled: bool) -> Result<()> {
+    let mut client = cloud_client(socket).await?;
+    let response = client
+        .request(
+            argus_ipc::Operation::CloudSetPrivilegedExecution,
+            Uuid::new_v4(),
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await?;
+    report(response)
 }
 
 async fn cloud_client(socket: &PathBuf) -> Result<argus_ipc::Client> {

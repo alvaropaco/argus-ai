@@ -54,6 +54,7 @@ use semver::Version;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, watch};
 use uuid::Uuid;
 
@@ -546,6 +547,8 @@ pub struct SupervisorDeps {
     pub approvals: Arc<ApprovalStore>,
     /// Bounds concurrency, serialization, and timeout for privileged work.
     pub limiter: Arc<PrivilegedLimiter>,
+    /// The local kill switch, shared so it can be flipped without a restart.
+    pub privileged_execution: Arc<AtomicBool>,
 }
 
 /// Reported as the negotiated version until a session supplies the real one.
@@ -1088,7 +1091,7 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
 
     // Check 4: the local kill switch. It is read from local configuration only, so
     // no cloud message can reach it.
-    if descriptor.changes_the_host() && !deps.config.permits_privileged_execution() {
+    if descriptor.changes_the_host() && !deps.privileged_execution.load(Ordering::SeqCst) {
         refuse_command(
             deps,
             transport,
@@ -2258,6 +2261,9 @@ mod tests {
         tracker: Arc<Mutex<ConnectivityTracker>>,
         factory: Arc<argus_cloud::transport::fake::FakeFactory>,
     ) -> SupervisorDeps {
+        let privileged_execution = Arc::new(std::sync::atomic::AtomicBool::new(
+            config.allow_privileged_execution,
+        ));
         SupervisorDeps {
             config,
             secrets,
@@ -2277,6 +2283,7 @@ mod tests {
             ))),
             approvals: Arc::new(ApprovalStore::new()),
             limiter: Arc::new(PrivilegedLimiter::new(2)),
+            privileged_execution,
         }
     }
 
@@ -2669,6 +2676,61 @@ mod tests {
                 services.recorded_calls().is_empty(),
                 "a disabled installation must not touch the host"
             );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn flipping_the_kill_switch_takes_effect_without_a_restart() {
+            let (deps, services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+
+            let invoke_restart = |id: Uuid| {
+                command_frame(
+                    id,
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "nginx.service" }),
+                )
+            };
+
+            // The kill switch is flipped on the supervisor that is already
+            // running, which is the whole point of sharing it rather than reading
+            // the startup configuration snapshot.
+            deps.privileged_execution.store(false, Ordering::SeqCst);
+
+            let id = Uuid::new_v4();
+            deps.approvals
+                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+            let refused = invoke(&deps, &invoke_restart(id)).await;
+            assert_eq!(
+                result_for(&refused, id)["status"],
+                "refused",
+                "a running supervisor must honour a switch flipped after startup"
+            );
+            let stored = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.refusal_reason,
+                Some(RefusalReason::ExecutionDisabled)
+            );
+            assert!(services.recorded_calls().is_empty());
+
+            deps.privileged_execution.store(true, Ordering::SeqCst);
+
+            let id = Uuid::new_v4();
+            deps.approvals
+                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+            let allowed = invoke(&deps, &invoke_restart(id)).await;
+            assert_eq!(
+                result_for(&allowed, id)["status"],
+                "acknowledged",
+                "re-enabling must restore execution on the same supervisor"
+            );
+            assert_eq!(services.recorded_calls().len(), 1);
 
             fs::remove_dir_all(&dir).ok();
         }

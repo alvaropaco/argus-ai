@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// The protocol version spoken by this implementation.
 ///
 /// Adding an operation is a MINOR bump; removing or renaming one is MAJOR.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 2, 0);
+pub const PROTOCOL_VERSION: Version = Version::new(0, 3, 0);
 
 /// A typed IPC operation id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +24,7 @@ pub enum Operation {
     CloudEnroll,
     CloudStatus,
     CloudForget,
+    CloudSetPrivilegedExecution,
 }
 
 impl Operation {
@@ -37,6 +38,7 @@ impl Operation {
             Operation::CloudEnroll => "cloud.enroll",
             Operation::CloudStatus => "cloud.status",
             Operation::CloudForget => "cloud.forget",
+            Operation::CloudSetPrivilegedExecution => "cloud.set-privileged-execution",
         }
     }
 }
@@ -66,6 +68,7 @@ impl FromStr for Operation {
             "cloud.enroll" => Ok(Operation::CloudEnroll),
             "cloud.status" => Ok(Operation::CloudStatus),
             "cloud.forget" => Ok(Operation::CloudForget),
+            "cloud.set-privileged-execution" => Ok(Operation::CloudSetPrivilegedExecution),
             _ => Err(UnknownOperationError),
         }
     }
@@ -184,6 +187,10 @@ mod tests {
             Operation::ConfigGet,
             Operation::PluginsList,
             Operation::CapabilitiesList,
+            Operation::CloudEnroll,
+            Operation::CloudStatus,
+            Operation::CloudForget,
+            Operation::CloudSetPrivilegedExecution,
         ] {
             assert_eq!(op.as_str().parse::<Operation>().ok(), Some(op));
         }
