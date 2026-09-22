@@ -15,6 +15,10 @@ use chrono::Utc;
 use semver::Version;
 use serde_json::Value;
 
+use argus_cloud::buffer::ReportQueue;
+use argus_cloud::state::ConnectivityTracker;
+
+use crate::cloud::{CloudSecretStore, ManagedSettingsStore as CloudSettingsStore};
 use crate::config::DaemonConfig;
 
 /// The running daemon and its bootstrap state.
@@ -23,6 +27,10 @@ pub struct Daemon {
     environment_id: EnvironmentId,
     config: DaemonConfig,
     repository: Arc<dyn DomainRepository>,
+    secrets: CloudSecretStore,
+    tracker: Arc<tokio::sync::Mutex<ConnectivityTracker>>,
+    queue: Arc<tokio::sync::Mutex<ReportQueue>>,
+    managed_settings: CloudSettingsStore,
     policy: BootstrapPolicyEvaluator,
     executor: BootstrapExecutor,
     registry: CapabilityRegistry,
@@ -95,11 +103,17 @@ impl Daemon {
                 .expect("bootstrap descriptors are unique");
         }
 
+        let buffer_capacity = config.cloud.report_buffer_max_records;
+
         Ok(Self {
             started_at: Instant::now(),
             environment_id,
             config,
             repository,
+            secrets: CloudSecretStore::default_location(),
+            tracker: Arc::new(tokio::sync::Mutex::new(ConnectivityTracker::new())),
+            queue: Arc::new(tokio::sync::Mutex::new(ReportQueue::new(buffer_capacity))),
+            managed_settings: CloudSettingsStore::default_location(),
             policy: BootstrapPolicyEvaluator::new(),
             executor: BootstrapExecutor::new(provider),
             registry,
@@ -109,6 +123,25 @@ impl Daemon {
 
     pub fn config(&self) -> &DaemonConfig {
         &self.config
+    }
+
+    pub fn secrets(&self) -> &CloudSecretStore {
+        &self.secrets
+    }
+
+    /// The shared cloud connectivity view, read by IPC and written by the
+    /// supervisor.
+    pub fn tracker(&self) -> Arc<tokio::sync::Mutex<ConnectivityTracker>> {
+        Arc::clone(&self.tracker)
+    }
+
+    /// The shared report queue, so IPC can report its occupancy.
+    pub fn report_queue(&self) -> Arc<tokio::sync::Mutex<ReportQueue>> {
+        Arc::clone(&self.queue)
+    }
+
+    pub fn managed_settings(&self) -> &CloudSettingsStore {
+        &self.managed_settings
     }
 
     pub fn environment_id(&self) -> EnvironmentId {
