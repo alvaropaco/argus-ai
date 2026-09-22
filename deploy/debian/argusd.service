@@ -14,9 +14,17 @@ RestartSec=5
 StateDirectory=argus
 RuntimeDirectory=argus
 
-# Least privilege. The bootstrap argusd performs only read-only operations,
-# so it needs no capabilities; add specific ones only when privileged
-# capabilities are introduced (see research.md § 2 and ADR-016).
+# Least privilege, enumerated.
+#
+# The bootstrap argusd registers only read-only capabilities (reading /proc and
+# /sys) plus the host.service.* capabilities, which reach systemd over D-Bus on
+# the system bus. None of them declares a Linux capability, so the bounding set
+# is correctly empty: granting more would violate the least-privilege rule,
+# not satisfy it.
+#
+# A privileged capability added later MUST declare the exact capabilities it
+# needs (see ADR-0021), and that declaration is what justifies adding a name
+# here. Nothing may be added "just in case".
 NoNewPrivileges=true
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -31,7 +39,11 @@ ProtectControlGroups=true
 ProtectHostname=true
 ProtectClock=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX
+# AF_UNIX carries IPC and the D-Bus system bus. AF_INET/AF_INET6 are required for
+# the outbound cloud connection (and name resolution for it); without them the
+# daemon cannot reach the cloud at all, which is the feature's whole purpose.
+# No other family is granted.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native

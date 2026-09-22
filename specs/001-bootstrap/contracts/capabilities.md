@@ -45,3 +45,39 @@ authoritative (the capability declaration is never an authorization grant).
 Plugins contribute capabilities via the TOML manifest `[capabilities]` table and are
 registered through the capability registry; the registry is the single source of truth
 for the `capabilities.list` operation.
+
+## 5. Cloud-facing descriptor (0.2.0)
+
+When an installation publishes its capability surface to Argus Cloud the local
+descriptor is **translated**, never sent as-is: the cloud validates against its own
+schema, and the two vocabularies genuinely differ. The rules below are fixed by
+[ADR-0016](../../docs/adr/0016-plugin-architecture.md) and are covered by tests.
+
+| Field | Local | Cloud | Rule |
+|---|---|---|---|
+| `id`, `provider`, `operation` | present | present | direct |
+| `risk_class` | `snake_case` (`low_risk`) | PascalCase (`LowRisk`) | case normalised |
+| `reversibility` | `none` \| `reversible` \| `partially_reversible` | `reversible` \| `irreversible` \| `n/a` | see below |
+| `version` | present | absent | dropped; the cloud versions the schema at publication level |
+| `input_schema`, `output_schema` | present | optional | direct |
+| `requires_approval` | absent | optional | derived from the authorization model, never the descriptor |
+
+Reversibility mapping:
+
+| Local | Cloud |
+|---|---|
+| `reversible` | `reversible` |
+| `partially_reversible` | `reversible` |
+| `none` | `irreversible` |
+
+`none` maps to `irreversible`, not `n/a`: `n/a` reads as "reversibility does not
+apply", whereas `none` means the operation cannot be undone. The conservative
+reading is chosen deliberately so an operator stays warned.
+
+Health is translated on the same basis when the installation reports it:
+`Ready` → `healthy`, `Degraded` → `degraded`, `NotReady` → `critical`. `unknown`
+is reserved for an instance whose health has never been observed, and is never
+fabricated from a state the installation actually saw.
+
+An empty capability surface is still published explicitly, so the cloud can tell
+"this installation can do nothing" from "this installation has not said".

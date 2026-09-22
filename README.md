@@ -232,6 +232,57 @@ Providers are replaceable adapters behind the `ModelProvider` trait in
 bootstrap ships the abstraction and configuration boundary; completion,
 streaming, and tool calling arrive with the AI/planning runtime.
 
+### Argus Cloud
+
+An installation can enroll with an Argus Cloud control plane, then report
+telemetry, health, events, and activities while receiving configuration and
+commands. Cloud connectivity is **optional**: with no `[cloud]` section, or with
+`enabled = false`, the daemon runs entirely locally.
+
+```bash
+argus cloud enroll          # prompts; the code is not echoed
+argus cloud enroll --code ARGUS-7F3K-9Q2M-4XZ8   # automation only
+argus cloud status          # state, identity, backlog, remediation
+argus cloud forget --yes    # remove the enrollment, keep running locally
+```
+
+Non-secret settings live in `argus.toml`:
+
+```toml
+[cloud]
+enabled = false                          # opt-in; the cloud is never required
+endpoint = "wss://cloud.example.com/agent"
+expected_cloud_id = "argus-cloud"
+allow_privileged_execution = true        # local kill switch
+telemetry_interval_seconds = 60
+report_buffer_max_records = 5000
+```
+
+Secrets never appear in `argus.toml`. The session credential and any
+cloud-delivered provider credential live in `/etc/argus/secrets/` at mode `0600`,
+and `argus config` and `argus cloud status` report *that* a credential exists,
+never its value.
+
+**Configuration precedence**, lowest to highest: built-in defaults, `argus.toml`,
+cloud-managed settings, then command-line flags. Cloud-managed settings are
+written to their own file (`/etc/argus/cloud-settings.toml`) so a cloud
+deployment cannot overwrite sections of `argus.toml` the cloud does not own, and
+so the effective source of each value is answerable. Command-line flags
+deliberately outrank the cloud, so an operator always retains a local remedy.
+
+A configuration kind this release cannot honour — such as the DevOps agent-team
+definition, which has no local runtime yet — is **refused with an explicit
+reason** rather than accepted and quietly ignored.
+
+> **Production limitation.** Installation identity in this release is
+> credential-based, not asymmetric: the installation supplies a non-secret
+> placeholder for the protocol's key field. Argus Cloud only tolerates that
+> outside production and refuses enrollment outright when running in production.
+> **Enrollment therefore works against a non-production Argus Cloud and is
+> refused by a production one** — `INVALID` at enrollment, `UNAUTHENTICATED` on
+> reconnection. Asymmetric identity is a prerequisite for production use and is
+> tracked as a follow-up ([ADR-0023](docs/adr/0023-installation-identity-credential-v1.md)).
+
 ### systemd unit
 
 The packaged `argusd.service` runs `/usr/bin/argusd`. To run a binary installed
