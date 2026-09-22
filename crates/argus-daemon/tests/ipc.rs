@@ -37,7 +37,10 @@ async fn spawn_server(config: DaemonConfig) -> String {
     let listener = UnixListener::bind(&path).expect("bind test socket");
     let handler = {
         let daemon = Arc::clone(&daemon);
-        move |request, principal| argus_daemon::handler::handle(daemon.as_ref(), principal, request)
+        move |request, principal| {
+            let daemon = Arc::clone(&daemon);
+            async move { argus_daemon::handler::handle(daemon.as_ref(), principal, request).await }
+        }
     };
     tokio::spawn(async move {
         let _ = serve(listener, handler).await;
