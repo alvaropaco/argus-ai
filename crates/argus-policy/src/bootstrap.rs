@@ -184,8 +184,10 @@ mod tests {
     #[test]
     fn approval_is_required_only_when_the_capability_declares_it() {
         let policy = BootstrapPolicyEvaluator::new();
-        let decision =
-            policy.evaluate(&request_for(CapabilityId::HOST_SERVICE_RESTART, RiskClass::LowRisk));
+        let decision = policy.evaluate(&request_for(
+            CapabilityId::HOST_SERVICE_RESTART,
+            RiskClass::LowRisk,
+        ));
         assert_eq!(decision.outcome, PolicyOutcome::Allow);
     }
 

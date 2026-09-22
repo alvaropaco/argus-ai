@@ -141,7 +141,10 @@ mod tests {
             limiter.lock_resource("postgres.service"),
         )
         .await;
-        assert!(unrelated.is_ok(), "an unrelated resource must not be blocked");
+        assert!(
+            unrelated.is_ok(),
+            "an unrelated resource must not be blocked"
+        );
 
         drop(held);
     }

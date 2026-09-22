@@ -44,9 +44,7 @@ impl CapabilityRegistry {
         }
 
         if descriptor.is_privileged() && descriptor.privileges().is_empty() {
-            return Err(DomainError::UndeclaredPrivileges(
-                id.as_str().to_string(),
-            ));
+            return Err(DomainError::UndeclaredPrivileges(id.as_str().to_string()));
         }
 
         if let Some(sandbox) = &self.sandbox {
@@ -192,7 +190,11 @@ mod tests {
             .with_blast_radius(BlastRadius::Host)
             .requiring_approval();
         registry.register(desc).expect("no OS privilege declared");
-        assert!(registry.get(&CapabilityId::new("host.service.restart").unwrap()).is_some());
+        assert!(
+            registry
+                .get(&CapabilityId::new("host.service.restart").unwrap())
+                .is_some()
+        );
     }
 
     #[test]

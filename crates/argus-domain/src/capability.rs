@@ -347,7 +347,8 @@ mod tests {
 
     #[test]
     fn a_declaration_is_satisfied_only_when_every_privilege_is_granted() {
-        let required = PrivilegeDeclaration::new(vec![OsPrivilege::LinuxCapability("CAP_KILL".into())]);
+        let required =
+            PrivilegeDeclaration::new(vec![OsPrivilege::LinuxCapability("CAP_KILL".into())]);
         let partial = PrivilegeDeclaration::none();
         let full = PrivilegeDeclaration::new(vec![
             OsPrivilege::LinuxCapability("CAP_KILL".into()),
@@ -369,13 +370,17 @@ mod tests {
         let missing: Vec<_> = required.missing_from(&granted).cloned().collect();
         assert_eq!(
             missing,
-            vec![OsPrivilege::LinuxCapability("CAP_KILL".into()), OsPrivilege::Landlock]
+            vec![
+                OsPrivilege::LinuxCapability("CAP_KILL".into()),
+                OsPrivilege::Landlock
+            ]
         );
     }
 
     #[test]
     fn privilege_builder_marks_the_capability_privileged() {
-        let desc = descriptor().privileged_with(PrivilegeDeclaration::new(vec![OsPrivilege::Landlock]));
+        let desc =
+            descriptor().privileged_with(PrivilegeDeclaration::new(vec![OsPrivilege::Landlock]));
         assert!(desc.is_privileged());
         assert!(!desc.privileges().is_empty());
     }
