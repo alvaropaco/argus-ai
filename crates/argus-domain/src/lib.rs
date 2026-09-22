@@ -25,7 +25,9 @@ mod validate;
 pub use authorization::{
     AuthorizationRequest, BlastRadius, CapabilityRequest, PolicyDecision, PolicyOutcome,
 };
-pub use capability::{CapabilityDescriptor, Reversibility, RiskClass};
+pub use capability::{
+    CapabilityDescriptor, OsPrivilege, PrivilegeDeclaration, Reversibility, RiskClass,
+};
 pub use cloud::{
     AppliedConfigurationState, ApplyStatus, ApprovalState, CapabilityPublication, CloudCommand,
     CloudCommandStatus, CloudConnection, CloudConnectivityState, CloudEnrollment, DecisionOutcome,

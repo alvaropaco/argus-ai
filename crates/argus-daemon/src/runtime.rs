@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use argus_domain::{
     AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId, CapabilityRegistry,
-    CapabilityRequest, EnvironmentId, HealthStatus, PluginManifest, PolicyOutcome, Reversibility,
-    RiskClass,
+    CapabilityRequest, EnvironmentId, HealthStatus, PluginManifest, PolicyOutcome,
+    PrivilegeDeclaration, Reversibility, RiskClass,
 };
 use argus_executor::{BootstrapExecutor, CapabilityProvider, ExecutionError, Executor};
 use argus_policy::{BootstrapPolicyEvaluator, PolicyEvaluator};
@@ -96,7 +96,7 @@ impl Daemon {
             config: config.clone(),
         });
 
-        let mut registry = CapabilityRegistry::new();
+        let mut registry = CapabilityRegistry::with_sandbox(PrivilegeDeclaration::none());
         for descriptor in bootstrap_descriptors() {
             registry
                 .register(descriptor)
@@ -189,13 +189,23 @@ impl Daemon {
 
     /// Routes a capability request through the policy and executor boundaries.
     ///
-    /// A capability that is not allowed by policy is denied; an allowed
-    /// capability is executed and its evidence is returned.
+    /// The risk class and blast radius are derived from the capability's own
+    /// registered descriptor. A capability that is not registered cannot be
+    /// authorized, and a registered one that does not declare its blast radius is
+    /// classified as `Host` rather than `None` (ADR-0020 §2).
     pub fn authorize_and_execute(
         &self,
         request: CapabilityRequest,
     ) -> Result<Value, DispatchError> {
-        let authz = AuthorizationRequest::new(request, RiskClass::Read, BlastRadius::None);
+        let Some(descriptor) = self.registry.get(&request.capability) else {
+            return Err(DispatchError::Denied(PolicyOutcome::Deny));
+        };
+
+        let authz = AuthorizationRequest::new(
+            request,
+            descriptor.risk_class(),
+            descriptor.effective_blast_radius(),
+        );
         let decision = self.policy.evaluate(&authz);
 
         if !decision.is_allowed() {
@@ -227,21 +237,31 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
     bootstrap_capabilities()
         .into_iter()
         .map(|id| {
-            let (risk, reversibility) = if is_service_capability(&id) {
-                (RiskClass::LowRisk, Reversibility::Reversible)
-            } else {
-                (RiskClass::Read, Reversibility::None)
-            };
-            CapabilityDescriptor::new(
+            let base = CapabilityDescriptor::new(
                 id.clone(),
                 "argusd",
                 id.as_str(),
-                risk,
+                if is_service_capability(&id) {
+                    RiskClass::LowRisk
+                } else {
+                    RiskClass::Read
+                },
                 Version::new(0, 1, 0),
                 serde_json::json!({}),
                 serde_json::json!({}),
-                reversibility,
-            )
+                if is_service_capability(&id) {
+                    Reversibility::Reversible
+                } else {
+                    Reversibility::None
+                },
+            );
+
+            if is_service_capability(&id) {
+                base.with_blast_radius(BlastRadius::Host)
+                    .requiring_approval()
+            } else {
+                base.with_blast_radius(BlastRadius::None)
+            }
         })
         .collect()
 }

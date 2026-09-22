@@ -33,4 +33,19 @@ pub enum DomainError {
     /// A capability was registered more than once.
     #[error("duplicate capability registration: {0}")]
     DuplicateCapability(String),
+
+    /// A privileged capability declared no OS privileges.
+    ///
+    /// A capability that needs privilege but declares none cannot be run
+    /// least-privilege, so it is rejected at registration rather than at the
+    /// moment of invocation (ADR-0021 §1).
+    #[error("capability '{0}' is privileged but declares no OS privileges")]
+    UndeclaredPrivileges(String),
+
+    /// A capability requires privileges the running sandbox does not grant.
+    ///
+    /// Registration fails closed: advertising a capability the installation
+    /// cannot actually perform would mislead the operator (ADR-0021 §2).
+    #[error("capability '{0}' requires privileges the sandbox does not grant: {1}")]
+    UngrantedPrivileges(String, String),
 }
