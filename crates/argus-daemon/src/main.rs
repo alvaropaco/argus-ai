@@ -1,12 +1,15 @@
 //! `argusd` binary entry point.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use argus_cloud::buffer::ReportQueue;
+use argus_cloud::client::supervisor::WssFactory;
 use tokio::net::UnixListener;
+use tokio::sync::{Mutex, watch};
 
-use argus_daemon::{Daemon, config::DaemonConfig};
+use argus_daemon::{Daemon, cloud::SupervisorDeps, config::DaemonConfig};
 use argus_domain::{DomainEvent, EventType, Severity};
 use argus_events::{EventBus, LocalEventBus};
 use argus_ipc::serve;
@@ -22,7 +25,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(socket = %config.socket_path, "starting argusd");
 
-    let events = LocalEventBus::new(64);
+    let events = Arc::new(LocalEventBus::new(64));
     let _ = events
         .publish(&event(
             "argus.started",
@@ -57,12 +60,45 @@ async fn main() -> Result<()> {
         "argusd ready"
     );
 
+    let _cloud_stop = spawn_cloud_supervisor(&daemon, &config, Arc::clone(&events));
+
     let handler = {
         let daemon = Arc::clone(&daemon);
-        move |request, principal| argus_daemon::handler::handle(&daemon, principal, request)
+        move |request, principal| {
+            let daemon = Arc::clone(&daemon);
+            async move { argus_daemon::handler::handle(&daemon, principal, request).await }
+        }
     };
 
     serve(listener, handler).await.context("IPC server failed")
+}
+
+/// Starts cloud supervision as an isolated task.
+///
+/// The returned sender stops it, and dropping it stops supervision too. Nothing
+/// here is awaited by the daemon, so an absent, unreachable, or misconfigured
+/// cloud can never delay startup or local operation (FR-013).
+fn spawn_cloud_supervisor(
+    daemon: &Arc<Daemon>,
+    config: &DaemonConfig,
+    events: Arc<LocalEventBus>,
+) -> watch::Sender<bool> {
+    let (stop, stop_rx) = watch::channel(false);
+    let deps = SupervisorDeps {
+        config: config.cloud.clone(),
+        secrets: daemon.secrets().clone(),
+        repository: Arc::clone(daemon.repository()),
+        tracker: daemon.tracker(),
+        factory: Arc::new(WssFactory),
+        events,
+        queue: Arc::new(Mutex::new(ReportQueue::new(
+            config.cloud.report_buffer_max_records,
+        ))),
+        capabilities: Arc::new(daemon.registry().list().cloned().collect()),
+        managed_settings: Arc::new(daemon.managed_settings().clone()),
+    };
+    tokio::spawn(argus_daemon::cloud::supervise(deps, stop_rx));
+    stop
 }
 
 fn event(event_type: &str, severity: Severity, payload: serde_json::Value) -> DomainEvent {
@@ -98,35 +134,53 @@ async fn prepare_state_dir(path: &str) -> Result<()> {
 }
 
 fn parse_config() -> Result<DaemonConfig> {
-    let mut config = DaemonConfig::default();
-    let mut args = std::env::args().skip(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
+    let loaded = argus_daemon::config::load(explicit_config_path(&args)?.as_deref())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for warning in &loaded.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if let Some(path) = &loaded.source_path {
+        eprintln!("loaded configuration from {}", path.display());
+    }
+
+    // Flags are applied on top of the file, so an operator always retains a
+    // local override even when a cloud-managed value is in effect.
+    let mut config = loaded.config;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => i += 2,
             "--socket" => {
-                config.socket_path = args.next().context("--socket requires a value")?;
+                config.socket_path = value_at(&args, i, "--socket")?;
+                i += 2;
             }
             "--state" => {
-                config.state_path = args.next().context("--state requires a value")?;
+                config.state_path = value_at(&args, i, "--state")?;
+                i += 2;
             }
             "--environment" => {
-                config.environment_name = args.next().context("--environment requires a value")?;
+                config.environment_name = value_at(&args, i, "--environment")?;
+                i += 2;
             }
             "--authorized-uids" => {
-                let raw = args.next().context("--authorized-uids requires a value")?;
-                config.authorized_uids = Some(parse_uids(&raw)?);
+                config.authorized_uids =
+                    Some(parse_uids(&value_at(&args, i, "--authorized-uids")?)?);
+                i += 2;
             }
             "--otel-endpoint" => {
-                config.otel_endpoint =
-                    Some(args.next().context("--otel-endpoint requires a value")?);
+                config.otel_endpoint = Some(value_at(&args, i, "--otel-endpoint")?);
+                i += 2;
             }
             "--log-format" => {
-                let raw = args.next().context("--log-format requires a value")?;
+                let raw = value_at(&args, i, "--log-format")?;
                 config.log_format = match raw.as_str() {
                     "text" => LogFormat::Text,
                     "json" => LogFormat::Json,
                     other => anyhow::bail!("unknown log format '{other}' (expected text|json)"),
                 };
+                i += 2;
             }
             "--help" | "-h" => {
                 print_usage();
@@ -137,6 +191,24 @@ fn parse_config() -> Result<DaemonConfig> {
     }
 
     Ok(config)
+}
+
+fn explicit_config_path(args: &[String]) -> Result<Option<PathBuf>> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config" {
+            let value = args.get(i + 1).context("--config requires a value")?;
+            return Ok(Some(PathBuf::from(value)));
+        }
+        i += 1;
+    }
+    Ok(None)
+}
+
+fn value_at(args: &[String], index: usize, flag: &str) -> Result<String> {
+    args.get(index + 1)
+        .cloned()
+        .with_context(|| format!("{flag} requires a value"))
 }
 
 fn parse_uids(raw: &str) -> Result<Vec<u32>> {
@@ -151,6 +223,9 @@ fn parse_uids(raw: &str) -> Result<Vec<u32>> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: argusd [--socket PATH] [--state PATH] [--environment NAME] [--authorized-uids UID,..] [--otel-endpoint URL] [--log-format text|json]"
+        "Usage: argusd [--config PATH] [--socket PATH] [--state PATH] [--environment NAME] \
+         [--authorized-uids UID,..] [--otel-endpoint URL] [--log-format text|json]\n\
+         \n\
+         Without --config, ./argus.toml then /etc/argus/argus.toml are used if present."
     );
 }
