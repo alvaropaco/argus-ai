@@ -1136,22 +1136,40 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
     }
 
     // Check 6: an approval-requiring invocation needs a valid, unexpired approval.
-    if decision.outcome == PolicyOutcome::RequireApproval
-        && !deps.approvals.authorizes(command_id, Utc::now())
-    {
+    let decision = if decision.outcome == PolicyOutcome::RequireApproval {
+        if !deps.approvals.authorizes(command_id, Utc::now()) {
+            refuse_command(
+                deps,
+                transport,
+                &payload,
+                correlation,
+                RefusalReason::ApprovalRequired,
+            )
+            .await;
+            return;
+        }
+
+        // The approval is exactly what the policy was waiting for, so the
+        // invocation is authorized now. The executor still only ever sees `Allow`,
+        // so the structural gate is preserved rather than bypassed.
+        PolicyDecision::allow(
+            decision.policy_id.clone(),
+            format!("{} (approved locally)", decision.reason),
+        )
+    } else {
+        decision
+    };
+
+    // Check 7: execute under the concurrency cap, the resource lock, and a timeout.
+    let Ok(action) = AuthorizedAction::new(authorization.capability_request, decision) else {
         refuse_command(
             deps,
             transport,
             &payload,
             correlation,
-            RefusalReason::ApprovalRequired,
+            RefusalReason::PolicyDenied,
         )
         .await;
-        return;
-    }
-
-    // Check 7: execute under the concurrency cap, the resource lock, and a timeout.
-    let Ok(action) = AuthorizedAction::new(authorization.capability_request, decision) else {
         return;
     };
 
@@ -1434,11 +1452,13 @@ fn input_matches(schema: &Value, input: &Value) -> bool {
         return false;
     }
 
-    if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
-        && let Some(properties) = schema.get("properties").and_then(Value::as_object)
-        && !input.keys().all(|key| properties.contains_key(key))
-    {
-        return false;
+    if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        let permitted =
+            |key: &String| properties.is_some_and(|declared| declared.contains_key(key));
+        if !input.keys().all(permitted) {
+            return false;
+        }
     }
 
     true
@@ -2387,6 +2407,481 @@ mod tests {
                 Arc::new(argus_cloud::transport::fake::FakeFactory::new()),
             );
             (deps, dir)
+        }
+
+        /// An executor for capabilities that do not change the host.
+        struct StubReadOnly;
+
+        impl Executor for StubReadOnly {
+            fn execute(
+                &self,
+                action: &AuthorizedAction,
+            ) -> Result<argus_executor::ExecutionResult, argus_executor::ExecutionError>
+            {
+                Ok(argus_executor::ExecutionResult {
+                    capability: action.capability().clone(),
+                    evidence: serde_json::json!({ "stub": true }),
+                    started_at: Utc::now(),
+                    finished_at: Utc::now(),
+                })
+            }
+        }
+
+        /// A command-capable supervisor whose service controller is observable.
+        async fn command_deps(
+            config: CloudConfig,
+            capabilities: Vec<CapabilityDescriptor>,
+        ) -> (
+            SupervisorDeps,
+            Arc<argus_executor::MockServiceController>,
+            PathBuf,
+        ) {
+            let (secrets, dir) = store();
+            let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+            let deps = supervisor_deps(
+                config,
+                secrets,
+                repository,
+                Arc::new(Mutex::new(ConnectivityTracker::new())),
+                Arc::new(argus_cloud::transport::fake::FakeFactory::new()),
+            );
+
+            let services = Arc::new(argus_executor::MockServiceController::new());
+            let service_controller: Arc<dyn argus_executor::ServiceController> =
+                Arc::clone(&services) as Arc<dyn argus_executor::ServiceController>;
+            let executor = Arc::new(argus_executor::CompositeExecutor::new(
+                Arc::new(StubReadOnly),
+                Arc::new(argus_executor::PrivilegedExecutor::new(service_controller)),
+            ));
+
+            (
+                SupervisorDeps {
+                    capabilities: Arc::new(capabilities),
+                    executor,
+                    ..deps
+                },
+                services,
+                dir,
+            )
+        }
+
+        /// The published surface a command test invokes against.
+        fn published_capabilities() -> Vec<CapabilityDescriptor> {
+            vec![
+                CapabilityDescriptor::new(
+                    CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+                    "argusd",
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    argus_domain::RiskClass::LowRisk,
+                    Version::new(0, 1, 0),
+                    serde_json::json!({}),
+                    serde_json::json!({}),
+                    argus_domain::Reversibility::Reversible,
+                )
+                .with_blast_radius(argus_domain::BlastRadius::Host)
+                .requiring_approval(),
+                CapabilityDescriptor::new(
+                    CapabilityId::new(CapabilityId::ARGUS_HEALTH_READ).unwrap(),
+                    "argusd",
+                    CapabilityId::ARGUS_HEALTH_READ,
+                    argus_domain::RiskClass::Read,
+                    Version::new(0, 1, 0),
+                    serde_json::json!({ "type": "object", "additionalProperties": false }),
+                    serde_json::json!({}),
+                    argus_domain::Reversibility::None,
+                )
+                .with_blast_radius(argus_domain::BlastRadius::None),
+            ]
+        }
+
+        fn command_frame(command_id: Uuid, capability: &str, input: serde_json::Value) -> Envelope {
+            Envelope::new(
+                MessageType::CommandInvoke,
+                serde_json::json!({
+                    "command_id": command_id.to_string(),
+                    "capability_id": capability,
+                    "input": input,
+                }),
+                None,
+            )
+        }
+
+        async fn invoke(deps: &SupervisorDeps, frame: &Envelope) -> FakeTransport {
+            let transport = FakeTransport::new();
+            handle_command_invoke(deps, &transport, frame).await;
+            transport
+        }
+
+        fn result_for(transport: &FakeTransport, command_id: Uuid) -> serde_json::Value {
+            let sent = transport.sent_of_type(MessageType::CommandResult);
+            assert_eq!(sent.len(), 1, "exactly one command.result per delivery");
+            assert_eq!(sent[0].payload["command_id"], command_id.to_string());
+            sent[0].payload.clone()
+        }
+
+        #[tokio::test]
+        async fn a_command_for_an_unpublished_capability_is_refused() {
+            let (deps, _services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(id, "container.restart", serde_json::json!({})),
+            )
+            .await;
+
+            let result = result_for(&transport, id);
+            assert_eq!(result["status"], "refused");
+            let stored = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.refusal_reason,
+                Some(RefusalReason::UnknownCapability)
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_command_whose_input_mismatches_the_schema_is_refused() {
+            let (deps, _services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(
+                    id,
+                    CapabilityId::ARGUS_HEALTH_READ,
+                    serde_json::json!({ "unexpected": true }),
+                ),
+            )
+            .await;
+
+            result_for(&transport, id);
+            let stored = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.refusal_reason, Some(RefusalReason::InvalidInput));
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_host_changing_command_is_refused_when_the_kill_switch_is_off() {
+            let mut config = active_config();
+            config.allow_privileged_execution = false;
+            let (deps, services, dir) = command_deps(config, published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(
+                    id,
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "nginx.service" }),
+                ),
+            )
+            .await;
+
+            let result = result_for(&transport, id);
+            assert_eq!(result["status"], "refused");
+            let stored = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.refusal_reason,
+                Some(RefusalReason::ExecutionDisabled)
+            );
+            assert!(
+                services.recorded_calls().is_empty(),
+                "a disabled installation must not touch the host"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_read_only_command_still_works_with_privileged_execution_disabled() {
+            let mut config = active_config();
+            config.allow_privileged_execution = false;
+            let (deps, _services, dir) = command_deps(config, published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(id, CapabilityId::ARGUS_HEALTH_READ, serde_json::json!({})),
+            )
+            .await;
+
+            let result = result_for(&transport, id);
+            assert_eq!(
+                result["status"], "acknowledged",
+                "the kill switch must not disable read-only invocations"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn an_approval_requiring_command_is_refused_without_a_grant() {
+            let (deps, services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(
+                    id,
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "nginx.service" }),
+                ),
+            )
+            .await;
+
+            result_for(&transport, id);
+            let stored = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.refusal_reason, Some(RefusalReason::ApprovalRequired));
+            assert!(services.recorded_calls().is_empty());
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_granted_approval_lets_the_command_execute() {
+            let (deps, services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+            deps.approvals
+                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+
+            let transport = invoke(
+                &deps,
+                &command_frame(
+                    id,
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "nginx.service" }),
+                ),
+            )
+            .await;
+
+            let result = result_for(&transport, id);
+            assert_eq!(result["status"], "acknowledged");
+            assert_eq!(
+                services.recorded_calls(),
+                vec![("restart".to_string(), "nginx.service".to_string())]
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn every_refusal_reason_is_distinct_and_reports_a_reason() {
+            let published = published_capabilities();
+
+            let (deps, _s, d1) = command_deps(active_config(), published.clone()).await;
+            let unknown = invoke(
+                &deps,
+                &command_frame(Uuid::new_v4(), "container.restart", serde_json::json!({})),
+            )
+            .await;
+
+            let (deps, _s, d2) = command_deps(active_config(), published.clone()).await;
+            let invalid = invoke(
+                &deps,
+                &command_frame(
+                    Uuid::new_v4(),
+                    CapabilityId::ARGUS_HEALTH_READ,
+                    serde_json::json!({ "bad": 1 }),
+                ),
+            )
+            .await;
+
+            let mut config = active_config();
+            config.allow_privileged_execution = false;
+            let (deps, _s, d3) = command_deps(config, published.clone()).await;
+            let disabled = invoke(
+                &deps,
+                &command_frame(
+                    Uuid::new_v4(),
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "x" }),
+                ),
+            )
+            .await;
+
+            let (deps, _s, d4) = command_deps(active_config(), published).await;
+            let pending = invoke(
+                &deps,
+                &command_frame(
+                    Uuid::new_v4(),
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "x" }),
+                ),
+            )
+            .await;
+
+            let reasons: Vec<String> = [&unknown, &invalid, &disabled, &pending]
+                .iter()
+                .filter_map(|transport| {
+                    transport
+                        .sent_of_type(MessageType::CommandResult)
+                        .first()
+                        .and_then(|frame| frame.payload["reason"].as_str().map(str::to_string))
+                })
+                .collect();
+
+            assert_eq!(reasons.len(), 4, "every refusal must carry a reason");
+            let unique: std::collections::HashSet<&String> = reasons.iter().collect();
+            assert_eq!(
+                unique.len(),
+                4,
+                "each refusal reason must be distinct: {reasons:?}"
+            );
+
+            for dir in [d1, d2, d3, d4] {
+                fs::remove_dir_all(&dir).ok();
+            }
+        }
+
+        #[tokio::test]
+        async fn a_redelivered_terminal_command_re_reports_without_re_executing() {
+            let (deps, services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+            deps.approvals
+                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+
+            let frame = command_frame(
+                id,
+                CapabilityId::HOST_SERVICE_RESTART,
+                serde_json::json!({ "unit": "nginx.service" }),
+            );
+
+            let first = invoke(&deps, &frame).await;
+            assert_eq!(result_for(&first, id)["status"], "acknowledged");
+            assert_eq!(
+                services.recorded_calls().len(),
+                1,
+                "the first delivery executes"
+            );
+
+            let second = invoke(&deps, &frame).await;
+            assert_eq!(
+                result_for(&second, id)["status"],
+                "acknowledged",
+                "a re-delivery re-reports the stored result"
+            );
+            assert_eq!(
+                services.recorded_calls().len(),
+                1,
+                "a re-delivered command must never execute twice"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_duplicate_while_executing_is_suppressed_without_a_fabricated_result() {
+            let (deps, services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let mut in_flight = CloudCommand::received(
+                id,
+                deps.environment_id,
+                CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+                serde_json::json!({ "unit": "nginx.service" }),
+                None,
+                Utc::now(),
+            );
+            in_flight.status = CloudCommandStatus::Executing;
+            deps.repository.put_cloud_command(&in_flight).await.unwrap();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(
+                    id,
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "nginx.service" }),
+                ),
+            )
+            .await;
+
+            assert!(
+                transport
+                    .sent_of_type(MessageType::CommandResult)
+                    .is_empty(),
+                "no result exists yet, so none may be reported"
+            );
+            assert!(
+                services.recorded_calls().is_empty(),
+                "and nothing may re-execute"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_command_interrupted_by_a_restart_is_reported_failed_with_an_unknown_state() {
+            let (deps, _services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+            let id = Uuid::new_v4();
+
+            let mut interrupted = CloudCommand::received(
+                id,
+                deps.environment_id,
+                CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+                serde_json::json!({ "unit": "nginx.service" }),
+                None,
+                Utc::now(),
+            );
+            interrupted.status = CloudCommandStatus::Executing;
+            deps.repository
+                .put_cloud_command(&interrupted)
+                .await
+                .unwrap();
+
+            let transport = FakeTransport::new();
+            resolve_interrupted_commands(&deps, &transport).await;
+
+            let sent = transport.sent_of_type(MessageType::CommandResult);
+            assert_eq!(sent.len(), 1, "the interrupted command must be settled");
+            assert_eq!(sent[0].payload["status"], "failed");
+            assert!(
+                sent[0].payload["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown"),
+                "the operator must be told the outcome is unknown: {}",
+                sent[0].payload["reason"]
+            );
+
+            let settled = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(settled.status, CloudCommandStatus::Failed);
+
+            fs::remove_dir_all(&dir).ok();
         }
 
         async fn apply_and_read_result(
