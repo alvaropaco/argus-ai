@@ -28,22 +28,31 @@ use argus_cloud::error::CloudError;
 use argus_cloud::mapping::capability as capability_mapping;
 use argus_cloud::protocol::errors::PairingDenialCode;
 use argus_cloud::protocol::messages::{
-    ConfigApplyPayload, ConfigResultPayload, ConfigResultStatus, ConfigStatePayload,
-    ConfigurationStateEntry, IngestAckPayload, SessionRotatePayload, StreamThrottlePayload,
+    CommandInvokePayload, CommandResultPayload, CommandResultStatus, ConfigApplyPayload,
+    ConfigResultPayload, ConfigResultStatus, ConfigStatePayload, ConfigurationStateEntry,
+    IngestAckPayload, SessionRotatePayload, StreamThrottlePayload,
 };
 use argus_cloud::protocol::{Envelope, MessageType};
 use argus_cloud::state::{ConnectivityTracker, EnrolledIdentity};
 use argus_cloud::transport::{Transport, TransportError};
 use argus_domain::{
-    AppliedConfigurationState, ApplyStatus, CapabilityDescriptor, CapabilityPublication,
-    CloudConnection, CloudConnectivityState, DomainEvent, ManagedConfiguration,
+    AppliedConfigurationState, ApplyStatus, AuthorizationRequest, CapabilityDescriptor,
+    CapabilityId, CapabilityPublication, CapabilityRequest, CloudCommand, CloudCommandStatus,
+    CloudConnection, CloudConnectivityState, DecisionOutcome, DomainEvent, EnvironmentId,
+    ExecutionDecision, ManagedConfiguration, PolicyDecision, PolicyOutcome, Principal,
+    RefusalReason, RequestContext,
 };
 use argus_events::LocalEventBus;
+use argus_executor::{AuthorizedAction, Executor};
+use argus_policy::{ApprovalStore, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError};
 
 use crate::config::disposition;
+use crate::privileged::{PrivilegedError, PrivilegedLimiter};
 use chrono::{DateTime, Utc};
+use semver::Version;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::{Mutex, broadcast, watch};
 use uuid::Uuid;
@@ -527,6 +536,16 @@ pub struct SupervisorDeps {
     pub capabilities: Arc<Vec<CapabilityDescriptor>>,
     /// Where a cloud-managed configuration is applied (T069).
     pub managed_settings: Arc<ManagedSettingsStore>,
+    /// The installation identity a cloud-issued command is recorded against.
+    pub environment_id: EnvironmentId,
+    /// The local authorization boundary every cloud invocation must cross.
+    pub policy: Arc<dyn PolicyEvaluator>,
+    /// Where a permitted invocation is handed for execution.
+    pub executor: Arc<dyn Executor>,
+    /// Approvals granted locally for individual invocations.
+    pub approvals: Arc<ApprovalStore>,
+    /// Bounds concurrency, serialization, and timeout for privileged work.
+    pub limiter: Arc<PrivilegedLimiter>,
 }
 
 /// Reported as the negotiated version until a session supplies the real one.
@@ -1010,6 +1029,421 @@ async fn send_config_state(
     let _ = transport.send(&envelope).await;
 }
 
+/// One cloud-issued invocation, from validation to reporting.
+///
+/// The checks run in the fixed, short-circuiting order of
+/// `contracts/privileged-execution.md` §2. Checks 2–4 precede any authorization
+/// work, so a malformed or non-executable request never consumes a policy
+/// evaluation, and check 1 precedes everything, so a re-delivered command cannot
+/// re-trigger a side effect (ADR-0022 §2, §3).
+async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport, frame: &Envelope) {
+    let correlation = frame.correlation_id.or(Some(frame.message_id));
+
+    let Ok(payload) = serde_json::from_value::<CommandInvokePayload>(frame.payload.clone()) else {
+        return;
+    };
+    let command_id = payload.command_id;
+
+    // Check 1: idempotency keys on `command_id`. A terminal command re-reports the
+    // result it already holds; a duplicate that arrives while the first attempt is
+    // still running is suppressed, because no result exists yet and emitting one
+    // would be a fabrication.
+    if let Ok(Some(existing)) = deps.repository.get_cloud_command(command_id).await {
+        if existing.status.is_terminal() {
+            report_stored_result(transport, &existing, correlation).await;
+        }
+        return;
+    }
+
+    // Check 2: the capability must be part of the published surface.
+    let Some(descriptor) = deps
+        .capabilities
+        .iter()
+        .find(|candidate| candidate.id().as_str() == payload.capability_id)
+    else {
+        refuse_command(
+            deps,
+            transport,
+            &payload,
+            correlation,
+            RefusalReason::UnknownCapability,
+        )
+        .await;
+        return;
+    };
+
+    // Check 3: the input must match the capability's declared schema.
+    let input = Value::Object(payload.input.clone());
+    if !input_matches(descriptor.input_schema(), &input) {
+        refuse_command(
+            deps,
+            transport,
+            &payload,
+            correlation,
+            RefusalReason::InvalidInput,
+        )
+        .await;
+        return;
+    }
+
+    // Check 4: the local kill switch. It is read from local configuration only, so
+    // no cloud message can reach it.
+    if descriptor.changes_the_host() && !deps.config.permits_privileged_execution() {
+        refuse_command(
+            deps,
+            transport,
+            &payload,
+            correlation,
+            RefusalReason::ExecutionDisabled,
+        )
+        .await;
+        return;
+    }
+
+    // Check 5: authorization, derived from the capability and evaluated locally.
+    // The principal is the unattributed cloud caller, which carries no authority.
+    let authorization = AuthorizationRequest::new(
+        CapabilityRequest::new(
+            descriptor.id().clone(),
+            Principal::cloud(),
+            None,
+            input,
+            RequestContext::new(
+                command_id,
+                Version::new(0, 1, 0),
+                Principal::cloud(),
+                Utc::now(),
+            ),
+        ),
+        descriptor.risk_class(),
+        descriptor.effective_blast_radius(),
+    )
+    .requiring_approval(descriptor.requires_approval());
+
+    let decision = deps.policy.evaluate(&authorization);
+    record_execution_decision(deps, command_id, descriptor, &decision).await;
+
+    if decision.outcome == PolicyOutcome::Deny {
+        refuse_command(
+            deps,
+            transport,
+            &payload,
+            correlation,
+            RefusalReason::PolicyDenied,
+        )
+        .await;
+        return;
+    }
+
+    // Check 6: an approval-requiring invocation needs a valid, unexpired approval.
+    if decision.outcome == PolicyOutcome::RequireApproval
+        && !deps.approvals.authorizes(command_id, Utc::now())
+    {
+        refuse_command(
+            deps,
+            transport,
+            &payload,
+            correlation,
+            RefusalReason::ApprovalRequired,
+        )
+        .await;
+        return;
+    }
+
+    // Check 7: execute under the concurrency cap, the resource lock, and a timeout.
+    let Ok(action) = AuthorizedAction::new(authorization.capability_request, decision) else {
+        return;
+    };
+
+    let resource = action
+        .request()
+        .resource
+        .as_ref()
+        .map(|resource| resource.as_str().to_string())
+        .or_else(|| {
+            action
+                .request()
+                .arguments
+                .get("unit")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| descriptor.id().as_str().to_string());
+
+    let mut command = CloudCommand::received(
+        command_id,
+        deps.environment_id,
+        descriptor.id().clone(),
+        Value::Object(payload.input.clone()),
+        payload.correlation_id.clone(),
+        Utc::now(),
+    );
+
+    // The row is committed as `executing` before the operation begins. A crash
+    // between "operation started" and "row written" would otherwise erase all
+    // trace of a privileged change that may already have taken effect (ADR-0022 §1).
+    command.status = CloudCommandStatus::Executing;
+    let _ = deps.repository.put_cloud_command(&command).await;
+
+    let executor = Arc::clone(&deps.executor);
+    let timeout_budget = Duration::from_secs(
+        descriptor
+            .timeout_seconds()
+            .unwrap_or(deps.config.request_timeout_seconds),
+    );
+    let queue_budget = Duration::from_secs(deps.config.request_timeout_seconds);
+
+    let outcome = deps
+        .limiter
+        .run(&resource, queue_budget, timeout_budget, async move {
+            executor.execute(&action)
+        })
+        .await;
+
+    let (status, result, reason) = match outcome {
+        Ok(Ok(execution)) => (
+            CommandResultStatus::Acknowledged,
+            Some(execution.evidence),
+            None,
+        ),
+        Ok(Err(error)) => (CommandResultStatus::Failed, None, Some(error.to_string())),
+        Err(PrivilegedError::TimedOut) => (
+            CommandResultStatus::Failed,
+            None,
+            Some(
+                "the operation exceeded its timeout and its outcome is unknown; verify it manually"
+                    .to_string(),
+            ),
+        ),
+        Err(PrivilegedError::QueueBudgetExpired) => (
+            CommandResultStatus::Failed,
+            None,
+            Some("the operation waited past its queue budget and never ran".to_string()),
+        ),
+    };
+
+    command.status = match status {
+        CommandResultStatus::Acknowledged => CloudCommandStatus::Acknowledged,
+        CommandResultStatus::Refused => CloudCommandStatus::Refused,
+        CommandResultStatus::Failed => CloudCommandStatus::Failed,
+    };
+    command.result = result.clone();
+    command.completed_at = Some(Utc::now());
+    let _ = deps.repository.put_cloud_command(&command).await;
+
+    send_command_result(transport, command_id, status, result, reason, correlation).await;
+}
+
+/// Records a refusal, persists the command in its terminal refused state, and
+/// reports it to the cloud with a secret-free reason.
+async fn refuse_command(
+    deps: &SupervisorDeps,
+    transport: &dyn Transport,
+    payload: &CommandInvokePayload,
+    correlation: Option<Uuid>,
+    reason: RefusalReason,
+) {
+    let Ok(capability) = CapabilityId::new(&payload.capability_id) else {
+        send_command_result(
+            transport,
+            payload.command_id,
+            CommandResultStatus::Refused,
+            None,
+            Some(RefusalReason::UnknownCapability.describe().to_string()),
+            correlation,
+        )
+        .await;
+        return;
+    };
+
+    let mut command = CloudCommand::received(
+        payload.command_id,
+        deps.environment_id,
+        capability,
+        Value::Object(payload.input.clone()),
+        payload.correlation_id.clone(),
+        Utc::now(),
+    );
+    command.refuse(reason, Utc::now());
+    let _ = deps.repository.put_cloud_command(&command).await;
+
+    send_command_result(
+        transport,
+        payload.command_id,
+        CommandResultStatus::Refused,
+        None,
+        Some(reason.describe().to_string()),
+        correlation,
+    )
+    .await;
+}
+
+/// Re-reports the stored result of a command that already reached a terminal
+/// state, without executing it again.
+async fn report_stored_result(
+    transport: &dyn Transport,
+    command: &CloudCommand,
+    correlation: Option<Uuid>,
+) {
+    let status = match command.status {
+        CloudCommandStatus::Acknowledged => CommandResultStatus::Acknowledged,
+        CloudCommandStatus::Refused => CommandResultStatus::Refused,
+        CloudCommandStatus::Failed => CommandResultStatus::Failed,
+        CloudCommandStatus::Received | CloudCommandStatus::Executing => return,
+    };
+
+    let reason = command
+        .refusal_reason
+        .map(|reason| reason.describe().to_string());
+
+    send_command_result(
+        transport,
+        command.command_id,
+        status,
+        command.result.clone(),
+        reason,
+        correlation,
+    )
+    .await;
+}
+
+async fn send_command_result(
+    transport: &dyn Transport,
+    command_id: Uuid,
+    status: CommandResultStatus,
+    result: Option<Value>,
+    reason: Option<String>,
+    correlation: Option<Uuid>,
+) {
+    let payload = CommandResultPayload {
+        command_id,
+        status,
+        result: result.and_then(|value| value.as_object().cloned()),
+        reason,
+    };
+    let Ok(value) = serde_json::to_value(&payload) else {
+        return;
+    };
+    let envelope = Envelope::new(MessageType::CommandResult, value, correlation);
+    let _ = transport.send(&envelope).await;
+}
+
+/// Persists the installation's authorization verdict for an invocation.
+///
+/// The decision is recorded whether it allowed or denied, so a denied invocation
+/// is as auditable as an executed one (FR-042, SC-016).
+async fn record_execution_decision(
+    deps: &SupervisorDeps,
+    command_id: Uuid,
+    descriptor: &CapabilityDescriptor,
+    decision: &PolicyDecision,
+) {
+    let outcome = match decision.outcome {
+        PolicyOutcome::Allow => DecisionOutcome::Permitted,
+        PolicyOutcome::Deny => DecisionOutcome::Denied,
+        PolicyOutcome::RequireApproval => DecisionOutcome::RequireApproval,
+    };
+
+    let _ = deps
+        .repository
+        .put_execution_decision(&ExecutionDecision {
+            decision_id: Uuid::new_v4(),
+            command_id,
+            outcome,
+            risk_class: descriptor.risk_class(),
+            blast_radius: descriptor.effective_blast_radius(),
+            policy_id: decision.policy_id.clone(),
+            reason: decision.reason.clone(),
+            decided_at: decision.decided_at,
+        })
+        .await;
+}
+
+/// Settles commands left unfinished by a previous run.
+///
+/// A row found in `executing` has an unknown real-world outcome, so it becomes
+/// `failed` with an explicit unknown-state reason rather than being dropped or
+/// silently retried: the operator is told a privileged change may or may not have
+/// happened (ADR-0022 §2). A row still `received` never started and is likewise
+/// settled, so a re-delivery is not mistaken for an in-flight duplicate.
+async fn resolve_interrupted_commands(deps: &SupervisorDeps, transport: &dyn Transport) {
+    let Ok(unfinished) = deps.repository.list_unfinished_cloud_commands().await else {
+        return;
+    };
+
+    for mut command in unfinished {
+        let reason = match command.status {
+            CloudCommandStatus::Executing => {
+                "the daemon restarted while this operation was executing; its outcome is unknown and must be verified manually"
+            }
+            _ => "the daemon restarted before this operation was executed",
+        };
+
+        command.status = CloudCommandStatus::Failed;
+        command.completed_at = Some(Utc::now());
+        let _ = deps.repository.put_cloud_command(&command).await;
+
+        send_command_result(
+            transport,
+            command.command_id,
+            CommandResultStatus::Failed,
+            None,
+            Some(reason.to_string()),
+            None,
+        )
+        .await;
+    }
+}
+
+/// Whether `input` satisfies the subset of JSON Schema the capability declarations
+/// in this project use.
+///
+/// An unknown or absent constraint is treated as satisfied, and the
+/// `additionalProperties: false` rule is respected so a typo in an invocation's
+/// arguments cannot slip through as an accepted input.
+fn input_matches(schema: &Value, input: &Value) -> bool {
+    let Some(schema) = schema.as_object() else {
+        return true;
+    };
+
+    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+        let matches_kind = match kind {
+            "object" => input.is_object(),
+            "array" => input.is_array(),
+            "string" => input.is_string(),
+            "number" | "integer" => input.is_number(),
+            "boolean" => input.is_boolean(),
+            "null" => input.is_null(),
+            _ => true,
+        };
+        if !matches_kind {
+            return false;
+        }
+    }
+
+    let Some(input) = input.as_object() else {
+        return true;
+    };
+
+    if let Some(required) = schema.get("required").and_then(Value::as_array)
+        && !required
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|key| input.contains_key(key))
+    {
+        return false;
+    }
+
+    if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
+        && let Some(properties) = schema.get("properties").and_then(Value::as_object)
+        && !input.keys().all(|key| properties.contains_key(key))
+    {
+        return false;
+    }
+
+    true
+}
+
 async fn run_session(
     deps: &SupervisorDeps,
     transport: &mut dyn Transport,
@@ -1026,6 +1460,10 @@ async fn run_session(
     if let Err(error) = publish_capabilities(deps, transport).await {
         return ConnectionOutcome::TransportFailed(error.to_string());
     }
+
+    // Settle anything a previous run left unfinished before reporting anything
+    // else, so a privileged change of unknown outcome is never silently dropped.
+    resolve_interrupted_commands(deps, transport).await;
 
     // The cloud asks for reconciliation at handshake when it wants it, so an
     // interrupted deployment is settled without the operator doing anything.
@@ -1177,6 +1615,9 @@ async fn handle_inbound(
                 frame.correlation_id.or(Some(frame.message_id)),
             )
             .await;
+        }
+        Some(MessageType::CommandInvoke) => {
+            handle_command_invoke(deps, transport, &frame).await;
         }
         Some(ty) if is_report_ack(ty) => {
             let Ok(ack) = serde_json::from_value::<IngestAckPayload>(frame.payload.clone()) else {
@@ -1748,6 +2189,13 @@ mod tests {
             managed_settings: Arc::new(ManagedSettingsStore::new(std::env::temp_dir().join(
                 format!("argus-cloud-settings-{}.toml", uuid::Uuid::new_v4()),
             ))),
+            environment_id: EnvironmentId::new(),
+            policy: Arc::new(argus_policy::BootstrapPolicyEvaluator::new()),
+            executor: Arc::new(argus_executor::PrivilegedExecutor::new(Arc::new(
+                argus_executor::MockServiceController::new(),
+            ))),
+            approvals: Arc::new(ApprovalStore::new()),
+            limiter: Arc::new(PrivilegedLimiter::new(2)),
         }
     }
 

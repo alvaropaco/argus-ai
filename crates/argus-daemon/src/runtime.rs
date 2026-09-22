@@ -187,6 +187,27 @@ impl Daemon {
         &self.registry
     }
 
+    /// The executor the cloud channel routes invocations to.
+    ///
+    /// It covers both published surfaces: read-only capabilities through the
+    /// bootstrap provider, and environment-changing ones through the privileged
+    /// path. Both remain behind the single `AuthorizedAction` gate.
+    pub fn cloud_executor(&self) -> Arc<dyn Executor> {
+        Arc::new(argus_executor::CompositeExecutor::new(
+            Arc::new(BootstrapExecutor::new(Arc::new(DaemonProvider {
+                config: self.config.clone(),
+            }))),
+            Arc::new(argus_executor::PrivilegedExecutor::new(Arc::new(
+                argus_executor::SystemdServiceController::new(),
+            ))),
+        ))
+    }
+
+    /// The policy evaluator the cloud channel routes through.
+    pub fn cloud_policy(&self) -> Arc<dyn PolicyEvaluator> {
+        Arc::new(BootstrapPolicyEvaluator::new())
+    }
+
     /// Routes a capability request through the policy and executor boundaries.
     ///
     /// The risk class and blast radius are derived from the capability's own

@@ -14,7 +14,7 @@ mod service;
 pub use action::{AuthorizedAction, ExecutionError, ExecutionResult, ReversalStatus};
 pub use bootstrap::BootstrapExecutor;
 pub use executor::Executor;
-pub use privileged::PrivilegedExecutor;
+pub use privileged::{CompositeExecutor, PrivilegedExecutor};
 pub use provider::CapabilityProvider;
 pub use service::{
     MockServiceController, ServiceController, ServiceError, SystemdServiceController,
