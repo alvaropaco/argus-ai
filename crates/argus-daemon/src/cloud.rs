@@ -3007,6 +3007,52 @@ mod tests {
             fs::remove_dir_all(&dir).ok();
         }
 
+        #[tokio::test]
+        async fn every_invocation_leaves_an_audit_record() {
+            let (deps, _services, dir) =
+                command_deps(active_config(), published_capabilities()).await;
+
+            let refused_id = Uuid::new_v4();
+            let _ = invoke(
+                &deps,
+                &command_frame(refused_id, "container.restart", serde_json::json!({})),
+            )
+            .await;
+
+            let executed_id = Uuid::new_v4();
+            deps.approvals.grant_for_a_while(
+                executed_id,
+                "root",
+                Utc::now(),
+                chrono::Duration::minutes(5),
+            );
+            let _ = invoke(
+                &deps,
+                &command_frame(
+                    executed_id,
+                    CapabilityId::HOST_SERVICE_RESTART,
+                    serde_json::json!({ "unit": "nginx.service" }),
+                ),
+            )
+            .await;
+
+            let events = deps.repository.list_audit_events().await.unwrap();
+            let audited = |id: Uuid| {
+                events.iter().any(|event| {
+                    event.event_type().as_str() == "cloud.command.outcome"
+                        && event.correlation_id() == Some(id)
+                })
+            };
+
+            assert!(audited(refused_id), "a refused invocation must be audited");
+            assert!(
+                audited(executed_id),
+                "an executed invocation must be audited"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
         async fn apply_and_read_result(
             deps: &SupervisorDeps,
             frame: Envelope,

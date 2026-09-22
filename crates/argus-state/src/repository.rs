@@ -34,6 +34,17 @@ pub trait DomainRepository: Send + Sync {
 
     async fn put_audit_event(&self, event: &DomainEvent) -> Result<(), RepositoryError>;
 
+    /// The audit events recorded so far.
+    ///
+    /// The read exists so that an audit write can be observed rather than assumed,
+    /// which matters for the cloud-issued invocation path: its whole guarantee is
+    /// that a cloud-driven action leaves the same trace as a local one (FR-042).
+    async fn list_audit_events(&self) -> Result<Vec<DomainEvent>, RepositoryError> {
+        Err(RepositoryError::Failed(
+            "list_audit_events is not supported by this repository".to_string(),
+        ))
+    }
+
     async fn save_health(&self, health: &HealthStatus) -> Result<(), RepositoryError>;
     async fn get_health(&self) -> Result<Option<HealthStatus>, RepositoryError>;
 
