@@ -22,6 +22,8 @@ uuid = { workspace = true }
 semver = { workspace = true }
 argus-domain = { workspace = true }
 argus-ai-core = { workspace = true }
+argus-cloud = { workspace = true }
+toml = { workspace = true }
 argus-ipc = { workspace = true }
 argus-observability = { workspace = true }
 argus-state = { workspace = true }
