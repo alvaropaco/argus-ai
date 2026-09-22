@@ -134,6 +134,43 @@ impl PrivilegedExecutor {
     }
 }
 
+impl PrivilegedExecutor {
+    /// Whether this executor performs the named capability.
+    pub fn handles(capability: &CapabilityId) -> bool {
+        ServiceOp::of(capability).is_some()
+    }
+}
+
+/// Routes an authorized action to the executor that performs it.
+///
+/// The published surface mixes read-only and environment-changing capabilities,
+/// and every published capability must be executable through the same cloud path
+/// with no shortcut (SC-016). Routing on the capability keeps both executors
+/// behind the single [`AuthorizedAction`] gate.
+pub struct CompositeExecutor {
+    read_only: Arc<dyn Executor>,
+    environment_changing: Arc<dyn Executor>,
+}
+
+impl CompositeExecutor {
+    pub fn new(read_only: Arc<dyn Executor>, environment_changing: Arc<dyn Executor>) -> Self {
+        Self {
+            read_only,
+            environment_changing,
+        }
+    }
+}
+
+impl Executor for CompositeExecutor {
+    fn execute(&self, action: &AuthorizedAction) -> Result<ExecutionResult, ExecutionError> {
+        if PrivilegedExecutor::handles(action.capability()) {
+            self.environment_changing.execute(action)
+        } else {
+            self.read_only.execute(action)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

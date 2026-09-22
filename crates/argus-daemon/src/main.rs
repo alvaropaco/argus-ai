@@ -96,6 +96,13 @@ fn spawn_cloud_supervisor(
         ))),
         capabilities: Arc::new(daemon.registry().list().cloned().collect()),
         managed_settings: Arc::new(daemon.managed_settings().clone()),
+        environment_id: daemon.environment_id(),
+        policy: daemon.cloud_policy(),
+        executor: daemon.cloud_executor(),
+        approvals: Arc::new(argus_policy::ApprovalStore::new()),
+        limiter: Arc::new(argus_daemon::privileged::PrivilegedLimiter::new(
+            config.cloud.max_concurrent_privileged,
+        )),
     };
     tokio::spawn(argus_daemon::cloud::supervise(deps, stop_rx));
     stop
