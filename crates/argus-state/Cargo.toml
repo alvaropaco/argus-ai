@@ -10,9 +10,11 @@ description = "ARGUS persistence abstraction (DomainRepository) over SQLite, wit
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+uuid = { workspace = true }
 argus-domain = { workspace = true }
 
 # Optional LanceDB backend (the ADR-011 target), disabled by default so the
@@ -26,8 +28,8 @@ default = []
 lancedb = ["dep:lancedb", "dep:futures"]
 
 [dev-dependencies]
-uuid = { workspace = true }
 chrono = { workspace = true }
+semver = { workspace = true }
 
 [lints]
 workspace = true
