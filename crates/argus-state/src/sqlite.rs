@@ -366,6 +366,13 @@ impl DomainRepository for SqliteRepository {
         )
     }
 
+    async fn list_execution_decisions(&self) -> Result<Vec<ExecutionDecision>, RepositoryError> {
+        self.list_json("cloud_decisions")?
+            .iter()
+            .map(|data| Self::decode(data))
+            .collect()
+    }
+
     async fn put_execution_approval(
         &self,
         approval: &ExecutionApproval,

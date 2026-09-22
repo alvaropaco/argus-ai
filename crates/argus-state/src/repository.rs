@@ -114,6 +114,15 @@ pub trait DomainRepository: Send + Sync {
         Err(cloud_state_unsupported("put_execution_decision"))
     }
 
+    /// The authorization verdicts recorded for cloud-issued invocations.
+    ///
+    /// The read lets a test assert the structural guarantee rather than trust it:
+    /// every invocation that reaches the executor carries a permitting decision
+    /// (SC-016).
+    async fn list_execution_decisions(&self) -> Result<Vec<ExecutionDecision>, RepositoryError> {
+        Err(cloud_state_unsupported("list_execution_decisions"))
+    }
+
     async fn put_execution_approval(
         &self,
         _approval: &ExecutionApproval,

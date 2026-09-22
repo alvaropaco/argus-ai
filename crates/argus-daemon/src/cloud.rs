@@ -1124,9 +1124,9 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
     .requiring_approval(descriptor.requires_approval());
 
     let decision = deps.policy.evaluate(&authorization);
-    record_execution_decision(deps, command_id, descriptor, &decision).await;
 
     if decision.outcome == PolicyOutcome::Deny {
+        record_execution_decision(deps, command_id, descriptor, &decision).await;
         refuse_command(
             deps,
             transport,
@@ -1141,6 +1141,7 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
     // Check 6: an approval-requiring invocation needs a valid, unexpired approval.
     let decision = if decision.outcome == PolicyOutcome::RequireApproval {
         if !deps.approvals.authorizes(command_id, Utc::now()) {
+            record_execution_decision(deps, command_id, descriptor, &decision).await;
             refuse_command(
                 deps,
                 transport,
@@ -1162,6 +1163,11 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
     } else {
         decision
     };
+
+    // Recorded after resolution, so an invocation that reaches the executor
+    // carries a `permitted` decision while one that was refused carries the
+    // outcome that refused it (SC-016).
+    record_execution_decision(deps, command_id, descriptor, &decision).await;
 
     // Check 7: execute under the concurrency cap, the resource lock, and a timeout.
     let Ok(action) = AuthorizedAction::new(authorization.capability_request, decision) else {
@@ -3048,6 +3054,21 @@ mod tests {
             assert!(
                 audited(executed_id),
                 "an executed invocation must be audited"
+            );
+
+            let decisions = deps.repository.list_execution_decisions().await.unwrap();
+            assert!(
+                decisions.iter().any(|decision| {
+                    decision.command_id == executed_id
+                        && decision.outcome == DecisionOutcome::Permitted
+                }),
+                "an executed invocation must carry a permitting decision (SC-016)"
+            );
+            assert!(
+                !decisions
+                    .iter()
+                    .any(|decision| decision.command_id == refused_id),
+                "a command refused before authorization must not fabricate a decision"
             );
 
             fs::remove_dir_all(&dir).ok();
