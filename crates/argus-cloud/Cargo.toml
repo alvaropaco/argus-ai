@@ -1,0 +1,33 @@
+[package]
+name = "argus-cloud"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS cloud integration: protocol, transport, and client for the Argus Cloud agent protocol"
+
+[features]
+default = []
+# Gates conformance tests that require a running Argus Cloud dev stack.
+live-conformance = []
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+semver = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+argus-domain = { workspace = true }
+tokio-tungstenite = { workspace = true }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+toml = { workspace = true }
