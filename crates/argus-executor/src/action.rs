@@ -48,6 +48,25 @@ pub struct ExecutionResult {
     pub finished_at: DateTime<Utc>,
 }
 
+/// Whether an operation that failed after taking effect was undone.
+///
+/// The outcomes are reported distinctly because each calls for a different
+/// operator response: a reversed operation needs nothing further, a failed
+/// reversal needs attention, and an irreversible one needs manual verification
+/// (ADR-0022 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReversalStatus {
+    /// The operation succeeded, so no reversal applied.
+    NotAttempted,
+    /// The operation failed after taking effect and was undone.
+    Reversed,
+    /// A reversal was attempted and itself failed.
+    ReversalFailed,
+    /// The operation failed after taking effect and cannot be undone.
+    NotPossible,
+}
+
 /// Errors from the executor boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
@@ -59,4 +78,15 @@ pub enum ExecutionError {
 
     #[error("execution failed: {0}")]
     Failed(String),
+
+    /// The operation failed after it had already changed the host.
+    ///
+    /// This is deliberately not folded into [`Self::Failed`]: the caller must be
+    /// able to report *whether* the change was undone, and must never report a
+    /// failed operation as a success.
+    #[error("the operation failed after taking effect ({reversal:?}): {reason}")]
+    FailedAfterEffect {
+        reason: String,
+        reversal: ReversalStatus,
+    },
 }
