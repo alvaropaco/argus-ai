@@ -71,6 +71,15 @@ impl DomainRepository for InMemoryRepository {
         Ok(())
     }
 
+    async fn list_audit_events(&self) -> Result<Vec<DomainEvent>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .audit_events
+            .clone())
+    }
+
     async fn save_health(&self, health: &HealthStatus) -> Result<(), RepositoryError> {
         self.inner
             .lock()

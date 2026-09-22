@@ -269,6 +269,13 @@ impl DomainRepository for SqliteRepository {
         self.put_json("audit_events", &event.id().to_string(), &data)
     }
 
+    async fn list_audit_events(&self) -> Result<Vec<DomainEvent>, RepositoryError> {
+        self.list_json("audit_events")?
+            .iter()
+            .map(|data| Self::decode(data))
+            .collect()
+    }
+
     async fn save_health(&self, health: &HealthStatus) -> Result<(), RepositoryError> {
         let data =
             serde_json::to_string(health).map_err(|e| RepositoryError::Failed(e.to_string()))?;
