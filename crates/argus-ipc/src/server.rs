@@ -14,9 +14,10 @@ use crate::protocol::{DecodeError, ErrorCode, Request, Response, decode_request}
 /// The handler is invoked once per decoded request with the authoritative
 /// peer identity derived from `SO_PEERCRED`. The handler is responsible for
 /// authorization and dispatch.
-pub async fn serve<H>(listener: UnixListener, handler: H) -> io::Result<()>
+pub async fn serve<H, Fut>(listener: UnixListener, handler: H) -> io::Result<()>
 where
-    H: Fn(Request, Principal) -> Response + Send + Sync + Clone + 'static,
+    H: Fn(Request, Principal) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Response> + Send,
 {
     loop {
         let (stream, _) = listener.accept().await?;
@@ -29,9 +30,10 @@ where
     }
 }
 
-async fn handle_connection<H>(stream: UnixStream, handler: H) -> io::Result<()>
+async fn handle_connection<H, Fut>(stream: UnixStream, handler: H) -> io::Result<()>
 where
-    H: Fn(Request, Principal) -> Response,
+    H: Fn(Request, Principal) -> Fut,
+    Fut: std::future::Future<Output = Response>,
 {
     let principal = stream
         .peer_cred()
@@ -51,7 +53,7 @@ where
         }
 
         let response = match decode_request(&line) {
-            Ok(request) => handler(request, principal),
+            Ok(request) => handler(request, principal).await,
             Err(DecodeError::Malformed) => {
                 Response::err(Uuid::nil(), ErrorCode::Malformed, "invalid JSON frame")
             }

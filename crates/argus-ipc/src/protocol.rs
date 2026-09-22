@@ -9,7 +9,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// The protocol version spoken by this implementation.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 1, 0);
+///
+/// Adding an operation is a MINOR bump; removing or renaming one is MAJOR.
+pub const PROTOCOL_VERSION: Version = Version::new(0, 2, 0);
 
 /// A typed IPC operation id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -19,6 +21,9 @@ pub enum Operation {
     ConfigGet,
     PluginsList,
     CapabilitiesList,
+    CloudEnroll,
+    CloudStatus,
+    CloudForget,
 }
 
 impl Operation {
@@ -29,6 +34,9 @@ impl Operation {
             Operation::ConfigGet => "config.get",
             Operation::PluginsList => "plugins.list",
             Operation::CapabilitiesList => "capabilities.list",
+            Operation::CloudEnroll => "cloud.enroll",
+            Operation::CloudStatus => "cloud.status",
+            Operation::CloudForget => "cloud.forget",
         }
     }
 }
@@ -55,6 +63,9 @@ impl FromStr for Operation {
             "config.get" => Ok(Operation::ConfigGet),
             "plugins.list" => Ok(Operation::PluginsList),
             "capabilities.list" => Ok(Operation::CapabilitiesList),
+            "cloud.enroll" => Ok(Operation::CloudEnroll),
+            "cloud.status" => Ok(Operation::CloudStatus),
+            "cloud.forget" => Ok(Operation::CloudForget),
             _ => Err(UnknownOperationError),
         }
     }
