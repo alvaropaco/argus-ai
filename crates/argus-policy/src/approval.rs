@@ -25,7 +25,10 @@ impl ApprovalStore {
 
     /// Records an approval, replacing any earlier one for the same invocation.
     pub fn grant(&self, approval: ExecutionApproval) {
-        let mut approvals = self.approvals.lock().expect("approval store is not poisoned");
+        let mut approvals = self
+            .approvals
+            .lock()
+            .expect("approval store is not poisoned");
         approvals.insert(approval.command_id, approval);
     }
 
@@ -37,8 +40,7 @@ impl ApprovalStore {
         granted_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> ExecutionApproval {
-        let approval =
-            ExecutionApproval::grant(command_id, granted_by, granted_at, expires_at);
+        let approval = ExecutionApproval::grant(command_id, granted_by, granted_at, expires_at);
         self.grant(approval.clone());
         approval
     }
@@ -59,20 +61,29 @@ impl ApprovalStore {
     /// An approval for a different invocation never authorizes this one, and an
     /// expired approval authorizes nothing.
     pub fn authorizes(&self, command_id: Uuid, now: DateTime<Utc>) -> bool {
-        let approvals = self.approvals.lock().expect("approval store is not poisoned");
+        let approvals = self
+            .approvals
+            .lock()
+            .expect("approval store is not poisoned");
         approvals
             .get(&command_id)
             .is_some_and(|approval| approval.authorizes(command_id, now))
     }
 
     pub fn get(&self, command_id: Uuid) -> Option<ExecutionApproval> {
-        let approvals = self.approvals.lock().expect("approval store is not poisoned");
+        let approvals = self
+            .approvals
+            .lock()
+            .expect("approval store is not poisoned");
         approvals.get(&command_id).cloned()
     }
 
     /// Forgets an invocation's approval, so it cannot authorize a later attempt.
     pub fn revoke(&self, command_id: Uuid) -> Option<ExecutionApproval> {
-        let mut approvals = self.approvals.lock().expect("approval store is not poisoned");
+        let mut approvals = self
+            .approvals
+            .lock()
+            .expect("approval store is not poisoned");
         approvals.remove(&command_id)
     }
 }
@@ -107,7 +118,12 @@ mod tests {
         let command = Uuid::new_v4();
         let granted_at = now() - Duration::minutes(10);
 
-        store.grant_for(command, "root", granted_at, granted_at + Duration::minutes(1));
+        store.grant_for(
+            command,
+            "root",
+            granted_at,
+            granted_at + Duration::minutes(1),
+        );
 
         assert!(
             !store.authorizes(command, now()),
@@ -121,7 +137,12 @@ mod tests {
         let command = Uuid::new_v4();
         let granted_at = now();
 
-        store.grant_for(command, "root", granted_at, granted_at + Duration::seconds(60));
+        store.grant_for(
+            command,
+            "root",
+            granted_at,
+            granted_at + Duration::seconds(60),
+        );
 
         assert!(store.authorizes(command, granted_at + Duration::seconds(30)));
         assert!(!store.authorizes(command, granted_at + Duration::seconds(60)));
@@ -136,14 +157,18 @@ mod tests {
 
         assert_eq!(approval.granted_by, "operator");
         assert_eq!(approval.state, ApprovalState::Granted);
-        assert_eq!(store.get(command).map(|a| a.granted_by), Some("operator".into()));
+        assert_eq!(
+            store.get(command).map(|a| a.granted_by),
+            Some("operator".into())
+        );
     }
 
     #[test]
     fn a_denied_approval_never_authorizes() {
         let store = ApprovalStore::new();
         let command = Uuid::new_v4();
-        let mut approval = ExecutionApproval::grant(command, "root", now(), now() + Duration::minutes(5));
+        let mut approval =
+            ExecutionApproval::grant(command, "root", now(), now() + Duration::minutes(5));
         approval.state = ApprovalState::Denied;
         store.grant(approval);
 
@@ -165,7 +190,8 @@ mod tests {
     fn regranting_replaces_the_earlier_decision() {
         let store = ApprovalStore::new();
         let command = Uuid::new_v4();
-        let mut denied = ExecutionApproval::grant(command, "root", now(), now() + Duration::minutes(5));
+        let mut denied =
+            ExecutionApproval::grant(command, "root", now(), now() + Duration::minutes(5));
         denied.state = ApprovalState::Denied;
         store.grant(denied);
         assert!(!store.authorizes(command, now()));

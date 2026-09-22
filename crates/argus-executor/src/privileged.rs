@@ -138,7 +138,9 @@ impl PrivilegedExecutor {
 mod tests {
     use std::sync::Arc;
 
-    use argus_domain::{CapabilityId, CapabilityRequest, PolicyDecision, Principal, RequestContext};
+    use argus_domain::{
+        CapabilityId, CapabilityRequest, PolicyDecision, Principal, RequestContext,
+    };
     use chrono::Utc;
     use semver::Version;
     use serde_json::json;
@@ -208,7 +210,10 @@ mod tests {
         let executor = PrivilegedExecutor::new(controller.clone());
 
         let result = executor
-            .execute(&action_for(CapabilityId::HOST_SERVICE_RESTART, "nginx.service"))
+            .execute(&action_for(
+                CapabilityId::HOST_SERVICE_RESTART,
+                "nginx.service",
+            ))
             .expect("restart succeeds");
 
         assert_eq!(result.evidence["unit"], "nginx.service");
@@ -260,7 +265,10 @@ mod tests {
         let executor = PrivilegedExecutor::new(controller.clone());
 
         let err = executor
-            .execute(&action_for(CapabilityId::HOST_SERVICE_STOP, "nginx.service"))
+            .execute(&action_for(
+                CapabilityId::HOST_SERVICE_STOP,
+                "nginx.service",
+            ))
             .unwrap_err();
 
         assert!(
@@ -286,7 +294,10 @@ mod tests {
         let executor = PrivilegedExecutor::new(controller.clone());
 
         let err = executor
-            .execute(&action_for(CapabilityId::HOST_SERVICE_START, "nginx.service"))
+            .execute(&action_for(
+                CapabilityId::HOST_SERVICE_START,
+                "nginx.service",
+            ))
             .unwrap_err();
 
         assert!(matches!(
@@ -305,7 +316,10 @@ mod tests {
         let executor = PrivilegedExecutor::new(controller.clone());
 
         let err = executor
-            .execute(&action_for(CapabilityId::HOST_SERVICE_STOP, "nginx.service"))
+            .execute(&action_for(
+                CapabilityId::HOST_SERVICE_STOP,
+                "nginx.service",
+            ))
             .unwrap_err();
 
         assert!(
@@ -327,7 +341,10 @@ mod tests {
         let executor = PrivilegedExecutor::new(controller.clone());
 
         let err = executor
-            .execute(&action_for(CapabilityId::HOST_SERVICE_RESTART, "nginx.service"))
+            .execute(&action_for(
+                CapabilityId::HOST_SERVICE_RESTART,
+                "nginx.service",
+            ))
             .unwrap_err();
 
         assert!(matches!(
