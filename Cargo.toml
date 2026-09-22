@@ -13,6 +13,7 @@ members = [
     "crates/argus-state",
     "crates/argus-observability",
     "crates/argus-install",
+    "crates/argus-cloud",
 ]
 
 [workspace.package]
@@ -35,6 +36,9 @@ semver = { version = "1", features = ["serde"] }
 toml = "0.8"
 anyhow = "1"
 async-trait = "0.1"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+base64 = "0.23.1"
+futures-util = "0.3.34"
 argus-domain = { version = "0.1.7", path = "crates/argus-domain" }
 argus-ai-core = { version = "0.1.7", path = "crates/argus-ai-core" }
 argus-ipc = { version = "0.1.7", path = "crates/argus-ipc" }
@@ -45,6 +49,7 @@ argus-state = { version = "0.1.7", path = "crates/argus-state" }
 argus-events = { version = "0.1.7", path = "crates/argus-events" }
 argus-ai-tui = { version = "0.1.7", path = "crates/argus-ai-tui" }
 argus-install = { version = "0.1.7", path = "crates/argus-install" }
+argus-cloud = { version = "0.1.7", path = "crates/argus-cloud" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
