@@ -60,6 +60,9 @@ pub struct AuthorizationRequest {
     pub capability_request: CapabilityRequest,
     pub risk_class: RiskClass,
     pub blast_radius: BlastRadius,
+    /// Whether the invoked capability demands a local approval per invocation.
+    #[serde(default)]
+    pub requires_approval: bool,
 }
 
 impl AuthorizationRequest {
@@ -72,7 +75,14 @@ impl AuthorizationRequest {
             capability_request,
             risk_class,
             blast_radius,
+            requires_approval: false,
         }
+    }
+
+    /// Derives the approval requirement from the capability's own declaration.
+    pub fn requiring_approval(mut self, requires_approval: bool) -> Self {
+        self.requires_approval = requires_approval;
+        self
     }
 }
 
