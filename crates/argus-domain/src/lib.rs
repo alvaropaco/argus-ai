@@ -9,6 +9,7 @@
 
 mod authorization;
 mod capability;
+mod cloud;
 mod context;
 mod error;
 mod event;
@@ -25,6 +26,12 @@ pub use authorization::{
     AuthorizationRequest, BlastRadius, CapabilityRequest, PolicyDecision, PolicyOutcome,
 };
 pub use capability::{CapabilityDescriptor, Reversibility, RiskClass};
+pub use cloud::{
+    AppliedConfigurationState, ApplyStatus, ApprovalState, CapabilityPublication, CloudCommand,
+    CloudCommandStatus, CloudConnection, CloudConnectivityState, CloudEnrollment, DecisionOutcome,
+    EffectiveSource, ExecutionApproval, ExecutionDecision, ManagedConfiguration, ManagedSetting,
+    RefusalReason, ReportBuffer, TrustState, TrustStatus,
+};
 pub use context::{Principal, RequestContext};
 pub use error::DomainError;
 pub use event::{DomainEvent, EventType, Severity};
