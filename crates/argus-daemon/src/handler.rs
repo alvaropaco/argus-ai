@@ -48,6 +48,9 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
         Operation::CloudEnroll => return enroll(daemon, request).await,
         Operation::CloudStatus => return cloud_status(daemon, request).await,
         Operation::CloudForget => return cloud_forget(daemon, request).await,
+        Operation::CloudSetPrivilegedExecution => {
+            return set_privileged_execution(daemon, request);
+        }
     };
 
     Response::ok(request.correlation_id, result)
@@ -60,15 +63,52 @@ async fn cloud_status(daemon: &Daemon, request: Request) -> Response {
     let queue = daemon.report_queue();
     let queue = queue.lock().await;
 
-    let status = crate::cloud::cloud_status(
-        &daemon.config().cloud,
-        daemon.repository().as_ref(),
-        &tracker,
-        &queue,
-    )
-    .await;
+    let status = to_value(
+        crate::cloud::cloud_status(
+            &daemon.config().cloud,
+            daemon.repository().as_ref(),
+            &tracker,
+            &queue,
+        )
+        .await,
+    );
 
-    Response::ok(request.correlation_id, to_value(status))
+    // The kill switch is runtime state, so it is reported from the live flag
+    // rather than from the startup configuration snapshot.
+    let status = match status {
+        Value::Object(mut object) => {
+            object.insert(
+                "privileged_execution_enabled".to_string(),
+                Value::Bool(daemon.privileged_execution_enabled()),
+            );
+            Value::Object(object)
+        }
+        other => other,
+    };
+
+    Response::ok(request.correlation_id, status)
+}
+
+/// Flips the local kill switch, which governs host-changing invocations only.
+///
+/// The request arrives over the local socket, where the daemon has already
+/// authorized the peer by uid. Nothing on the cloud channel reaches this path,
+/// which is what keeps the switch a local operator control (FR-050, SC-017).
+fn set_privileged_execution(daemon: &Daemon, request: Request) -> Response {
+    let Some(enabled) = request.payload.get("enabled").and_then(Value::as_bool) else {
+        return Response::err(
+            request.correlation_id,
+            ErrorCode::Malformed,
+            "cloud.set-privileged-execution requires a boolean 'enabled' in the payload",
+        );
+    };
+
+    daemon.set_privileged_execution(enabled);
+
+    Response::ok(
+        request.correlation_id,
+        serde_json::json!({ "privileged_execution_enabled": enabled }),
+    )
 }
 
 /// Removes the enrollment, leaving the installation running locally.

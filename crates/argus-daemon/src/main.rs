@@ -103,6 +103,7 @@ fn spawn_cloud_supervisor(
         limiter: Arc::new(argus_daemon::privileged::PrivilegedLimiter::new(
             config.cloud.max_concurrent_privileged,
         )),
+        privileged_execution: daemon.privileged_execution_flag(),
     };
     tokio::spawn(argus_daemon::cloud::supervise(deps, stop_rx));
     stop

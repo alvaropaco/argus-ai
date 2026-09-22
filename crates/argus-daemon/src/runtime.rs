@@ -1,6 +1,7 @@
 //! In-memory runtime state for the bootstrap daemon.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use argus_domain::{
@@ -35,6 +36,9 @@ pub struct Daemon {
     executor: BootstrapExecutor,
     registry: CapabilityRegistry,
     plugins: Vec<PluginManifest>,
+    /// The local kill switch, shared with the cloud supervisor so that changing it
+    /// takes effect without a restart.
+    privileged_execution: Arc<AtomicBool>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -104,6 +108,8 @@ impl Daemon {
         }
 
         let buffer_capacity = config.cloud.report_buffer_max_records;
+        let privileged_execution =
+            Arc::new(AtomicBool::new(config.cloud.allow_privileged_execution));
 
         Ok(Self {
             started_at: Instant::now(),
@@ -118,6 +124,7 @@ impl Daemon {
             executor: BootstrapExecutor::new(provider),
             registry,
             plugins: Vec::new(),
+            privileged_execution,
         })
     }
 
@@ -206,6 +213,25 @@ impl Daemon {
     /// The policy evaluator the cloud channel routes through.
     pub fn cloud_policy(&self) -> Arc<dyn PolicyEvaluator> {
         Arc::new(BootstrapPolicyEvaluator::new())
+    }
+
+    /// Whether cloud-issued privileged execution is currently enabled.
+    pub fn privileged_execution_enabled(&self) -> bool {
+        self.privileged_execution.load(Ordering::SeqCst)
+    }
+
+    /// Flips the local kill switch.
+    ///
+    /// Only the local socket reaches this, and the daemon has already authorized
+    /// that peer by uid. No cloud message is routed here, which is what makes the
+    /// switch a local operator control (FR-050).
+    pub fn set_privileged_execution(&self, enabled: bool) {
+        self.privileged_execution.store(enabled, Ordering::SeqCst);
+    }
+
+    /// The shared kill switch the cloud supervisor reads on every invocation.
+    pub fn privileged_execution_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.privileged_execution)
     }
 
     /// Routes a capability request through the policy and executor boundaries.
