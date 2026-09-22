@@ -2568,6 +2568,28 @@ mod tests {
             ]
         }
 
+        /// A published capability the local policy does not permit, so check 5
+        /// (policy denial) is reachable rather than short-circuited earlier.
+        fn policy_denied_capability() -> CapabilityDescriptor {
+            CapabilityDescriptor::new(
+                CapabilityId::new("container.restart").unwrap(),
+                "argusd",
+                "container.restart",
+                argus_domain::RiskClass::Controlled,
+                Version::new(0, 1, 0),
+                serde_json::json!({}),
+                serde_json::json!({}),
+                argus_domain::Reversibility::None,
+            )
+            .with_blast_radius(argus_domain::BlastRadius::Environment)
+        }
+
+        fn published_with_denied() -> Vec<CapabilityDescriptor> {
+            let mut published = published_capabilities();
+            published.push(policy_denied_capability());
+            published
+        }
+
         fn command_frame(command_id: Uuid, capability: &str, input: serde_json::Value) -> Envelope {
             Envelope::new(
                 MessageType::CommandInvoke,
@@ -2827,7 +2849,7 @@ mod tests {
             let (deps, _s, d1) = command_deps(active_config(), published.clone()).await;
             let unknown = invoke(
                 &deps,
-                &command_frame(Uuid::new_v4(), "container.restart", serde_json::json!({})),
+                &command_frame(Uuid::new_v4(), "not.a.capability", serde_json::json!({})),
             )
             .await;
 
@@ -2866,7 +2888,14 @@ mod tests {
             )
             .await;
 
-            let reasons: Vec<String> = [&unknown, &invalid, &disabled, &pending]
+            let (deps, _s, d5) = command_deps(active_config(), published_with_denied()).await;
+            let denied = invoke(
+                &deps,
+                &command_frame(Uuid::new_v4(), "container.restart", serde_json::json!({})),
+            )
+            .await;
+
+            let reasons: Vec<String> = [&unknown, &invalid, &disabled, &pending, &denied]
                 .iter()
                 .filter_map(|transport| {
                     transport
@@ -2876,17 +2905,50 @@ mod tests {
                 })
                 .collect();
 
-            assert_eq!(reasons.len(), 4, "every refusal must carry a reason");
+            assert_eq!(
+                reasons.len(),
+                5,
+                "every one of the five refusal reasons must carry a reason"
+            );
             let unique: std::collections::HashSet<&String> = reasons.iter().collect();
             assert_eq!(
                 unique.len(),
-                4,
+                5,
                 "each refusal reason must be distinct: {reasons:?}"
             );
 
-            for dir in [d1, d2, d3, d4] {
+            for dir in [d1, d2, d3, d4, d5] {
                 fs::remove_dir_all(&dir).ok();
             }
+        }
+
+        #[tokio::test]
+        async fn a_command_the_policy_denies_is_refused_without_touching_the_host() {
+            let (deps, services, dir) =
+                command_deps(active_config(), published_with_denied()).await;
+            let id = Uuid::new_v4();
+
+            let transport = invoke(
+                &deps,
+                &command_frame(id, "container.restart", serde_json::json!({})),
+            )
+            .await;
+
+            let result = result_for(&transport, id);
+            assert_eq!(result["status"], "refused");
+            let stored = deps
+                .repository
+                .get_cloud_command(id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.refusal_reason, Some(RefusalReason::PolicyDenied));
+            assert!(
+                services.recorded_calls().is_empty(),
+                "a policy-denied invocation must not change the environment (SC-005)"
+            );
+
+            fs::remove_dir_all(&dir).ok();
         }
 
         #[tokio::test]
