@@ -31,6 +31,11 @@ AmbientCapabilities=
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
+# The secret store writes the enrollment credential to this path at mode 0600
+# (FR-035). ProtectSystem=strict would otherwise make it read-only, which makes
+# `argus cloud enroll` fail on every hardened install with EROFS — the feature's
+# first step would be impossible. The exception is this one directory, not /etc.
+ReadWritePaths=/etc/argus/secrets
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
