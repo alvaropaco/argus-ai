@@ -1,34 +1,34 @@
 Package: argus
-Version: 0.1.7
+Version: 0.1.8
 Architecture: amd64
 Homepage: https://github.com/alvaropaco/argus-ai
 Maintainer: ARGUS AI <maintainers@argus.0x-ai.com>
-Installed-Size: 1947
+Installed-Size: 2103
 Depends: libc6 (>= 2.39)
 Priority: optional
 Section: utils
-Filename: pool/main/a/argus/argus_0.1.7_amd64.deb
-Size: 672292
-SHA256: 7f4d7887f603d1e65a9edc25f47cc7a3221f995b7b893e8bdec0800b5d1af455
-SHA1: 52381987845dd1fdd39e8e3c7b3d524172e1f69e
-MD5sum: 0831b46a2f64ef70794b3a8f728ace9b
+Filename: pool/main/a/argus/argus_0.1.8_amd64.deb
+Size: 724456
+SHA256: 6c6a39d29f5c2b201e9ad5876138f82aa81d6acba5427f408440af02e3a0a8fe
+SHA1: 9e3b2e1ed470b20250152edc4f6d5ed33ff2d06f
+MD5sum: 6663671a603e91f0353d9270faa9a2f5
 Description: ARGUS command-line interface
  ARGUS autonomous infrastructure operations CLI
 
 Package: argusd
-Version: 0.1.7
+Version: 0.1.8
 Architecture: amd64
 Homepage: https://github.com/alvaropaco/argus-ai
 Maintainer: ARGUS AI <maintainers@argus.0x-ai.com>
-Installed-Size: 5692
-Depends: libc6 (>= 2.34)
+Installed-Size: 9055
+Depends: libc6 (>= 2.39)
 Priority: optional
 Section: utils
-Filename: pool/main/a/argusd/argusd_0.1.7_amd64.deb
-Size: 2033832
-SHA256: 45ba1d8653d75061bded7a6bed02cd838ccb2b170f85bcbaa058ab7a97ade9c7
-SHA1: d181a85bb8ca74993aead58fa4d6646175276285
-MD5sum: ec7eb925c243c6f2edf25dc00ac814db
+Filename: pool/main/a/argusd/argusd_0.1.8_amd64.deb
+Size: 3113092
+SHA256: c7682591cc6a6e4ea014aee120d8fe692eb3731d8f8b32b6350804f5444739de
+SHA1: fe455879221f4cbae7783b670f73ad80059468b3
+MD5sum: 42ae81beeec9987a6bfd333f7c6facad
 Description: ARGUS privileged daemon (argusd)
  ARGUS autonomous infrastructure operations runtime daemon
 
