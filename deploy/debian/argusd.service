@@ -35,10 +35,13 @@ ProtectSystem=strict
 # (/etc/argus/secrets, mode 0600, FR-035) and the cloud-managed settings
 # (/etc/argus/cloud-settings.toml). ProtectSystem=strict makes both read-only,
 # which breaks the feature at its first step and again at the first delivered
-# configuration — both failed with EROFS on a real unit. These two are named
-# individually rather than granting /etc/argus, so the operator's own
-# argus.toml stays read-only to the daemon.
-ReadWritePaths=/etc/argus/secrets /etc/argus/cloud-settings.toml
+# configuration — both failed with EROFS against a real unit.
+#
+# The directory is granted as a whole rather than naming the two paths, because
+# the settings file does not exist until the first configuration is applied and
+# systemd refuses to start a unit whose ReadWritePaths entry is missing. Naming
+# the file would make a fresh install fail to boot.
+ReadWritePaths=/etc/argus
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
