@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use argus_cloud::client::identity::InstallationKey;
 use argus_cloud::client::supervisor::{
     ConnectionOutcome, NextAction, ReconnectPolicy, SessionRequest, StopReason, connect_once,
 };
@@ -28,6 +29,10 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
 }
 
+fn key() -> InstallationKey {
+    InstallationKey::from_seed_bytes(&[7u8; 32])
+}
+
 fn identity() -> EnrolledIdentity {
     EnrolledIdentity::from_granted(
         &PairingGrantedPayload {
@@ -39,6 +44,7 @@ fn identity() -> EnrolledIdentity {
             negotiated_protocol_version: "1.0.0".into(),
         },
         now(),
+        key().public_key_b64(),
     )
 }
 
@@ -79,12 +85,14 @@ async fn one_cycle(
     factory: &FakeFactory,
     identity: &EnrolledIdentity,
 ) -> Result<(), ConnectionOutcome> {
+    let key = key();
     connect_once(
         factory,
         SessionRequest {
             endpoint: ENDPOINT,
             expected_cloud_id: CLOUD_ID,
             identity,
+            key: &key,
             session_proof: SESSION_PROOF,
             hostname: "web-01",
             agent_version: "0.1.7",

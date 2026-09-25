@@ -1,8 +1,13 @@
 # ADR-0023: Installation Identity — Credential-Based v1 and Its Production Limitation
 
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-09-21
-- **Supersedes:** nothing. **Superseded by:** a future ADR introducing asymmetric identity.
+- **Supersedes:** nothing. **Superseded by:** [ADR-0024](0024-installation-identity-asymmetric-ed25519.md).
+
+> **Superseded.** The credential-based v1 identity and its placeholder key
+> described below were replaced by the Ed25519 asymmetric identity in ADR-0024.
+> The placeholder MUST NOT be reinstated; §2's "keep it non-decodable" rule is
+> historical and no longer applies.
 
 ## Context
 

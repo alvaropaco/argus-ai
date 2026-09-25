@@ -6,6 +6,7 @@
 //! remediation so the operator knows whether to fix a typo, fetch a new code, or
 //! simply wait.
 
+use crate::client::identity::InstallationKey;
 use crate::error::CloudError;
 use crate::protocol::envelope::{Envelope, MessageType};
 use crate::protocol::errors::PairingDenialCode;
@@ -42,36 +43,6 @@ impl std::fmt::Debug for EnrollmentOutcome {
     }
 }
 
-/// The protocol's public-key field requires 32–2000 characters. This placeholder
-/// is intentionally **not** decodable as base64url: the `!` characters are
-/// outside that alphabet, so the cloud's key decode fails and its tolerant
-/// branch is taken outside production.
-///
-/// ADR-0023 §2 records that this must remain non-decodable. A well-formed key
-/// would take the strict verification branch and fail in *every* environment.
-pub fn placeholder_public_key() -> String {
-    "argus-v1-placeholder-key!!non-cryptographic!!".to_string()
-}
-
-/// The protocol's challenge-signature field requires 16–2000 characters.
-///
-/// Also deliberately non-decodable, for the same reason as
-/// [`placeholder_public_key`].
-pub fn placeholder_challenge_signature() -> String {
-    "argus-v1-placeholder-signature!!unsigned".to_string()
-}
-
-/// Whether a string is usable as the protocol's key material placeholder.
-///
-/// A decodable value would be a regression, so this is asserted rather than
-/// assumed.
-pub fn is_non_decodable_placeholder(value: &str) -> bool {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value)
-        .is_err()
-}
-
 /// Rejects a code that cannot possibly be valid, before spending a connection.
 pub fn validate_code(code: &str) -> Result<(), CloudError> {
     let len = code.len();
@@ -89,25 +60,30 @@ pub fn validate_code(code: &str) -> Result<(), CloudError> {
 }
 
 /// Sends `pairing.redeem` and interprets the cloud's reply.
+///
+/// The installation signs the challenge the cloud sent in `handshake.hello`
+/// with its Ed25519 key, and transmits the matching public key, so a production
+/// cloud can verify the peer cryptographically (ADR-0024).
 pub async fn enroll(
     transport: &mut dyn Transport,
     code: &str,
     hostname: &str,
     agent_version: &str,
     expected_cloud_id: &str,
+    key: &InstallationKey,
 ) -> Result<EnrollmentOutcome, CloudError> {
     validate_code(code)?;
     validate_identity_fields(hostname, agent_version)?;
 
-    await_hello(transport, expected_cloud_id).await?;
+    let hello = await_hello(transport, expected_cloud_id).await?;
 
     let redeem = PairingRedeemPayload {
         code: code.to_string(),
         protocol_version: PROTOCOL_VERSION.to_string(),
         agent_version: agent_version.to_string(),
         hostname: hostname.to_string(),
-        public_key: placeholder_public_key(),
-        challenge_signature: placeholder_challenge_signature(),
+        public_key: key.public_key_b64(),
+        challenge_signature: key.sign_challenge(&hello.challenge),
         capability_schema_version: None,
     };
     send_json(transport, MessageType::PairingRedeem, &redeem).await?;
@@ -202,16 +178,16 @@ async fn send_json<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::messages::{
-        MAX_CHALLENGE_SIGNATURE_LEN, MAX_PUBLIC_KEY_LEN, MIN_CHALLENGE_SIGNATURE_LEN,
-        MIN_PUBLIC_KEY_LEN,
-    };
     use crate::transport::fake::FakeTransport;
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use uuid::Uuid;
 
     const CLOUD_ID: &str = "argus-cloud";
+
+    fn key() -> InstallationKey {
+        InstallationKey::from_seed_bytes(&[7u8; 32])
+    }
 
     fn now() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
@@ -259,39 +235,9 @@ mod tests {
             "web-01",
             "0.1.7",
             CLOUD_ID,
+            &key(),
         )
         .await
-    }
-
-    #[test]
-    fn placeholder_key_is_within_bounds_and_non_decodable() {
-        let key = placeholder_public_key();
-        assert!(key.len() >= MIN_PUBLIC_KEY_LEN, "{key}");
-        assert!(key.len() <= MAX_PUBLIC_KEY_LEN, "{key}");
-        assert!(
-            is_non_decodable_placeholder(&key),
-            "ADR-0023 §2: must not decode"
-        );
-    }
-
-    #[test]
-    fn placeholder_signature_is_within_bounds_and_non_decodable() {
-        let signature = placeholder_challenge_signature();
-        assert!(
-            signature.len() >= MIN_CHALLENGE_SIGNATURE_LEN,
-            "{signature}"
-        );
-        assert!(
-            signature.len() <= MAX_CHALLENGE_SIGNATURE_LEN,
-            "{signature}"
-        );
-        assert!(is_non_decodable_placeholder(&signature));
-    }
-
-    #[test]
-    fn a_decodable_key_would_be_a_regression() {
-        // Guards the property the cloud's tolerant branch depends on.
-        assert!(!is_non_decodable_placeholder("aGVsbG8"));
     }
 
     #[test]
@@ -318,7 +264,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_redeem_frame_carries_the_required_fields() {
+    async fn the_redeem_frame_carries_the_signed_challenge_and_public_key() {
+        let key = key();
         let mut transport = FakeTransport::with_inbound(vec![hello(), granted()]);
         enroll(
             &mut transport,
@@ -326,6 +273,7 @@ mod tests {
             "web-01",
             "0.1.7",
             CLOUD_ID,
+            &key,
         )
         .await
         .unwrap();
@@ -343,9 +291,16 @@ mod tests {
         ] {
             assert!(payload.get(field).is_some(), "cloud requires `{field}`");
         }
-        assert!(is_non_decodable_placeholder(
-            payload["public_key"].as_str().unwrap()
-        ));
+        assert_eq!(
+            payload["public_key"].as_str().unwrap(),
+            key.public_key_b64(),
+            "the frame must carry the real public key"
+        );
+        assert_eq!(
+            payload["challenge_signature"].as_str().unwrap(),
+            key.sign_challenge("nonce"),
+            "the frame must sign the challenge from handshake.hello"
+        );
     }
 
     #[tokio::test]
@@ -408,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_code_never_reaches_the_network() {
         let mut transport = FakeTransport::new();
-        let err = enroll(&mut transport, "short", "web-01", "0.1.7", CLOUD_ID)
+        let err = enroll(&mut transport, "short", "web-01", "0.1.7", CLOUD_ID, &key())
             .await
             .expect_err("rejected locally");
         assert!(matches!(err, CloudError::Protocol(_)), "{err:?}");

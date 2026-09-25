@@ -5,6 +5,7 @@
 //! code must produce a distinct, actionable outcome: the operator must be able to
 //! tell "fix your typo" from "fetch a new code" from "wait".
 
+use argus_cloud::client::identity::InstallationKey;
 use argus_cloud::client::pairing::{EnrollmentOutcome, enroll};
 use argus_cloud::protocol::errors::PairingDenialCode;
 use argus_cloud::protocol::{Envelope, MessageType};
@@ -15,6 +16,10 @@ use uuid::Uuid;
 
 const CLOUD_ID: &str = "argus-cloud";
 const CODE: &str = "ARGUS-7F3K-9Q2M-4XZ8";
+
+fn key() -> InstallationKey {
+    InstallationKey::from_seed_bytes(&[7u8; 32])
+}
 
 fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
@@ -56,7 +61,7 @@ fn granted() -> Envelope {
 
 async fn attempt(frames: Vec<Envelope>) -> EnrollmentOutcome {
     let mut transport = FakeTransport::with_inbound(frames);
-    enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID)
+    enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID, &key())
         .await
         .expect("a denial is an outcome, not an error")
 }
@@ -151,7 +156,7 @@ async fn a_key_change_points_at_revocation_rather_than_retrying() {
 #[tokio::test]
 async fn an_unknown_denial_code_is_rejected_rather_than_guessed() {
     let mut transport = FakeTransport::with_inbound(vec![hello(), denied("SOMETHING_NEW")]);
-    let err = enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID)
+    let err = enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID, &key())
         .await
         .expect_err("an unknown denial code must not be silently accepted");
     assert!(
@@ -170,7 +175,7 @@ async fn a_grant_after_a_denial_is_not_accepted() {
 #[tokio::test]
 async fn enrollment_sends_exactly_one_frame_before_the_reply() {
     let mut transport = FakeTransport::with_inbound(vec![hello(), granted()]);
-    enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID)
+    enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID, &key())
         .await
         .unwrap();
 

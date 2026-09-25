@@ -274,14 +274,14 @@ A configuration kind this release cannot honour — such as the DevOps agent-tea
 definition, which has no local runtime yet — is **refused with an explicit
 reason** rather than accepted and quietly ignored.
 
-> **Production limitation.** Installation identity in this release is
-> credential-based, not asymmetric: the installation supplies a non-secret
-> placeholder for the protocol's key field. Argus Cloud only tolerates that
-> outside production and refuses enrollment outright when running in production.
-> **Enrollment therefore works against a non-production Argus Cloud and is
-> refused by a production one** — `INVALID` at enrollment, `UNAUTHENTICATED` on
-> reconnection. Asymmetric identity is a prerequisite for production use and is
-> tracked as a follow-up ([ADR-0023](docs/adr/0023-installation-identity-credential-v1.md)).
+> **Installation identity.** Each installation generates an Ed25519 key pair at
+> enrollment. The private seed is written to the secret store at mode `0600`
+> (`/etc/argus/secrets/cloud-identity-key`) and never leaves the daemon; the
+> public key is sent at enrollment, and the cloud's per-connection challenge is
+> signed on every `pairing.redeem` and `handshake.authenticate`. Enrollment and
+> reconnection work against a **production** Argus Cloud. The seed cannot be
+> recovered: if it is lost, run `argus cloud forget --yes` and enroll again. See
+> [ADR-0024](docs/adr/0024-installation-identity-asymmetric-ed25519.md).
 
 ### systemd unit
 

@@ -17,6 +17,7 @@ use argus_cloud::buffer::{BufferedReport, ReportKind, ReportQueue};
 use argus_cloud::client::config::classify_delivery;
 use argus_cloud::client::handshake::AuthenticatedSession;
 use argus_cloud::client::heartbeat::Heartbeat;
+use argus_cloud::client::identity::InstallationKey;
 use argus_cloud::client::pairing::{EnrollmentOutcome, enroll};
 use argus_cloud::client::reporting::{ReportingSchedule, collect_events, is_report_ack};
 use argus_cloud::client::supervisor::{
@@ -38,9 +39,9 @@ use argus_cloud::transport::{Transport, TransportError};
 use argus_domain::{
     AppliedConfigurationState, ApplyStatus, AuthorizationRequest, CapabilityDescriptor,
     CapabilityId, CapabilityPublication, CapabilityRequest, CloudCommand, CloudCommandStatus,
-    CloudConnection, CloudConnectivityState, DecisionOutcome, DomainEvent, EnvironmentId,
-    EventType, ExecutionDecision, ManagedConfiguration, PolicyDecision, PolicyOutcome, Principal,
-    RefusalReason, RequestContext, Severity,
+    CloudConnection, CloudConnectivityState, CloudEnrollment, DecisionOutcome, DomainEvent,
+    EnvironmentId, EventType, ExecutionDecision, ManagedConfiguration, PolicyDecision,
+    PolicyOutcome, Principal, RefusalReason, RequestContext, Severity,
 };
 use argus_events::LocalEventBus;
 use argus_executor::{AuthorizedAction, Executor};
@@ -63,6 +64,9 @@ pub const SESSION_CREDENTIAL_FILE: &str = "cloud-session";
 
 /// File name of the AI provider credential a cloud-managed configuration delivers.
 pub const PROVIDER_CREDENTIAL_FILE: &str = "model-api-token";
+
+/// File name of the installation's Ed25519 private seed (ADR-0024).
+pub const IDENTITY_KEY_FILE: &str = "cloud-identity-key";
 
 /// Conventional secret directory, root-owned with mode `0600`.
 pub const DEFAULT_SECRET_DIR: &str = "/etc/argus/secrets";
@@ -226,6 +230,22 @@ impl CloudSecretStore {
 
     pub fn remove_provider_credential(&self) -> Result<(), SecretError> {
         self.remove_secret(PROVIDER_CREDENTIAL_FILE)
+    }
+
+    /// Reads the installation's Ed25519 seed, or `None` when it has none.
+    ///
+    /// The seed is secret: it must never be rendered, logged, or sent over IPC.
+    pub fn read_identity_seed(&self) -> Result<Option<Secret>, SecretError> {
+        self.read_secret(IDENTITY_KEY_FILE)
+    }
+
+    pub fn store_identity_seed(&self, seed: &Secret) -> Result<(), SecretError> {
+        self.write_secret(IDENTITY_KEY_FILE, seed)
+    }
+
+    /// Removes the stored seed. Idempotent: absence is success.
+    pub fn remove_identity_seed(&self) -> Result<(), SecretError> {
+        self.remove_secret(IDENTITY_KEY_FILE)
     }
 }
 
@@ -392,6 +412,9 @@ pub async fn forget_enrollment(
         .remove_session_credential()
         .map_err(|error| error.to_string())?;
     secrets
+        .remove_identity_seed()
+        .map_err(|error| error.to_string())?;
+    secrets
         .remove_provider_credential()
         .map_err(|error| error.to_string())?;
     managed_settings
@@ -426,6 +449,9 @@ pub enum EnrollmentError {
 
     #[error("could not store the session credential: {0}")]
     Secret(String),
+
+    #[error("could not persist the installation key: {0}")]
+    Identity(String),
 }
 
 impl From<CloudError> for EnrollmentError {
@@ -488,21 +514,31 @@ pub async fn enroll_installation(
         return Err(EnrollmentError::AlreadyEnrolled);
     }
 
+    // Persist the identity key before announcing its public key, so the cloud
+    // never holds a key we cannot later prove possession of (ADR-0024).
+    let key = InstallationKey::generate();
+    secrets
+        .store_identity_seed(&Secret::new(key.seed_b64()))
+        .map_err(|error| EnrollmentError::Identity(error.to_string()))?;
+
     let outcome = enroll(
         transport,
         code,
         hostname,
         agent_version,
         &config.expected_cloud_id,
+        &key,
     )
     .await?;
 
     match outcome {
         EnrollmentOutcome::Denied { code, remediation } => {
+            // A refused enrollment leaves the fresh key backing no identity.
+            let _ = secrets.remove_identity_seed();
             Err(EnrollmentError::Denied { code, remediation })
         }
         EnrollmentOutcome::Granted(payload) => {
-            let identity = EnrolledIdentity::from_granted(&payload, now);
+            let identity = EnrolledIdentity::from_granted(&payload, now, key.public_key_b64());
             repository
                 .save_cloud_enrollment(&identity.to_enrollment())
                 .await?;
@@ -585,7 +621,14 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
             continue;
         };
 
-        let Some(identity) = enrolled_identity(&deps).await else {
+        let Some(enrollment) = cloud_enrollment(&deps).await else {
+            if wait_or_stop(&mut stop, RECHECK).await {
+                return;
+            }
+            continue;
+        };
+
+        let Some(key) = installation_key(&deps).await else {
             if wait_or_stop(&mut stop, RECHECK).await {
                 return;
             }
@@ -599,6 +642,12 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
             continue;
         };
 
+        let identity = EnrolledIdentity::from_enrollment(
+            &enrollment,
+            CONNECTION_PROTOCOL_LABEL,
+            key.public_key_b64(),
+        );
+
         set_state(&deps, CloudConnectivityState::Connecting, None).await;
 
         let outcome = match connect_once(
@@ -607,6 +656,7 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
                 endpoint: &endpoint,
                 expected_cloud_id: &deps.config.expected_cloud_id,
                 identity: &identity,
+                key: &key,
                 session_proof: credential.expose(),
                 hostname: &hostname(),
                 agent_version: env!("CARGO_PKG_VERSION"),
@@ -662,14 +712,52 @@ async fn active_endpoint(deps: &SupervisorDeps) -> Option<String> {
     }
 }
 
-async fn enrolled_identity(deps: &SupervisorDeps) -> Option<EnrolledIdentity> {
+async fn cloud_enrollment(deps: &SupervisorDeps) -> Option<CloudEnrollment> {
     match deps.repository.get_cloud_enrollment().await {
-        Ok(Some(enrollment)) => Some(EnrolledIdentity::from_enrollment(
-            &enrollment,
-            CONNECTION_PROTOCOL_LABEL,
-        )),
+        Ok(Some(enrollment)) => Some(enrollment),
         Ok(None) => {
             set_state(deps, CloudConnectivityState::NotConfigured, None).await;
+            None
+        }
+        Err(error) => {
+            set_state(
+                deps,
+                CloudConnectivityState::Degraded,
+                Some(error.to_string()),
+            )
+            .await;
+            None
+        }
+    }
+}
+
+/// Loads the installation's Ed25519 key.
+///
+/// A missing seed and a corrupt seed are reported distinctly: both need
+/// re-enrollment, but a corrupt seed is a defect worth surfacing accurately.
+async fn installation_key(deps: &SupervisorDeps) -> Option<InstallationKey> {
+    match deps.secrets.read_identity_seed() {
+        Ok(Some(seed)) => match InstallationKey::from_seed_b64(seed.expose()) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                set_state(
+                    deps,
+                    CloudConnectivityState::Degraded,
+                    Some(format!(
+                        "the installation key is corrupt ({error}); re-enrollment is required"
+                    )),
+                )
+                .await;
+                None
+            }
+        },
+        Ok(None) => {
+            set_state(
+                deps,
+                CloudConnectivityState::Disconnected,
+                Some("the installation key is missing; re-enrollment is required".to_string()),
+            )
+            .await;
             None
         }
         Err(error) => {
@@ -1822,6 +1910,13 @@ mod tests {
         fs::metadata(path).expect("metadata").permissions().mode() & 0o777
     }
 
+    fn store_identity(secrets: &CloudSecretStore) {
+        let key = InstallationKey::from_seed_bytes(&[7u8; 32]);
+        secrets
+            .store_identity_seed(&Secret::new(key.seed_b64()))
+            .expect("store identity seed");
+    }
+
     fn credential_path(dir: &Path) -> PathBuf {
         dir.join(SESSION_CREDENTIAL_FILE)
     }
@@ -2332,6 +2427,7 @@ mod tests {
     #[tokio::test]
     async fn an_enrolled_installation_connects_and_records_the_exchange() {
         let (secrets, dir) = store();
+        store_identity(&secrets);
         secrets
             .store_session_credential(&SessionCredential::new(SESSION_TOKEN))
             .unwrap();
@@ -2388,6 +2484,7 @@ mod tests {
     #[tokio::test]
     async fn a_revocation_ends_supervision_without_a_stop_signal() {
         let (secrets, dir) = store();
+        store_identity(&secrets);
         secrets
             .store_session_credential(&SessionCredential::new(SESSION_TOKEN))
             .unwrap();

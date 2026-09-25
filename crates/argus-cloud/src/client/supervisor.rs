@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::client::handshake::{AuthenticatedSession, HandshakeFailure, authenticate};
+use crate::client::handshake::{
+    AuthenticatedSession, HandshakeFailure, InstallationIdentity, authenticate,
+};
+use crate::client::identity::InstallationKey;
 use crate::state::EnrolledIdentity;
 use crate::transport::backoff::Backoff;
 use crate::transport::websocket::WssTransport;
@@ -128,6 +131,8 @@ pub struct SessionRequest<'a> {
     pub endpoint: &'a str,
     pub expected_cloud_id: &'a str,
     pub identity: &'a EnrolledIdentity,
+    /// The Ed25519 identity whose signature proves this installation (ADR-0024).
+    pub key: &'a InstallationKey,
     pub session_proof: &'a str,
     pub hostname: &'a str,
     pub agent_version: &'a str,
@@ -152,7 +157,10 @@ pub async fn connect_once(
     let session = authenticate(
         transport.as_mut(),
         request.expected_cloud_id,
-        request.identity,
+        InstallationIdentity {
+            enrolled: request.identity,
+            key: request.key,
+        },
         request.session_proof,
         request.hostname,
         request.agent_version,

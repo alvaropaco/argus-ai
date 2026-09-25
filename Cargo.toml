@@ -38,6 +38,8 @@ anyhow = "1"
 async-trait = "0.1"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 base64 = "0.23.1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 futures-util = "0.3.34"
 argus-domain = { version = "0.1.8", path = "crates/argus-domain" }
 argus-ai-core = { version = "0.1.8", path = "crates/argus-ai-core" }

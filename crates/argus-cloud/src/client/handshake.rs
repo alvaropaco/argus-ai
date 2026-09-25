@@ -11,6 +11,7 @@
 
 use uuid::Uuid;
 
+use crate::client::identity::InstallationKey;
 use crate::error::CloudError;
 use crate::protocol::envelope::{Envelope, MessageType};
 use crate::protocol::messages::{
@@ -100,6 +101,13 @@ impl HandshakeFailure {
     }
 }
 
+/// The installation's cryptographic identity: the enrolled metadata plus the
+/// signing key that proves possession of it (ADR-0024).
+pub struct InstallationIdentity<'a> {
+    pub enrolled: &'a EnrolledIdentity,
+    pub key: &'a InstallationKey,
+}
+
 /// Authenticates an already-enrolled installation.
 ///
 /// `session_proof` is the credential issued at enrollment. Only the caller that
@@ -107,7 +115,7 @@ impl HandshakeFailure {
 pub async fn authenticate(
     transport: &mut dyn Transport,
     expected_cloud_id: &str,
-    identity: &EnrolledIdentity,
+    installation: InstallationIdentity<'_>,
     session_proof: &str,
     hostname: &str,
     agent_version: &str,
@@ -122,11 +130,11 @@ pub async fn authenticate(
     };
 
     let authenticate = HandshakeAuthenticatePayload {
-        instance_id: identity.installation_id,
+        instance_id: installation.enrolled.installation_id,
         protocol_version: PROTOCOL_VERSION.to_string(),
         agent_version: agent_version.to_string(),
         hostname: hostname.to_string(),
-        challenge_signature: crate::client::pairing::placeholder_challenge_signature(),
+        challenge_signature: installation.key.sign_challenge(&hello.challenge),
         session_proof: session_proof.to_string(),
         capability_schema_version: capability_schema_version.map(str::to_string),
     };

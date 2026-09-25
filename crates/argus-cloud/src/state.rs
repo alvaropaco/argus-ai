@@ -9,14 +9,13 @@ use uuid::Uuid;
 
 use argus_domain::{CloudConnectivityState, CloudEnrollment, TrustState};
 
-use crate::client::pairing::placeholder_public_key;
 use crate::protocol::messages::PairingGrantedPayload;
 
 /// The durable identity an installation holds after enrollment.
 ///
-/// Carries no secret: the session credential lives in the secret store, and only
-/// a handle to it belongs here. `placeholder_public_key` is non-secret by
-/// construction (ADR-0023 §2).
+/// Carries no secret: the private seed lives in the secret store, and only a
+/// handle to it belongs here. `public_key` is the base64url DER public key sent
+/// to the cloud and is non-secret by construction (ADR-0024).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrolledIdentity {
     pub installation_id: Uuid,
@@ -25,20 +24,24 @@ pub struct EnrolledIdentity {
     /// Rotation generation. Advances on `session.rotate` so a credential issued
     /// before the rotation can be rejected.
     pub credential_epoch: u64,
-    pub placeholder_public_key: String,
+    pub public_key: String,
     pub protocol_version: String,
     pub enrolled_at: DateTime<Utc>,
 }
 
 impl EnrolledIdentity {
     /// Adopts the identity the cloud granted at enrollment.
-    pub fn from_granted(payload: &PairingGrantedPayload, at: DateTime<Utc>) -> Self {
+    pub fn from_granted(
+        payload: &PairingGrantedPayload,
+        at: DateTime<Utc>,
+        public_key: String,
+    ) -> Self {
         Self {
             installation_id: payload.instance_id,
             tenant_id: payload.tenant_id,
             instance_name: payload.instance_name.clone(),
             credential_epoch: 0,
-            placeholder_public_key: placeholder_public_key(),
+            public_key,
             protocol_version: payload.negotiated_protocol_version.clone(),
             enrolled_at: at,
         }
@@ -46,15 +49,19 @@ impl EnrolledIdentity {
 
     /// Rebuilds the identity from the persisted enrollment.
     ///
-    /// The credential itself is not part of the identity: it lives in the secret
-    /// store and is supplied separately wherever it is needed.
-    pub fn from_enrollment(enrollment: &CloudEnrollment, protocol_version: &str) -> Self {
+    /// The seed itself is not part of the identity: it lives in the secret
+    /// store and is supplied separately wherever a signature is needed.
+    pub fn from_enrollment(
+        enrollment: &CloudEnrollment,
+        protocol_version: &str,
+        public_key: String,
+    ) -> Self {
         Self {
             installation_id: enrollment.installation_id,
             tenant_id: enrollment.tenant_id,
             instance_name: enrollment.instance_name.clone(),
             credential_epoch: 0,
-            placeholder_public_key: placeholder_public_key(),
+            public_key,
             protocol_version: protocol_version.to_string(),
             enrolled_at: enrollment.enrolled_at,
         }
@@ -176,7 +183,7 @@ impl ConnectivityTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::pairing::is_non_decodable_placeholder;
+    use crate::client::identity::InstallationKey;
     use chrono::TimeZone;
 
     fn now() -> DateTime<Utc> {
@@ -194,10 +201,14 @@ mod tests {
         }
     }
 
+    fn public_key() -> String {
+        InstallationKey::from_seed_bytes(&[7u8; 32]).public_key_b64()
+    }
+
     #[test]
     fn identity_carries_the_granted_binding() {
         let payload = granted("web-01");
-        let identity = EnrolledIdentity::from_granted(&payload, now());
+        let identity = EnrolledIdentity::from_granted(&payload, now(), public_key());
 
         assert_eq!(identity.installation_id, payload.instance_id);
         assert_eq!(identity.tenant_id, payload.tenant_id);
@@ -209,7 +220,7 @@ mod tests {
 
     #[test]
     fn identity_holds_no_secret() {
-        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now());
+        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now(), public_key());
         let rendered = format!("{identity:?}");
         assert!(
             !rendered.contains("credential-that-must-not-be-persisted-here"),
@@ -218,17 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn the_persisted_key_is_nondecodable() {
-        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now());
-        assert!(is_non_decodable_placeholder(
-            &identity.placeholder_public_key
-        ));
+    fn the_identity_carries_the_public_key_it_was_built_with() {
+        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now(), public_key());
+        assert_eq!(identity.public_key, public_key());
     }
 
     #[test]
     fn the_enrollment_record_stays_bound_to_one_organization() {
         let payload = granted("web-01");
-        let identity = EnrolledIdentity::from_granted(&payload, now());
+        let identity = EnrolledIdentity::from_granted(&payload, now(), public_key());
         let enrollment = identity.to_enrollment();
 
         assert_eq!(enrollment.installation_id, payload.instance_id);
@@ -239,7 +248,7 @@ mod tests {
 
     #[test]
     fn rotation_advances_the_credential_epoch() {
-        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now());
+        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now(), public_key());
         let rotated = identity.rotated();
         assert_eq!(rotated.credential_epoch, 1);
         assert_eq!(rotated.installation_id, identity.installation_id);
@@ -248,7 +257,8 @@ mod tests {
 
     #[test]
     fn trust_state_starts_active_with_the_current_epoch() {
-        let identity = EnrolledIdentity::from_granted(&granted("web-01"), now()).rotated();
+        let identity =
+            EnrolledIdentity::from_granted(&granted("web-01"), now(), public_key()).rotated();
         let trust = identity.trust_state(now());
         assert!(trust.status.permits_connection());
         assert_eq!(trust.credential_epoch, 1);

@@ -5,7 +5,8 @@
 //! reply, every rejection classification, protocol negotiation, and cloud
 //! identity verification.
 
-use argus_cloud::client::handshake::{HandshakeFailure, authenticate};
+use argus_cloud::client::handshake::{HandshakeFailure, InstallationIdentity, authenticate};
+use argus_cloud::client::identity::InstallationKey;
 use argus_cloud::protocol::messages::PairingGrantedPayload;
 use argus_cloud::protocol::{Envelope, MessageType};
 use argus_cloud::state::EnrolledIdentity;
@@ -21,6 +22,10 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
 }
 
+fn key() -> InstallationKey {
+    InstallationKey::from_seed_bytes(&[7u8; 32])
+}
+
 fn identity() -> EnrolledIdentity {
     EnrolledIdentity::from_granted(
         &PairingGrantedPayload {
@@ -32,6 +37,7 @@ fn identity() -> EnrolledIdentity {
             negotiated_protocol_version: "1.0.0".into(),
         },
         now(),
+        key().public_key_b64(),
     )
 }
 
@@ -79,10 +85,14 @@ async fn attempt(
 ) {
     let mut transport = FakeTransport::with_inbound(frames);
     let identity = identity();
+    let key = key();
     let outcome = authenticate(
         &mut transport,
         CLOUD_ID,
-        &identity,
+        InstallationIdentity {
+            enrolled: &identity,
+            key: &key,
+        },
         SESSION_PROOF,
         "web-01",
         "0.1.7",

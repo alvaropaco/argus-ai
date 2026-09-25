@@ -6,9 +6,8 @@
 //! from this crate: through a debug format, and through a frame that should not
 //! carry it.
 
-use argus_cloud::client::pairing::{
-    EnrollmentOutcome, enroll, placeholder_challenge_signature, placeholder_public_key,
-};
+use argus_cloud::client::identity::InstallationKey;
+use argus_cloud::client::pairing::{EnrollmentOutcome, enroll};
 use argus_cloud::protocol::messages::{
     HandshakeAuthenticatePayload, PairingGrantedPayload, PairingRedeemPayload, SessionRotatePayload,
 };
@@ -21,6 +20,10 @@ use uuid::Uuid;
 const CODE: &str = "ARGUS-SECRET-CODE-0001";
 const SESSION_TOKEN: &str = "super-secret-session-credential";
 const CLOUD_ID: &str = "argus-cloud";
+
+fn key() -> InstallationKey {
+    InstallationKey::from_seed_bytes(&[7u8; 32])
+}
 
 fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
@@ -58,21 +61,22 @@ fn granted() -> Envelope {
 
 #[test]
 fn the_pairing_code_is_never_rendered_by_debug() {
+    let key = key();
     let payload = PairingRedeemPayload {
         code: CODE.to_string(),
         protocol_version: "1.0.0".into(),
         agent_version: "0.1.7".into(),
         hostname: "web-01".into(),
-        public_key: placeholder_public_key(),
-        challenge_signature: placeholder_challenge_signature(),
+        public_key: key.public_key_b64(),
+        challenge_signature: key.sign_challenge("nonce"),
         capability_schema_version: None,
     };
     let rendered = format!("{payload:?}");
     assert!(!rendered.contains(CODE), "pairing code leaked: {rendered}");
     assert!(rendered.contains("<redacted>"), "redaction marker missing");
     assert!(
-        rendered.contains("argus-v1-placeholder-key"),
-        "the public key is public by definition (ADR-0023 §2) and stays visible: {rendered}"
+        rendered.contains(&key.public_key_b64()),
+        "the public key is public by definition (ADR-0024) and stays visible: {rendered}"
     );
 }
 
@@ -101,7 +105,7 @@ fn the_session_proof_is_never_rendered_by_debug() {
         protocol_version: "1.0.0".into(),
         agent_version: "0.1.7".into(),
         hostname: "web-01".into(),
-        challenge_signature: placeholder_challenge_signature(),
+        challenge_signature: key().sign_challenge("nonce"),
         session_proof: SESSION_TOKEN.into(),
         capability_schema_version: None,
     };
@@ -123,7 +127,7 @@ fn the_rotation_token_is_never_rendered_by_debug() {
 #[tokio::test]
 async fn a_successful_enrollment_outcome_does_not_render_the_credential() {
     let mut transport = FakeTransport::with_inbound(vec![hello(), granted()]);
-    let outcome = enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID)
+    let outcome = enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID, &key())
         .await
         .expect("enrolled");
 
@@ -138,7 +142,7 @@ async fn a_successful_enrollment_outcome_does_not_render_the_credential() {
 #[tokio::test]
 async fn the_code_appears_only_in_the_redeem_frame() {
     let mut transport = FakeTransport::with_inbound(vec![hello(), granted()]);
-    enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID)
+    enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID, &key())
         .await
         .expect("enrolled");
 
@@ -164,7 +168,7 @@ async fn the_code_appears_only_in_the_redeem_frame() {
 async fn the_code_is_not_echoed_back_in_a_denial() {
     let denied = Envelope::new(MessageType::PairingDenied, json!({ "code": "USED" }), None);
     let mut transport = FakeTransport::with_inbound(vec![hello(), denied]);
-    let outcome = enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID)
+    let outcome = enroll(&mut transport, CODE, "web-01", "0.1.7", CLOUD_ID, &key())
         .await
         .expect("a denial is not an error");
 
