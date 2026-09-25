@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "argus-ai-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "argus-ai-tui",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "argus-ai-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "async-trait",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "argus-ai-tui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "argus-ai-core",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "argus-cloud"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "async-trait",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "argus-daemon"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "argus-ai-core",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "argus-domain"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chrono",
  "semver",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "argus-events"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "async-trait",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "argus-executor"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "argus-policy",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "argus-install"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "semver",
  "serde",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "argus-ipc"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "semver",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "argus-observability"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "argus-policy"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "chrono",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "argus-state"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argus-domain",
  "async-trait",
