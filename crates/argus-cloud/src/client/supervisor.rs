@@ -133,7 +133,9 @@ pub struct SessionRequest<'a> {
     pub identity: &'a EnrolledIdentity,
     /// The Ed25519 identity whose signature proves this installation (ADR-0024).
     pub key: &'a InstallationKey,
-    pub session_proof: &'a str,
+    /// The enrollment credential, when one is held. Optional since ADR-0026: it
+    /// is no longer required to authenticate.
+    pub session_proof: Option<&'a str>,
     pub hostname: &'a str,
     pub agent_version: &'a str,
     pub capability_schema_version: Option<&'a str>,

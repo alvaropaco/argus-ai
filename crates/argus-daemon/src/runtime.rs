@@ -39,6 +39,10 @@ pub struct Daemon {
     /// The local kill switch, shared with the cloud supervisor so that changing it
     /// takes effect without a restart.
     privileged_execution: Arc<AtomicBool>,
+    /// Wakes the cloud supervisor out of a reconnect backoff when the enrollment
+    /// changes, so a fresh credential is used immediately rather than after the
+    /// current delay elapses.
+    cloud_wake: Arc<tokio::sync::Notify>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -125,11 +129,17 @@ impl Daemon {
             registry,
             plugins: Vec::new(),
             privileged_execution,
+            cloud_wake: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
     pub fn config(&self) -> &DaemonConfig {
         &self.config
+    }
+
+    /// Signals the cloud supervisor to re-evaluate immediately.
+    pub fn cloud_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.cloud_wake)
     }
 
     pub fn secrets(&self) -> &CloudSecretStore {

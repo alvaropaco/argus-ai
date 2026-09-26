@@ -198,8 +198,13 @@ pub struct HandshakeAuthenticatePayload {
     pub agent_version: String,
     pub hostname: String,
     pub challenge_signature: String,
-    /// The cloud-issued credential. Secret.
-    pub session_proof: String,
+    /// The cloud-issued session credential, when the installation still holds one.
+    ///
+    /// Optional since ADR-0026: identity is proven by `challenge_signature`
+    /// against the key stored at enrollment, so this is carried for protocol
+    /// compatibility and is not required to authenticate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_proof: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_schema_version: Option<String>,
 }

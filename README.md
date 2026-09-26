@@ -278,10 +278,12 @@ reason** rather than accepted and quietly ignored.
 > enrollment. The private seed is written to the secret store at mode `0600`
 > (`/etc/argus/secrets/cloud-identity-key`) and never leaves the daemon; the
 > public key is sent at enrollment, and the cloud's per-connection challenge is
-> signed on every `pairing.redeem` and `handshake.authenticate`. Enrollment and
-> reconnection work against a **production** Argus Cloud. The seed cannot be
-> recovered: if it is lost, run `argus cloud forget --yes` and enroll again. See
-> [ADR-0024](docs/adr/0024-installation-identity-asymmetric-ed25519.md).
+> signed on every `pairing.redeem` and `handshake.authenticate`. **The key is the
+> only authenticator**: the enrollment credential is optional and a lost or
+> expired one never blocks reconnection. The seed cannot be recovered: if it is
+> lost, run `argus cloud forget --yes` and enroll again. See
+> [ADR-0024](docs/adr/0024-installation-identity-asymmetric-ed25519.md) and
+> [ADR-0026](docs/adr/0026-installation-key-sole-authenticator.md).
 
 ### systemd unit
 

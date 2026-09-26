@@ -104,6 +104,7 @@ fn spawn_cloud_supervisor(
             config.cloud.max_concurrent_privileged,
         )),
         privileged_execution: daemon.privileged_execution_flag(),
+        wake: daemon.cloud_wake(),
     };
     tokio::spawn(argus_daemon::cloud::supervise(deps, stop_rx));
     stop

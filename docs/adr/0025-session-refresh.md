@@ -1,8 +1,14 @@
 # ADR-0025: Session Refresh — Striking the Balance Between Expiry and Availability
 
-- **Status:** Accepted
+- **Status:** Superseded in part by [ADR-0026](0026-installation-key-sole-authenticator.md)
 - **Date:** 2026-09-25
-- **Supersedes:** nothing. **Superseded by:** nothing.
+- **Supersedes:** nothing.
+
+> **Superseded in part.** ADR-0026 makes the installation key the sole
+> authenticator, so §2 (the sliding refresh) and §3 (the availability/expiry
+> trade-off) no longer apply: the session credential is no longer required to
+> reconnect. §1 (a configurable lifetime) still governs the credential issued at
+> enrollment.
 
 ## Context
 

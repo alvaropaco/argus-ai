@@ -106,7 +106,7 @@ fn the_session_proof_is_never_rendered_by_debug() {
         agent_version: "0.1.7".into(),
         hostname: "web-01".into(),
         challenge_signature: key().sign_challenge("nonce"),
-        session_proof: SESSION_TOKEN.into(),
+        session_proof: Some(SESSION_TOKEN.into()),
         capability_schema_version: None,
     };
     let rendered = format!("{payload:?}");

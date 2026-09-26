@@ -197,7 +197,7 @@ fn handshake_authenticate_carries_the_session_proof() {
         agent_version: "0.1.7".into(),
         hostname: "web-01".into(),
         challenge_signature: "placeholder-signature-000000000000".into(),
-        session_proof: "credential-value".into(),
+        session_proof: Some("credential-value".into()),
         capability_schema_version: None,
     };
     let value = serde_json::to_value(&payload).unwrap();

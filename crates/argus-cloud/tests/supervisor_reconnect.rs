@@ -93,7 +93,7 @@ async fn one_cycle(
             expected_cloud_id: CLOUD_ID,
             identity,
             key: &key,
-            session_proof: SESSION_PROOF,
+            session_proof: Some(SESSION_PROOF),
             hostname: "web-01",
             agent_version: "0.1.7",
             capability_schema_version: Some("0.1.0"),

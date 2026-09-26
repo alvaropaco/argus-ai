@@ -110,13 +110,14 @@ pub struct InstallationIdentity<'a> {
 
 /// Authenticates an already-enrolled installation.
 ///
-/// `session_proof` is the credential issued at enrollment. Only the caller that
-/// owns the secret store should supply it, so reading it stays a visible act.
+/// `session_proof` is the credential issued at enrollment, when the installation
+/// still holds one. It is no longer required: identity is the Ed25519 key that
+/// signs the challenge (ADR-0026).
 pub async fn authenticate(
     transport: &mut dyn Transport,
     expected_cloud_id: &str,
     installation: InstallationIdentity<'_>,
-    session_proof: &str,
+    session_proof: Option<&str>,
     hostname: &str,
     agent_version: &str,
     capability_schema_version: Option<&str>,
@@ -135,7 +136,7 @@ pub async fn authenticate(
         agent_version: agent_version.to_string(),
         hostname: hostname.to_string(),
         challenge_signature: installation.key.sign_challenge(&hello.challenge),
-        session_proof: session_proof.to_string(),
+        session_proof: session_proof.map(str::to_string),
         capability_schema_version: capability_schema_version.map(str::to_string),
     };
     send_json(transport, MessageType::HandshakeAuthenticate, &authenticate).await?;

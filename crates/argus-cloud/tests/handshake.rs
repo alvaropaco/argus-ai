@@ -93,7 +93,7 @@ async fn attempt(
             enrolled: &identity,
             key: &key,
         },
-        SESSION_PROOF,
+        Some(SESSION_PROOF),
         "web-01",
         "0.1.7",
         Some("0.1.0"),

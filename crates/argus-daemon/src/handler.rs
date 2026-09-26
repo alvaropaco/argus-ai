@@ -121,10 +121,13 @@ async fn cloud_forget(daemon: &Daemon, request: Request) -> Response {
     .await;
 
     match outcome {
-        Ok(()) => Response::ok(
-            request.correlation_id,
-            serde_json::json!({ "state": "not_configured" }),
-        ),
+        Ok(()) => {
+            daemon.cloud_wake().notify_one();
+            Response::ok(
+                request.correlation_id,
+                serde_json::json!({ "state": "not_configured" }),
+            )
+        }
         Err(error) => Response::err(request.correlation_id, ErrorCode::Internal, error),
     }
 }
@@ -175,7 +178,11 @@ async fn enroll(daemon: &Daemon, request: Request) -> Response {
     .await;
 
     match outcome {
-        Ok(report) => Response::ok(request.correlation_id, to_value(report)),
+        Ok(report) => {
+            // Use the new credential now rather than after the current backoff.
+            daemon.cloud_wake().notify_one();
+            Response::ok(request.correlation_id, to_value(report))
+        }
         Err(EnrollmentError::AlreadyEnrolled) => Response::err(
             request.correlation_id,
             ErrorCode::Denied,

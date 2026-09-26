@@ -56,7 +56,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, Notify, broadcast, watch};
 use uuid::Uuid;
 
 /// File name of the cloud session credential inside the secret directory.
@@ -585,6 +585,9 @@ pub struct SupervisorDeps {
     pub limiter: Arc<PrivilegedLimiter>,
     /// The local kill switch, shared so it can be flipped without a restart.
     pub privileged_execution: Arc<AtomicBool>,
+    /// Wakes the loop out of a backoff when the enrollment changes, so a fresh
+    /// credential is used at once instead of after the current delay.
+    pub wake: Arc<Notify>,
 }
 
 /// Reported as the negotiated version until a session supplies the real one.
@@ -603,10 +606,9 @@ const SESSION_TICK: Duration = Duration::from_secs(1);
 /// (FR-013). Every failure path either backs off or stops deliberately; none of
 /// them blocks local operation.
 pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
-    let mut policy = ReconnectPolicy::new(
-        Duration::from_secs(deps.config.reconnect_base_seconds.max(1)),
-        Duration::from_secs(deps.config.reconnect_max_seconds.max(1)),
-    );
+    let base = Duration::from_secs(deps.config.reconnect_base_seconds.max(1));
+    let max = Duration::from_secs(deps.config.reconnect_max_seconds.max(1));
+    let mut policy = ReconnectPolicy::new(base, max);
     let mut event_rx = deps.events.subscribe();
 
     loop {
@@ -615,32 +617,27 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
         }
 
         let Some(endpoint) = active_endpoint(&deps).await else {
-            if wait_or_stop(&mut stop, RECHECK).await {
+            if wait_or_stop(&mut stop, &deps.wake, RECHECK).await == Wait::Stopped {
                 return;
             }
             continue;
         };
 
         let Some(enrollment) = cloud_enrollment(&deps).await else {
-            if wait_or_stop(&mut stop, RECHECK).await {
+            if wait_or_stop(&mut stop, &deps.wake, RECHECK).await == Wait::Stopped {
                 return;
             }
             continue;
         };
 
         let Some(key) = installation_key(&deps).await else {
-            if wait_or_stop(&mut stop, RECHECK).await {
+            if wait_or_stop(&mut stop, &deps.wake, RECHECK).await == Wait::Stopped {
                 return;
             }
             continue;
         };
 
-        let Some(credential) = session_credential(&deps).await else {
-            if wait_or_stop(&mut stop, RECHECK).await {
-                return;
-            }
-            continue;
-        };
+        let credential = session_credential(&deps).await;
 
         let identity = EnrolledIdentity::from_enrollment(
             &enrollment,
@@ -657,7 +654,7 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
                 expected_cloud_id: &deps.config.expected_cloud_id,
                 identity: &identity,
                 key: &key,
-                session_proof: credential.expose(),
+                session_proof: credential.as_ref().map(|credential| credential.expose()),
                 hostname: &hostname(),
                 agent_version: env!("CARGO_PKG_VERSION"),
                 capability_schema_version: None,
@@ -694,8 +691,11 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
                     Some(describe(&outcome)),
                 )
                 .await;
-                if wait_or_stop(&mut stop, delay).await {
-                    return;
+                match wait_or_stop(&mut stop, &deps.wake, delay).await {
+                    Wait::Stopped => return,
+                    // A new enrollment must not inherit the previous delay.
+                    Wait::Woken => policy = ReconnectPolicy::new(base, max),
+                    Wait::Elapsed => {}
                 }
             }
         }
@@ -772,18 +772,14 @@ async fn installation_key(deps: &SupervisorDeps) -> Option<InstallationKey> {
     }
 }
 
+/// Reads the enrollment credential, when the installation holds one.
+///
+/// Absence is not a failure: identity is the Ed25519 key (ADR-0026), so the
+/// installation connects with or without a session credential.
 async fn session_credential(deps: &SupervisorDeps) -> Option<SessionCredential> {
     match deps.secrets.read_session_credential() {
         Ok(Some(credential)) => Some(credential),
-        Ok(None) => {
-            set_state(
-                deps,
-                CloudConnectivityState::Disconnected,
-                Some("the session credential is missing; re-enrollment is required".to_string()),
-            )
-            .await;
-            None
-        }
+        Ok(None) => None,
         Err(error) => {
             set_state(
                 deps,
@@ -1887,11 +1883,24 @@ pub(crate) fn hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Waits for `delay`, returning `true` if a stop was requested meanwhile.
-async fn wait_or_stop(stop: &mut watch::Receiver<bool>, delay: Duration) -> bool {
+/// Why a wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// The delay elapsed with no interruption.
+    Elapsed,
+    /// Supervision was asked to stop.
+    Stopped,
+    /// The enrollment changed and the loop should re-evaluate at once.
+    Woken,
+}
+
+/// Waits for `delay`, returning early when a stop is requested or the
+/// enrollment changes.
+async fn wait_or_stop(stop: &mut watch::Receiver<bool>, wake: &Notify, delay: Duration) -> Wait {
     tokio::select! {
-        _ = stop.changed() => true,
-        _ = tokio::time::sleep(delay) => false,
+        _ = stop.changed() => Wait::Stopped,
+        _ = wake.notified() => Wait::Woken,
+        _ = tokio::time::sleep(delay) => Wait::Elapsed,
     }
 }
 
@@ -2385,6 +2394,7 @@ mod tests {
             approvals: Arc::new(ApprovalStore::new()),
             limiter: Arc::new(PrivilegedLimiter::new(2)),
             privileged_execution,
+            wake: Arc::new(Notify::new()),
         }
     }
 
