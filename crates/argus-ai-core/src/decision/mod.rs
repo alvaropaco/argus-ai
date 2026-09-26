@@ -6,6 +6,7 @@ pub mod autonomy;
 pub mod context;
 pub mod error;
 pub mod gateway;
+pub mod host_health;
 pub mod provider;
 pub mod types;
 pub mod validate;

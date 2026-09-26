@@ -16,4 +16,4 @@ pub use cloud::{
 };
 pub use config::DaemonConfig;
 pub use privileged::{PrivilegedError, PrivilegedLimiter};
-pub use runtime::{Daemon, DispatchError};
+pub use runtime::{Daemon, DispatchError, diagnose_with};

@@ -30,6 +30,7 @@ argus-state = { workspace = true }
 argus-policy = { workspace = true }
 argus-executor = { workspace = true }
 argus-events = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

@@ -4,10 +4,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use argus_ai_core::decision::context::ContextBuilder;
+use argus_ai_core::decision::error::DecisionError;
+use argus_ai_core::decision::host_health::{ActionPort, RecordPort, run_host_health};
+use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{
-    AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId, CapabilityRegistry,
-    CapabilityRequest, EnvironmentId, HealthStatus, PluginManifest, PolicyOutcome,
-    PrivilegeDeclaration, Reversibility, RiskClass,
+    Action, AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId,
+    CapabilityRegistry, CapabilityRequest, DomainEvent, EnvironmentId, EventType, HealthStatus,
+    Observation, ObservedValue, Plan, PluginManifest, PolicyOutcome, Principal,
+    PrivilegeDeclaration, Provenance, RequestContext, ResourceId, Reversibility, RiskClass,
+    Severity,
 };
 use argus_executor::{BootstrapExecutor, CapabilityProvider, ExecutionError, Executor};
 use argus_policy::{BootstrapPolicyEvaluator, PolicyEvaluator};
@@ -15,6 +21,7 @@ use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
 use chrono::Utc;
 use semver::Version;
 use serde_json::Value;
+use uuid::Uuid;
 
 use argus_cloud::buffer::ReportQueue;
 use argus_cloud::state::ConnectivityTracker;
@@ -272,6 +279,151 @@ impl Daemon {
         let action = argus_executor::AuthorizedAction::new(authz.capability_request, decision)?;
         let result = self.executor.execute(&action)?;
         Ok(result.evidence)
+    }
+
+    /// Runs one host-health reasoning step end to end: build the request from
+    /// evidence, decide, gate on confidence, execute through policy+executor,
+    /// and record the outcome as an observation and an audit event.
+    ///
+    /// Inference stays external: the caller supplies the decision provider (the
+    /// Laya `laya-serve` sidecar, or the deterministic fake in tests).
+    pub async fn diagnose_once(
+        &self,
+        provider: &dyn DecisionProvider,
+        evidence: ContextBuilder,
+        confidence_threshold: f64,
+    ) -> Result<Option<Plan>, DecisionError> {
+        diagnose_with(
+            |request| self.authorize_and_execute(request),
+            self.repository.as_ref(),
+            provider,
+            evidence,
+            confidence_threshold,
+        )
+        .await
+    }
+}
+
+/// Runs one host-health step through an injected dispatch function and repository.
+///
+/// This is the loop's wiring seam: [`Daemon::diagnose_once`] passes its own
+/// `authorize_and_execute`, and tests pass a dispatch that records calls —
+/// neither needs a full `Daemon`.
+pub async fn diagnose_with<F>(
+    dispatch: F,
+    repository: &dyn DomainRepository,
+    provider: &dyn DecisionProvider,
+    evidence: ContextBuilder,
+    confidence_threshold: f64,
+) -> Result<Option<Plan>, DecisionError>
+where
+    F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
+{
+    let correlation_id = Uuid::new_v4();
+    let actions = FnActionPort {
+        dispatch,
+        correlation_id,
+    };
+    let recorder = RepoRecordPort {
+        repository,
+        correlation_id,
+    };
+    run_host_health(
+        provider,
+        evidence,
+        confidence_threshold,
+        &actions,
+        &recorder,
+    )
+    .await
+}
+
+/// An [`ActionPort`] over an injected dispatch function.
+struct FnActionPort<F> {
+    dispatch: F,
+    correlation_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl<F> ActionPort for FnActionPort<F>
+where
+    F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
+{
+    async fn execute(&self, action: &Action) -> Result<Value, DecisionError> {
+        let principal = Principal::new(None, None);
+        let context = RequestContext::new(
+            self.correlation_id,
+            Version::new(0, 1, 0),
+            principal,
+            Utc::now(),
+        );
+        let request = CapabilityRequest::new(
+            action.capability.clone(),
+            principal,
+            action.resource.clone(),
+            action.arguments.clone(),
+            context,
+        );
+        (self.dispatch)(request).map_err(|e| match e {
+            DispatchError::Denied(outcome) => {
+                DecisionError::Validation(format!("capability denied by policy: {outcome:?}"))
+            }
+            DispatchError::Execution(error) => {
+                DecisionError::Unavailable(format!("execution failed: {error}"))
+            }
+        })
+    }
+}
+
+/// A [`RecordPort`] that writes immutable evidence and an audit event.
+struct RepoRecordPort<'a> {
+    repository: &'a dyn DomainRepository,
+    correlation_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl RecordPort for RepoRecordPort<'_> {
+    async fn record(&self, plan: &Plan, executed: bool) -> Result<(), DecisionError> {
+        let now = Utc::now();
+        let subject =
+            ResourceId::new("host", "local").map_err(|e| DecisionError::Invalid(e.to_string()))?;
+        let observation = Observation::new(
+            Uuid::new_v4(),
+            "argusd",
+            subject,
+            "brain.plan.executed",
+            ObservedValue::Bool(executed),
+            1.0,
+            Provenance::new("argusd", "brain.host_health", now),
+            now,
+        )
+        .map_err(|e| DecisionError::Invalid(e.to_string()))?;
+        self.repository
+            .put_observation(&observation)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
+
+        let event = DomainEvent::new(
+            Uuid::new_v4(),
+            EventType::new("brain.plan.recorded")
+                .map_err(|e| DecisionError::Invalid(e.to_string()))?,
+            now,
+            "argusd",
+            "host:local",
+            Severity::Info,
+            Some(self.correlation_id),
+            None,
+            serde_json::json!({
+                "objective": plan.objective,
+                "executed": executed,
+                "confidence": plan.confidence,
+            }),
+        );
+        self.repository
+            .put_audit_event(&event)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
+        Ok(())
     }
 }
 

@@ -201,6 +201,7 @@ dependencies = [
  "argus-observability",
  "argus-policy",
  "argus-state",
+ "async-trait",
  "chrono",
  "semver",
  "serde",
