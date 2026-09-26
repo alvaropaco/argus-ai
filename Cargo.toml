@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -41,17 +41,17 @@ base64 = "0.23.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 futures-util = "0.3.34"
-argus-domain = { version = "0.1.9", path = "crates/argus-domain" }
-argus-ai-core = { version = "0.1.9", path = "crates/argus-ai-core" }
-argus-ipc = { version = "0.1.9", path = "crates/argus-ipc" }
-argus-observability = { version = "0.1.9", path = "crates/argus-observability" }
-argus-policy = { version = "0.1.9", path = "crates/argus-policy" }
-argus-executor = { version = "0.1.9", path = "crates/argus-executor" }
-argus-state = { version = "0.1.9", path = "crates/argus-state" }
-argus-events = { version = "0.1.9", path = "crates/argus-events" }
-argus-ai-tui = { version = "0.1.9", path = "crates/argus-ai-tui" }
-argus-install = { version = "0.1.9", path = "crates/argus-install" }
-argus-cloud = { version = "0.1.9", path = "crates/argus-cloud" }
+argus-domain = { version = "0.1.10", path = "crates/argus-domain" }
+argus-ai-core = { version = "0.1.10", path = "crates/argus-ai-core" }
+argus-ipc = { version = "0.1.10", path = "crates/argus-ipc" }
+argus-observability = { version = "0.1.10", path = "crates/argus-observability" }
+argus-policy = { version = "0.1.10", path = "crates/argus-policy" }
+argus-executor = { version = "0.1.10", path = "crates/argus-executor" }
+argus-state = { version = "0.1.10", path = "crates/argus-state" }
+argus-events = { version = "0.1.10", path = "crates/argus-events" }
+argus-ai-tui = { version = "0.1.10", path = "crates/argus-ai-tui" }
+argus-install = { version = "0.1.10", path = "crates/argus-install" }
+argus-cloud = { version = "0.1.10", path = "crates/argus-cloud" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
