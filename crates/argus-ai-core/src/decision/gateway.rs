@@ -37,6 +37,57 @@ impl ReasoningGateway {
         validate_response(&request, &response)?;
         Ok(response)
     }
+
+    /// Runs the engine and returns a typed, fail-closed outcome: a decision, or
+    /// a no-decision (`noul`) with its reason. Malformed output is still an error.
+    pub async fn decide_outcome(
+        &self,
+        request: DecisionRequest,
+    ) -> Result<DecisionOutcome, DecisionError> {
+        decide_outcome_with(self.provider.as_ref(), request, self.confidence_threshold).await
+    }
+}
+
+/// Why the gateway produced no decision (`noul`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoDecisionReason {
+    /// The answer cleared validation but not the confidence threshold.
+    LowConfidence,
+    /// The decision engine could not be reached.
+    EngineUnavailable,
+}
+
+/// A fail-closed gateway outcome: a validated decision, or a typed no-decision.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecisionOutcome {
+    Decided(DecisionResponse),
+    NoDecision(NoDecisionReason),
+}
+
+/// The fail-closed decision rule, independent of any `Arc`.
+///
+/// An unreachable engine and an answer below the threshold both resolve to a
+/// typed `NoDecision`; malformed output is rejected as an error. Callers act
+/// only on [`DecisionOutcome::Decided`].
+pub async fn decide_outcome_with(
+    provider: &dyn DecisionProvider,
+    request: DecisionRequest,
+    confidence_threshold: f64,
+) -> Result<DecisionOutcome, DecisionError> {
+    let response = match provider.decide(request.clone()).await {
+        Ok(response) => response,
+        Err(DecisionError::Unavailable(_)) => {
+            return Ok(DecisionOutcome::NoDecision(
+                NoDecisionReason::EngineUnavailable,
+            ));
+        }
+        Err(other) => return Err(other),
+    };
+    validate_response(&request, &response)?;
+    if aggregate_confidence(&response) < confidence_threshold {
+        return Ok(DecisionOutcome::NoDecision(NoDecisionReason::LowConfidence));
+    }
+    Ok(DecisionOutcome::Decided(response))
 }
 
 /// Aggregate confidence over all answers: the minimum, so a single low-confidence
@@ -89,6 +140,80 @@ mod tests {
             "degraded".to_string(),
             DecisionQuestion::noul("Is it degraded?", NoulCriteria::default()),
         )])
+    }
+
+    fn noul_request() -> DecisionRequest {
+        DecisionRequest {
+            model: None,
+            state: serde_json::json!({}),
+            questions: noul_question(),
+        }
+    }
+
+    struct UnavailableProvider;
+
+    #[async_trait::async_trait]
+    impl DecisionProvider for UnavailableProvider {
+        async fn decide(
+            &self,
+            _request: DecisionRequest,
+        ) -> Result<DecisionResponse, DecisionError> {
+            Err(DecisionError::Unavailable("engine down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn confident_response_is_decided() {
+        let provider = FakeDecisionProvider::new(BTreeMap::from([(
+            "degraded".to_string(),
+            DecisionAnswer::Noul { noul: 0.95 },
+        )]));
+        let outcome = decide_outcome_with(&provider, noul_request(), 0.7)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DecisionOutcome::Decided(_)));
+    }
+
+    #[tokio::test]
+    async fn low_confidence_is_a_no_decision() {
+        let provider = FakeDecisionProvider::new(BTreeMap::from([(
+            "degraded".to_string(),
+            DecisionAnswer::Noul { noul: 0.3 },
+        )]));
+        let outcome = decide_outcome_with(&provider, noul_request(), 0.7)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            DecisionOutcome::NoDecision(NoDecisionReason::LowConfidence)
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_engine_is_a_no_decision() {
+        let outcome = decide_outcome_with(&UnavailableProvider, noul_request(), 0.7)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            DecisionOutcome::NoDecision(NoDecisionReason::EngineUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_response_is_rejected_by_the_outcome() {
+        let provider = FakeDecisionProvider::new(BTreeMap::from([(
+            "degraded".to_string(),
+            DecisionAnswer::Choice {
+                choice: "x".into(),
+                confidence: 0.9,
+                probabilities: BTreeMap::new(),
+            },
+        )]));
+        assert!(matches!(
+            decide_outcome_with(&provider, noul_request(), 0.7).await,
+            Err(DecisionError::Validation(_))
+        ));
     }
 
     #[tokio::test]

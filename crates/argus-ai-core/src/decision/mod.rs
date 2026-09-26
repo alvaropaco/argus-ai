@@ -14,7 +14,10 @@ pub mod validate;
 pub use author::DecisionSet;
 pub use context::{ContextBuilder, EvidenceEntry};
 pub use error::DecisionError;
-pub use gateway::{ReasoningGateway, aggregate_confidence, propose_plan};
+pub use gateway::{
+    DecisionOutcome, NoDecisionReason, ReasoningGateway, aggregate_confidence, decide_outcome_with,
+    propose_plan,
+};
 pub use provider::DecisionProvider;
 pub use types::{
     DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse, NoulCriteria,

@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::decision::context::ContextBuilder;
 use crate::decision::error::DecisionError;
-use crate::decision::gateway::propose_plan;
+use crate::decision::gateway::{DecisionOutcome, propose_plan};
 use crate::decision::provider::DecisionProvider;
 use crate::decision::types::{
     DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse, NoulCriteria,
@@ -96,8 +96,11 @@ pub async fn run_host_health(
     recorder: &dyn RecordPort,
 ) -> Result<Option<Plan>, DecisionError> {
     let request = host_health_request(evidence);
-    let response = provider.decide(request.clone()).await?;
-    crate::decision::validate::validate_response(&request, &response)?;
+    let response =
+        match crate::decision::gateway::decide_outcome_with(provider, request, threshold).await? {
+            DecisionOutcome::NoDecision(_) => return Ok(None),
+            DecisionOutcome::Decided(response) => response,
+        };
 
     let Some(action) = remediation_action(&response) else {
         return Ok(None);
@@ -250,6 +253,31 @@ mod tests {
         let result = run_host_health(&provider, evidence(), 0.7, &ports, &ports).await;
         assert!(matches!(result, Err(DecisionError::Validation(_))));
         assert!(ports.executed.lock().unwrap().is_empty());
+    }
+
+    struct UnavailableProvider;
+
+    #[async_trait]
+    impl DecisionProvider for UnavailableProvider {
+        async fn decide(
+            &self,
+            _request: DecisionRequest,
+        ) -> Result<DecisionResponse, DecisionError> {
+            Err(DecisionError::Unavailable("engine down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_engine_fails_closed() {
+        let ports = RecordingPorts::default();
+
+        let plan = run_host_health(&UnavailableProvider, evidence(), 0.7, &ports, &ports)
+            .await
+            .expect("loop runs");
+
+        assert!(plan.is_none(), "an unavailable engine proposes nothing");
+        assert!(ports.executed.lock().unwrap().is_empty());
+        assert!(ports.recorded.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
