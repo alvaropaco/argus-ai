@@ -2545,6 +2545,57 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[tokio::test]
+    async fn an_enrollment_is_used_at_once_without_waiting_out_the_backoff() {
+        let (secrets, dir) = store();
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let tracker = Arc::new(Mutex::new(ConnectivityTracker::new()));
+        let factory = Arc::new(argus_cloud::transport::fake::FakeFactory::new());
+        factory.script_connection(vec![hello(), ready()]);
+
+        let deps = supervisor_deps(
+            active_config(),
+            secrets.clone(),
+            Arc::clone(&repository),
+            Arc::clone(&tracker),
+            Arc::clone(&factory),
+        );
+        let wake = Arc::clone(&deps.wake);
+        let (stop, stop_rx) = watch::channel(false);
+        let handle = tokio::spawn(supervise(deps, stop_rx));
+
+        // The loop settles into its unconfigured recheck wait.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(factory.connect_attempts(), 0);
+
+        enroll_with(
+            repository.as_ref(),
+            &secrets,
+            &active_config(),
+            vec![hello(), granted()],
+        )
+        .await
+        .0
+        .expect("enrolled");
+        wake.notify_one();
+
+        // Far inside the 30s recheck: the wake, not the timer, must drive this.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && factory.connect_attempts() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let attempts = factory.connect_attempts();
+
+        let _ = stop.send(true);
+        let _ = handle.await;
+        fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            attempts >= 1,
+            "a fresh enrollment must be dialed at once, not after the recheck"
+        );
+    }
+
     mod config_apply {
         use super::*;
 
