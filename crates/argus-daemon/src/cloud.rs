@@ -666,14 +666,23 @@ pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
                 policy.note_connected();
                 set_state(&deps, CloudConnectivityState::Connected, None).await;
                 mark_exchange(&deps).await;
-                run_session(
+                let mut enrollment_changed = false;
+                let outcome = run_session(
                     &deps,
                     transport.as_mut(),
                     &session,
                     &mut event_rx,
                     &mut stop,
+                    &deps.wake,
+                    &mut enrollment_changed,
                 )
-                .await
+                .await;
+                if enrollment_changed {
+                    // Re-read the enrollment at once, with a fresh backoff.
+                    policy = ReconnectPolicy::new(base, max);
+                    continue;
+                }
+                outcome
             }
             Err(outcome) => outcome,
         };
@@ -1624,6 +1633,8 @@ async fn run_session(
     session: &AuthenticatedSession,
     event_rx: &mut broadcast::Receiver<DomainEvent>,
     stop: &mut watch::Receiver<bool>,
+    wake: &Notify,
+    enrollment_changed: &mut bool,
 ) -> ConnectionOutcome {
     let mut heartbeat = Heartbeat::new(session.heartbeat_interval_seconds, Instant::now());
     let mut schedule =
@@ -1648,6 +1659,13 @@ async fn run_session(
     loop {
         tokio::select! {
             _ = stop.changed() => {
+                requeue_in_flight(deps, &mut in_flight).await;
+                return ConnectionOutcome::Stopped;
+            }
+            _ = wake.notified() => {
+                // The enrollment changed under us (enroll or forget): end the
+                // session so the loop re-reads it instead of serving the old one.
+                *enrollment_changed = true;
                 requeue_in_flight(deps, &mut in_flight).await;
                 return ConnectionOutcome::Stopped;
             }
