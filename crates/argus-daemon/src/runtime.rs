@@ -59,6 +59,9 @@ pub enum DispatchError {
     #[error("capability denied by policy: {0:?}")]
     Denied(PolicyOutcome),
 
+    #[error("capability input violates its declared schema: {0}")]
+    InvalidInput(CapabilityId),
+
     #[error("execution failed: {0}")]
     Execution(#[from] ExecutionError),
 }
@@ -266,6 +269,13 @@ impl Daemon {
             return Err(DispatchError::Denied(PolicyOutcome::Deny));
         };
 
+        // Validate the call's `input` against the capability's declared schema
+        // before policy is consulted (ADR-0027 §4): a malformed call fails here,
+        // not at the executor.
+        if !argus_domain::input_matches(descriptor.input_schema(), &request.arguments) {
+            return Err(DispatchError::InvalidInput(request.capability.clone()));
+        }
+
         let authz = AuthorizationRequest::new(
             request,
             descriptor.risk_class(),
@@ -369,6 +379,9 @@ where
             DispatchError::Denied(outcome) => {
                 DecisionError::Validation(format!("capability denied by policy: {outcome:?}"))
             }
+            DispatchError::InvalidInput(id) => DecisionError::Validation(format!(
+                "capability input violates its declared schema: {id}"
+            )),
             DispatchError::Execution(error) => {
                 DecisionError::Unavailable(format!("execution failed: {error}"))
             }
@@ -453,26 +466,38 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
     bootstrap_capabilities()
         .into_iter()
         .map(|id| {
+            let service = is_service_capability(&id);
+            let input_schema = if service {
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["unit"],
+                    "properties": { "unit": { "type": "string" } },
+                    "additionalProperties": false,
+                })
+            } else {
+                serde_json::json!({ "type": "object", "additionalProperties": false })
+            };
+
             let base = CapabilityDescriptor::new(
                 id.clone(),
                 "argusd",
                 id.as_str(),
-                if is_service_capability(&id) {
+                if service {
                     RiskClass::LowRisk
                 } else {
                     RiskClass::Read
                 },
                 Version::new(0, 1, 0),
+                input_schema,
                 serde_json::json!({}),
-                serde_json::json!({}),
-                if is_service_capability(&id) {
+                if service {
                     Reversibility::Reversible
                 } else {
                     Reversibility::None
                 },
             );
 
-            if is_service_capability(&id) {
+            if service {
                 base.with_blast_radius(BlastRadius::Host)
                     .requiring_approval()
             } else {

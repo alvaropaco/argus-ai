@@ -27,6 +27,7 @@ pub use authorization::{
 };
 pub use capability::{
     CapabilityDescriptor, OsPrivilege, PrivilegeDeclaration, Reversibility, RiskClass,
+    input_matches,
 };
 pub use cloud::{
     AppliedConfigurationState, ApplyStatus, ApprovalState, CapabilityPublication, CloudCommand,

@@ -11,7 +11,7 @@ use argus_domain::{Action, CapabilityId, Plan};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::decision::context::ContextBuilder;
+use crate::decision::context::{ContextBuilder, REDACTED};
 use crate::decision::error::DecisionError;
 use crate::decision::gateway::{DecisionOutcome, propose_plan};
 use crate::decision::provenance::DecisionProvenance;
@@ -59,14 +59,48 @@ pub fn host_health_request(evidence: ContextBuilder) -> DecisionRequest {
 }
 
 /// The typed action a validated response implies, if any.
-fn remediation_action(response: &DecisionResponse) -> Option<Action> {
+///
+/// A restart names the service unit to restart, read from the `unit` evidence
+/// attribute. Without that evidence there is no well-formed action, so none is
+/// proposed (fail closed — nothing executes).
+fn remediation_action(response: &DecisionResponse, state: &Value) -> Option<Action> {
     match response.answers.get("remediation") {
-        Some(DecisionAnswer::Choice { choice, .. }) if choice == "restart" => Some(Action {
-            capability: CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART)
-                .expect("bootstrap capability id is valid"),
-            resource: None,
-            arguments: Value::Object(serde_json::Map::new()),
-        }),
+        Some(DecisionAnswer::Choice { choice, .. }) if choice == "restart" => {
+            let unit = unit_from_evidence(state)?;
+            Some(Action {
+                capability: CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART)
+                    .expect("bootstrap capability id is valid"),
+                resource: None,
+                arguments: serde_json::json!({ "unit": unit }),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The `unit` evidence value, as a string, when the state carries exactly one
+/// usable unit.
+///
+/// Fails closed: a unit is usable only when the evidence names exactly one
+/// distinct, non-blank, non-redacted value. Blank, whitespace-only, and
+/// [`REDACTED`] units are treated as no usable unit, and more than one distinct
+/// unit means the target is ambiguous, so no action is proposed.
+fn unit_from_evidence(state: &Value) -> Option<String> {
+    let mut units: Vec<&str> = state
+        .get("evidence")?
+        .as_array()?
+        .iter()
+        .filter(|entry| entry.get("attribute").and_then(Value::as_str) == Some("unit"))
+        .filter_map(|entry| entry.get("value").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty())
+        .collect();
+
+    units.sort_unstable();
+    units.dedup();
+
+    match units.as_slice() {
+        [unit] if *unit != REDACTED => Some((*unit).to_string()),
         _ => None,
     }
 }
@@ -110,7 +144,7 @@ pub async fn run_host_health(
         };
     let provenance = DecisionProvenance::from_response(&response, &state);
 
-    let Some(action) = remediation_action(&response) else {
+    let Some(action) = remediation_action(&response, &state) else {
         return Ok(None);
     };
     let Some(plan) = propose_plan(
@@ -144,6 +178,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingPorts {
         executed: Mutex<Vec<String>>,
+        arguments: Mutex<Vec<Value>>,
         recorded: Mutex<Vec<(String, bool, DecisionProvenance)>>,
     }
 
@@ -154,6 +189,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(action.capability.as_str().to_string());
+            self.arguments
+                .lock()
+                .unwrap()
+                .push(action.arguments.clone());
             Ok(Value::Null)
         }
     }
@@ -189,7 +228,40 @@ mod tests {
     fn evidence() -> ContextBuilder {
         let mut builder = ContextBuilder::new();
         builder.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+        builder.evidence("host:a", "unit", serde_json::json!("nginx.service"));
         builder
+    }
+
+    /// Builds a state carrying only `unit` evidence with the given values.
+    fn unit_state(units: &[&str]) -> Value {
+        let mut builder = ContextBuilder::new();
+        for unit in units {
+            builder.evidence("host:a", "unit", serde_json::json!(unit));
+        }
+        builder.into_state()
+    }
+
+    #[test]
+    fn unit_from_evidence_returns_the_single_usable_unit() {
+        assert_eq!(
+            unit_from_evidence(&unit_state(&["nginx.service"])).as_deref(),
+            Some("nginx.service")
+        );
+    }
+
+    #[test]
+    fn unit_from_evidence_treats_blank_whitespace_and_redacted_as_no_unit() {
+        assert_eq!(unit_from_evidence(&unit_state(&[""])), None);
+        assert_eq!(unit_from_evidence(&unit_state(&["   "])), None);
+        assert_eq!(unit_from_evidence(&unit_state(&[REDACTED])), None);
+    }
+
+    #[test]
+    fn unit_from_evidence_fails_closed_on_multiple_distinct_units() {
+        assert_eq!(
+            unit_from_evidence(&unit_state(&["nginx.service", "postgres.service"])),
+            None
+        );
     }
 
     fn answers(choice_conf: f64, noul: f64) -> BTreeMap<String, DecisionAnswer> {
@@ -225,6 +297,14 @@ mod tests {
             CapabilityId::HOST_SERVICE_RESTART
         );
         {
+            let arguments = ports.arguments.lock().unwrap();
+            assert_eq!(arguments.len(), 1);
+            assert_eq!(
+                arguments[0]["unit"], "nginx.service",
+                "the restart arguments carry the unit"
+            );
+        }
+        {
             let recorded = ports.recorded.lock().unwrap();
             assert_eq!(recorded.len(), 1);
             assert_eq!(recorded[0].2.model_id, crate::decision::provenance::UNKNOWN);
@@ -244,6 +324,25 @@ mod tests {
         assert!(plan.is_none(), "below threshold proposes nothing");
         assert!(ports.executed.lock().unwrap().is_empty());
         assert!(ports.recorded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restart_without_unit_evidence_proposes_no_action() {
+        // A restart decision with no `unit` evidence cannot name a unit, so the
+        // loop fails closed and proposes nothing (no malformed call is emitted).
+        let provider = FakeDecisionProvider::new(answers(0.9, 0.9));
+        let ports = RecordingPorts::default();
+
+        let mut no_unit = ContextBuilder::new();
+        no_unit.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+
+        let plan = run_host_health(&provider, no_unit, 0.7, &ports, &ports)
+            .await
+            .expect("loop runs");
+
+        assert!(plan.is_none(), "no unit evidence means no action");
+        assert!(ports.executed.lock().unwrap().is_empty());
+        assert!(ports.arguments.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -84,7 +84,11 @@ impl fmt::Display for ResourceId {
 }
 
 /// A typed, policy-checkable operation identifier, e.g. `host.status.read`.
+///
+/// Deserialization is validated: a serialized string cannot construct a
+/// `CapabilityId` by bypassing the dotted-path grammar (ADR-0027 §3).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct CapabilityId(String);
 
 impl CapabilityId {
@@ -115,6 +119,16 @@ impl CapabilityId {
     /// The full dotted capability path.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for CapabilityId {
+    type Error = DomainError;
+
+    /// Validated construction on the deserialization path, so a serialized
+    /// string cannot bypass the dotted-path grammar (ADR-0027 §3).
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        CapabilityId::new(&value)
     }
 }
 
@@ -186,6 +200,24 @@ mod tests {
             CapabilityId::ARGUS_PLUGINS_LIST,
         ] {
             assert!(CapabilityId::new(path).is_ok(), "{path} should be valid");
+        }
+    }
+
+    #[test]
+    fn capability_id_deserializes_through_the_validator() {
+        let id: CapabilityId =
+            serde_json::from_str("\"host.status.read\"").expect("a valid path deserializes");
+        assert_eq!(id.as_str(), "host.status.read");
+    }
+
+    #[test]
+    fn capability_id_rejects_invalid_paths_on_deserialize() {
+        for path in ["host", "Host.status", "host."] {
+            let json = serde_json::to_string(path).unwrap();
+            assert!(
+                serde_json::from_str::<CapabilityId>(&json).is_err(),
+                "{path} must not deserialize into a CapabilityId"
+            );
         }
     }
 }

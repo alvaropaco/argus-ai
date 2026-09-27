@@ -31,14 +31,21 @@ async fn diagnose_executes_through_dispatch_and_records() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_dispatch = Arc::clone(&calls);
-    let dispatch = move |_request: argus_domain::CapabilityRequest| {
+    let arguments = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let arguments_for_dispatch = Arc::clone(&arguments);
+    let dispatch = move |request: argus_domain::CapabilityRequest| {
         calls_for_dispatch.fetch_add(1, Ordering::SeqCst);
+        arguments_for_dispatch
+            .lock()
+            .unwrap()
+            .push(request.arguments.clone());
         Ok::<Value, DispatchError>(serde_json::json!({ "restarted": true }))
     };
 
     let repository = InMemoryRepository::new();
     let mut evidence = ContextBuilder::new();
     evidence.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+    evidence.evidence("host:a", "unit", serde_json::json!("nginx.service"));
 
     let plan = diagnose_with(dispatch, &repository, &provider, evidence, 0.7)
         .await
@@ -50,6 +57,14 @@ async fn diagnose_executes_through_dispatch_and_records() {
         1,
         "the action was dispatched once"
     );
+    {
+        let arguments = arguments.lock().unwrap();
+        assert_eq!(arguments.len(), 1, "the restart was dispatched");
+        assert_eq!(
+            arguments[0]["unit"], "nginx.service",
+            "the restart arguments carry the unit"
+        );
+    }
     let events = repository.list_audit_events().await.expect("list events");
     assert_eq!(events.len(), 1, "an audit event was recorded");
 
@@ -84,6 +99,7 @@ async fn diagnose_against_live_laya() {
     let repository = InMemoryRepository::new();
     let mut evidence = ContextBuilder::new();
     evidence.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+    evidence.evidence("host:a", "unit", serde_json::json!("nginx.service"));
 
     let plan = diagnose_with(dispatch, &repository, &provider, evidence, 0.3)
         .await

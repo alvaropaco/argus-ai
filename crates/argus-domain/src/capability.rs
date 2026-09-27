@@ -256,6 +256,58 @@ impl CapabilityDescriptor {
     }
 }
 
+/// Whether `input` satisfies the subset of JSON Schema the capability declarations
+/// in this project use.
+///
+/// An unknown or absent constraint is treated as satisfied, and the
+/// `additionalProperties: false` rule is respected so a typo in an invocation's
+/// arguments cannot slip through as an accepted input. This is the single shared
+/// validator used by both local dispatch and the cloud command ladder (ADR-0027 §4).
+pub fn input_matches(schema: &Value, input: &Value) -> bool {
+    let Some(schema) = schema.as_object() else {
+        return true;
+    };
+
+    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+        let matches_kind = match kind {
+            "object" => input.is_object(),
+            "array" => input.is_array(),
+            "string" => input.is_string(),
+            "number" | "integer" => input.is_number(),
+            "boolean" => input.is_boolean(),
+            "null" => input.is_null(),
+            _ => true,
+        };
+        if !matches_kind {
+            return false;
+        }
+    }
+
+    let Some(input) = input.as_object() else {
+        return true;
+    };
+
+    if let Some(required) = schema.get("required").and_then(Value::as_array)
+        && !required
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|key| input.contains_key(key))
+    {
+        return false;
+    }
+
+    if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        let permitted =
+            |key: &String| properties.is_some_and(|declared| declared.contains_key(key));
+        if !input.keys().all(permitted) {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
