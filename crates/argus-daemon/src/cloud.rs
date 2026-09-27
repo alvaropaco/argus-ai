@@ -2355,9 +2355,10 @@ mod tests {
             ))),
             environment_id: EnvironmentId::new(),
             policy: Arc::new(argus_policy::BootstrapPolicyEvaluator::new()),
-            executor: Arc::new(argus_executor::PrivilegedExecutor::new(Arc::new(
-                argus_executor::MockServiceController::new(),
-            ))),
+            executor: Arc::new(argus_executor::PrivilegedExecutor::new(
+                Arc::new(argus_executor::MockServiceController::new()),
+                argus_executor::GuardrailRegistry::default(),
+            )),
             approvals: Arc::new(ApprovalStore::new()),
             limiter: Arc::new(PrivilegedLimiter::new(2)),
             privileged_execution,
@@ -2650,7 +2651,10 @@ mod tests {
                 Arc::clone(&services) as Arc<dyn argus_executor::ServiceController>;
             let executor = Arc::new(argus_executor::CompositeExecutor::new(
                 Arc::new(StubReadOnly),
-                Arc::new(argus_executor::PrivilegedExecutor::new(service_controller)),
+                Arc::new(argus_executor::PrivilegedExecutor::new(
+                    service_controller,
+                    argus_executor::GuardrailRegistry::default(),
+                )),
             ));
 
             (

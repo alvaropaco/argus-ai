@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::error::DecisionError;
-use argus_ai_core::decision::host_health::{ActionPort, RecordPort, run_host_health};
+use argus_ai_core::decision::host_health::{ActionPort, DedupPort, RecordPort, run_host_health};
 use argus_ai_core::decision::provenance::DecisionProvenance;
 use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{
@@ -47,6 +47,9 @@ pub struct Daemon {
     /// The local kill switch, shared with the cloud supervisor so that changing it
     /// takes effect without a restart.
     privileged_execution: Arc<AtomicBool>,
+    /// Remembers which observations have already been reasoned about, so a
+    /// repeated observation spawns no plan (ADR-0028 §5).
+    dedup: InMemoryDedup,
     /// Wakes the cloud supervisor out of a reconnect backoff when the enrollment
     /// changes, so a fresh credential is used immediately rather than after the
     /// current delay elapses.
@@ -140,6 +143,7 @@ impl Daemon {
             registry,
             plugins: Vec::new(),
             privileged_execution,
+            dedup: InMemoryDedup::new(),
             cloud_wake: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -225,9 +229,10 @@ impl Daemon {
             Arc::new(BootstrapExecutor::new(Arc::new(DaemonProvider {
                 config: self.config.clone(),
             }))),
-            Arc::new(argus_executor::PrivilegedExecutor::new(Arc::new(
-                argus_executor::SystemdServiceController::new(),
-            ))),
+            Arc::new(argus_executor::PrivilegedExecutor::new(
+                Arc::new(argus_executor::SystemdServiceController::new()),
+                service_guardrails(DAEMON_UNIT),
+            )),
         ))
     }
 
@@ -310,6 +315,7 @@ impl Daemon {
             provider,
             evidence,
             confidence_threshold,
+            &self.dedup,
         )
         .await
     }
@@ -326,6 +332,7 @@ pub async fn diagnose_with<F>(
     provider: &dyn DecisionProvider,
     evidence: ContextBuilder,
     confidence_threshold: f64,
+    dedup: &dyn DedupPort,
 ) -> Result<Option<Plan>, DecisionError>
 where
     F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
@@ -345,6 +352,7 @@ where
         confidence_threshold,
         &actions,
         &recorder,
+        dedup,
     )
     .await
 }
@@ -445,6 +453,26 @@ impl RecordPort for RepoRecordPort<'_> {
             .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
         Ok(())
     }
+
+    async fn record_dedup(&self, key: &str) -> Result<(), DecisionError> {
+        let event = DomainEvent::new(
+            Uuid::new_v4(),
+            EventType::new("brain.observation.deduped")
+                .map_err(|e| DecisionError::Invalid(e.to_string()))?,
+            Utc::now(),
+            "argusd",
+            "host:local",
+            Severity::Info,
+            Some(self.correlation_id),
+            None,
+            serde_json::json!({ "dedup_key": key }),
+        );
+        self.repository
+            .put_audit_event(&event)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
+        Ok(())
+    }
 }
 
 fn bootstrap_capabilities() -> Vec<CapabilityId> {
@@ -514,4 +542,111 @@ fn is_service_capability(id: &CapabilityId) -> bool {
             | CapabilityId::HOST_SERVICE_STOP
             | CapabilityId::HOST_SERVICE_START
     )
+}
+
+/// The default upper bound on remembered dedup keys. When the set reaches this
+/// size, it is cleared so no observation is suppressed forever and the set does
+/// not grow without bound.
+const DEFAULT_MAX_KEYS: usize = 1024;
+
+/// A [`DedupPort`] over process memory: remembers claimed observation keys so a
+/// repeated observation spawns no plan or execution (ADR-0028 §5).
+///
+/// In-memory dedup is a per-process guard, not plan/execution persistence — the
+/// latter is out of scope for this milestone (ADR-0028 §6).
+pub struct InMemoryDedup {
+    seen: std::sync::Mutex<std::collections::HashSet<String>>,
+    max_keys: usize,
+}
+
+impl InMemoryDedup {
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_MAX_KEYS)
+    }
+
+    /// A bounded dedup set: once `max_keys` keys are remembered, the set is
+    /// cleared rather than growing without bound.
+    pub fn with_capacity(max_keys: usize) -> Self {
+        Self {
+            seen: std::sync::Mutex::new(std::collections::HashSet::new()),
+            max_keys: max_keys.max(1),
+        }
+    }
+}
+
+impl Default for InMemoryDedup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl DedupPort for InMemoryDedup {
+    async fn claim(&self, key: &str) -> Result<bool, DecisionError> {
+        let mut seen = self
+            .seen
+            .lock()
+            .map_err(|_| DecisionError::Invalid("dedup key set poisoned".to_string()))?;
+        if seen.contains(key) {
+            return Ok(false);
+        }
+        if seen.len() >= self.max_keys {
+            seen.clear();
+        }
+        seen.insert(key.to_string());
+        Ok(true)
+    }
+
+    async fn release(&self, key: &str) -> Result<(), DecisionError> {
+        self.seen
+            .lock()
+            .map_err(|_| DecisionError::Invalid("dedup key set poisoned".to_string()))?
+            .remove(key);
+        Ok(())
+    }
+}
+
+/// The daemon's own systemd unit name (matching `deploy/debian/argusd.service`).
+const DAEMON_UNIT: &str = "argusd";
+
+/// The execution-time guardrails wired for the bootstrap service capabilities.
+///
+/// `never_target_argusd` and `valid_service_unit` run on every service effect;
+/// `allowed_targets` is registered only when a target set is configured (none in
+/// the bootstrap). The daemon owns this wiring (ADR-0028 §1).
+fn service_guardrails(daemon_unit: &str) -> argus_executor::GuardrailRegistry {
+    let mut registry = argus_executor::GuardrailRegistry::new();
+    for capability in [
+        CapabilityId::HOST_SERVICE_RESTART,
+        CapabilityId::HOST_SERVICE_STOP,
+        CapabilityId::HOST_SERVICE_START,
+    ] {
+        let id = CapabilityId::new(capability).expect("bootstrap capability ids are valid");
+        registry.register(
+            id.clone(),
+            Arc::new(argus_executor::NeverTargetArgusd::new(daemon_unit)),
+        );
+        registry.register(id, Arc::new(argus_executor::ValidServiceUnit));
+    }
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_guardrails_refuse_the_configured_unit_and_malformed_names() {
+        let registry = service_guardrails("customd");
+        let restart = CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap();
+
+        assert!(registry.check(&restart, "customd").is_err());
+        assert!(registry.check(&restart, "customd.service").is_err());
+        assert!(
+            registry.check(&restart, "argusd").is_ok(),
+            "the configured unit, not the default, must be refused"
+        );
+        assert!(registry.check(&restart, "bad unit").is_err());
+        assert!(registry.check(&restart, "nginx.service").is_ok());
+    }
 }

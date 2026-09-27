@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use argus_domain::{Action, BlastRadius, Plan, PlanStatus};
+use argus_domain::{BlastRadius, Plan, PlanStatus, PlanStep};
 
 use crate::decision::error::DecisionError;
 use crate::decision::provider::DecisionProvider;
@@ -102,14 +102,14 @@ pub fn aggregate_confidence(response: &DecisionResponse) -> f64 {
 
 /// Builds a proposed `Plan` only if the response clears the confidence threshold.
 ///
-/// The caller supplies the actions derived from the decisions (e.g. a
-/// remediation `choice`); this function enforces the confidence gate (FR-003)
-/// and produces the typed plan.
+/// The caller supplies the steps derived from the decisions (e.g. a
+/// remediation `choice`), each carrying its declarative rollback; this function
+/// enforces the confidence gate (FR-003) and produces the typed plan.
 pub fn propose_plan(
     response: &DecisionResponse,
     threshold: f64,
     objective: impl Into<String>,
-    actions: Vec<Action>,
+    steps: Vec<PlanStep>,
 ) -> Option<Plan> {
     let confidence = aggregate_confidence(response);
     if confidence < threshold {
@@ -117,10 +117,9 @@ pub fn propose_plan(
     }
     Some(Plan {
         objective: objective.into(),
-        actions,
+        steps,
         preconditions: Vec::new(),
         expected_outcomes: Vec::new(),
-        rollback: None,
         blast_radius: BlastRadius::Host,
         confidence,
         status: PlanStatus::Proposed,
@@ -260,12 +259,16 @@ mod tests {
             model: None,
             answers: BTreeMap::from([("q".to_string(), DecisionAnswer::Noul { noul: 0.95 })]),
         };
-        let action = Action {
+        let action = argus_domain::Action {
             capability: argus_domain::CapabilityId::new("host.service.restart").unwrap(),
             resource: None,
             arguments: serde_json::json!({ "unit": "nginx.service" }),
         };
-        let plan = propose_plan(&high, 0.8, "restore nginx", vec![action.clone()]);
+        let step = PlanStep {
+            action: action.clone(),
+            rollback: None,
+        };
+        let plan = propose_plan(&high, 0.8, "restore nginx", vec![step.clone()]);
         assert!(plan.is_some());
         assert_eq!(plan.unwrap().status, PlanStatus::Proposed);
 
@@ -273,6 +276,6 @@ mod tests {
             model: None,
             answers: BTreeMap::from([("q".to_string(), DecisionAnswer::Noul { noul: 0.5 })]),
         };
-        assert!(propose_plan(&low, 0.8, "restore nginx", vec![action]).is_none());
+        assert!(propose_plan(&low, 0.8, "restore nginx", vec![step]).is_none());
     }
 }

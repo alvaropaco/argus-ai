@@ -7,6 +7,7 @@
 mod action;
 mod bootstrap;
 mod executor;
+mod guardrail;
 mod privileged;
 mod provider;
 mod service;
@@ -14,6 +15,10 @@ mod service;
 pub use action::{AuthorizedAction, ExecutionError, ExecutionResult, ReversalStatus};
 pub use bootstrap::BootstrapExecutor;
 pub use executor::Executor;
+pub use guardrail::{
+    AllowedTargets, Guardrail, GuardrailRegistry, GuardrailViolation, NeverTargetArgusd,
+    ValidServiceUnit, pid_above_one,
+};
 pub use privileged::{CompositeExecutor, PrivilegedExecutor};
 pub use provider::CapabilityProvider;
 pub use service::{

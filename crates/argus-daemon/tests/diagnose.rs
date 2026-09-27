@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use argus_ai_core::decision::adapters::FakeDecisionProvider;
 use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::types::DecisionAnswer;
-use argus_daemon::{DispatchError, diagnose_with};
+use argus_daemon::{DispatchError, InMemoryDedup, diagnose_with};
 use argus_state::{DomainRepository, InMemoryRepository};
 use serde_json::Value;
 
@@ -47,9 +47,16 @@ async fn diagnose_executes_through_dispatch_and_records() {
     evidence.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
     evidence.evidence("host:a", "unit", serde_json::json!("nginx.service"));
 
-    let plan = diagnose_with(dispatch, &repository, &provider, evidence, 0.7)
-        .await
-        .expect("loop runs");
+    let plan = diagnose_with(
+        dispatch,
+        &repository,
+        &provider,
+        evidence,
+        0.7,
+        &InMemoryDedup::new(),
+    )
+    .await
+    .expect("loop runs");
 
     assert!(plan.is_some(), "a plan clears the threshold");
     assert_eq!(
@@ -101,9 +108,85 @@ async fn diagnose_against_live_laya() {
     evidence.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
     evidence.evidence("host:a", "unit", serde_json::json!("nginx.service"));
 
-    let plan = diagnose_with(dispatch, &repository, &provider, evidence, 0.3)
-        .await
-        .expect("loop runs against a live laya-serve");
+    let plan = diagnose_with(
+        dispatch,
+        &repository,
+        &provider,
+        evidence,
+        0.3,
+        &InMemoryDedup::new(),
+    )
+    .await
+    .expect("loop runs against a live laya-serve");
     assert!(plan.is_some(), "laya drove a plan");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_repeated_observation_spawns_one_plan() {
+    let provider = FakeDecisionProvider::new(BTreeMap::from([
+        ("degraded".to_string(), DecisionAnswer::Noul { noul: 0.9 }),
+        (
+            "remediation".to_string(),
+            DecisionAnswer::Choice {
+                choice: "restart".into(),
+                confidence: 0.9,
+                probabilities: BTreeMap::from([
+                    ("restart".to_string(), 0.9),
+                    ("noop".to_string(), 0.1),
+                ]),
+            },
+        ),
+    ]));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let repository = InMemoryRepository::new();
+    let dedup = InMemoryDedup::new();
+
+    let evidence = || {
+        let mut context = ContextBuilder::new();
+        context.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+        context.evidence("host:a", "unit", serde_json::json!("nginx.service"));
+        context
+    };
+
+    let dispatch = {
+        let calls = Arc::clone(&calls);
+        move |_request: argus_domain::CapabilityRequest| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<Value, DispatchError>(serde_json::json!({ "restarted": true }))
+        }
+    };
+
+    let first = diagnose_with(
+        dispatch.clone(),
+        &repository,
+        &provider,
+        evidence(),
+        0.7,
+        &dedup,
+    )
+    .await
+    .expect("loop runs");
+    assert!(first.is_some(), "the first observation plans");
+
+    let second = diagnose_with(dispatch, &repository, &provider, evidence(), 0.7, &dedup)
+        .await
+        .expect("loop runs");
+    assert!(second.is_none(), "the repeat spawns no plan");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "exactly one execution across two identical observations"
+    );
+
+    let events = repository.list_audit_events().await.expect("list events");
+    assert_eq!(events.len(), 2, "the plan and its dedup are both audited");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event_type().as_str() == "brain.observation.deduped"),
+        "the deduplicated observation is audited"
+    );
 }

@@ -159,6 +159,22 @@ impl ContextBuilder {
         map.insert("evidence".to_string(), Value::Array(evidence));
         Value::Object(map)
     }
+
+    /// A canonical, order-independent key over the deduplicated, redacted
+    /// evidence.
+    ///
+    /// Two builders carrying the same evidence in a different insertion order
+    /// produce the same key, so an observation can be deduplicated regardless of
+    /// how its evidence was assembled.
+    pub fn canonical_key(&self) -> String {
+        let mut entries: Vec<String> = self
+            .entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap_or_default())
+            .collect();
+        entries.sort();
+        serde_json::to_string(&entries).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use argus_domain::{Action, CapabilityId, Plan};
+use argus_domain::{Action, CapabilityId, Plan, PlanStep};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -105,6 +105,34 @@ fn unit_from_evidence(state: &Value) -> Option<String> {
     }
 }
 
+/// The declarative rollback action for a step, when one exists (ADR-0028 §4).
+///
+/// A stop is undone by a start and vice versa. A restart has no inverse: it
+/// neither creates nor removes a running unit, so a blind reversal would only
+/// disturb it further — its rollback is `None`.
+fn rollback_for(action: &Action) -> Option<Action> {
+    let inverse = match action.capability.as_str() {
+        CapabilityId::HOST_SERVICE_STOP => Some(CapabilityId::HOST_SERVICE_START),
+        CapabilityId::HOST_SERVICE_START => Some(CapabilityId::HOST_SERVICE_STOP),
+        _ => None,
+    };
+    inverse.map(|capability| Action {
+        capability: CapabilityId::new(capability).expect("bootstrap capability ids are valid"),
+        resource: action.resource.clone(),
+        arguments: action.arguments.clone(),
+    })
+}
+
+/// The deterministic observation dedup key: the canonical, order-independent
+/// serialization of the evidence state.
+///
+/// The same observation produces the same key, so a repeated observation can be
+/// recognized before it spawns a plan (ADR-0028 §5). The key is content-derived
+/// because observation ids are random today.
+pub fn observation_dedup_key(evidence: &ContextBuilder) -> String {
+    evidence.canonical_key()
+}
+
 /// A port the loop uses to execute an action; the daemon wires policy+executor.
 #[async_trait]
 pub trait ActionPort: Send + Sync {
@@ -120,46 +148,82 @@ pub trait RecordPort: Send + Sync {
         executed: bool,
         provenance: &DecisionProvenance,
     ) -> Result<(), DecisionError>;
+
+    /// Records a repeated observation that was deduplicated (no plan spawned).
+    ///
+    /// Defaults to a no-op so existing recorders need not change; the daemon
+    /// overrides it to write the dedup to the audit trail.
+    async fn record_dedup(&self, _key: &str) -> Result<(), DecisionError> {
+        Ok(())
+    }
+}
+
+/// A port the loop uses to deduplicate repeated observations.
+#[async_trait]
+pub trait DedupPort: Send + Sync {
+    /// Claims `key`; returns `Ok(true)` when this is a new observation (proceed),
+    /// or `Ok(false)` when it was already seen (duplicate — spawn no plan).
+    async fn claim(&self, key: &str) -> Result<bool, DecisionError>;
+
+    /// Releases a claimed key when no plan was produced, so a later identical
+    /// observation is not suppressed by a transient no-plan.
+    ///
+    /// Defaults to a no-op so existing dedup ports need not change; the daemon's
+    /// in-memory port clears the key.
+    async fn release(&self, _key: &str) -> Result<(), DecisionError> {
+        Ok(())
+    }
 }
 
 /// Runs one host-health step: decide, validate, gate on confidence, propose a
 /// plan, execute through the port, and record the outcome.
 ///
-/// Returns the proposed plan when it clears the threshold, or `None` when the
-/// planner proposes nothing actionable (fail-closed — nothing executes). An
-/// execution or recording failure is recorded before it propagates.
+/// A repeated observation (same dedup key) spawns no plan: the repeat is a
+/// recorded no-op. Returns the proposed plan when it clears the threshold, or
+/// `None` when the planner proposes nothing actionable (fail-closed — nothing
+/// executes). An execution or recording failure is recorded before it propagates.
 pub async fn run_host_health(
     provider: &dyn DecisionProvider,
     evidence: ContextBuilder,
     threshold: f64,
     actions: &dyn ActionPort,
     recorder: &dyn RecordPort,
+    dedup: &dyn DedupPort,
 ) -> Result<Option<Plan>, DecisionError> {
+    let key = observation_dedup_key(&evidence);
+    if !dedup.claim(&key).await? {
+        recorder.record_dedup(&key).await?;
+        return Ok(None);
+    }
+
     let request = host_health_request(evidence);
     let state = request.state.clone();
     let response =
         match crate::decision::gateway::decide_outcome_with(provider, request, threshold).await? {
-            DecisionOutcome::NoDecision(_) => return Ok(None),
+            DecisionOutcome::NoDecision(_) => {
+                dedup.release(&key).await?;
+                return Ok(None);
+            }
             DecisionOutcome::Decided(response) => response,
         };
     let provenance = DecisionProvenance::from_response(&response, &state);
 
     let Some(action) = remediation_action(&response, &state) else {
+        dedup.release(&key).await?;
         return Ok(None);
     };
-    let Some(plan) = propose_plan(
-        &response,
-        threshold,
-        "restore the host service",
-        vec![action],
-    ) else {
+    let rollback = rollback_for(&action);
+    let step = PlanStep { action, rollback };
+    let Some(plan) = propose_plan(&response, threshold, "restore the host service", vec![step])
+    else {
+        dedup.release(&key).await?;
         return Ok(None);
     };
 
-    // Execute every action the plan carries, and always record the outcome —
+    // Execute every step the plan carries, and always record the outcome —
     // including a failed execution — so the audit trail is never missing.
-    for action in &plan.actions {
-        if let Err(error) = actions.execute(action).await {
+    for step in &plan.steps {
+        if let Err(error) = actions.execute(&step.action).await {
             let _ = recorder.record(&plan, false, &provenance).await;
             return Err(error);
         }
@@ -180,6 +244,7 @@ mod tests {
         executed: Mutex<Vec<String>>,
         arguments: Mutex<Vec<Value>>,
         recorded: Mutex<Vec<(String, bool, DecisionProvenance)>>,
+        deduped: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -210,6 +275,37 @@ mod tests {
                 executed,
                 provenance.clone(),
             ));
+            Ok(())
+        }
+
+        async fn record_dedup(&self, key: &str) -> Result<(), DecisionError> {
+            self.deduped.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DedupPort for RecordingPorts {
+        async fn claim(&self, _key: &str) -> Result<bool, DecisionError> {
+            Ok(true)
+        }
+    }
+
+    /// A dedup port that remembers claimed keys, for the repeated-observation
+    /// test.
+    #[derive(Default)]
+    struct StatefulDedup {
+        seen: Mutex<std::collections::HashSet<String>>,
+    }
+
+    #[async_trait]
+    impl DedupPort for StatefulDedup {
+        async fn claim(&self, key: &str) -> Result<bool, DecisionError> {
+            Ok(self.seen.lock().unwrap().insert(key.to_string()))
+        }
+
+        async fn release(&self, key: &str) -> Result<(), DecisionError> {
+            self.seen.lock().unwrap().remove(key);
             Ok(())
         }
     }
@@ -286,7 +382,7 @@ mod tests {
         let provider = FakeDecisionProvider::new(answers(0.9, 0.9));
         let ports = RecordingPorts::default();
 
-        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports)
+        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports)
             .await
             .expect("loop runs");
 
@@ -317,7 +413,7 @@ mod tests {
         let provider = FakeDecisionProvider::new(answers(0.4, 0.4));
         let ports = RecordingPorts::default();
 
-        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports)
+        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports)
             .await
             .expect("loop runs");
 
@@ -336,7 +432,7 @@ mod tests {
         let mut no_unit = ContextBuilder::new();
         no_unit.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
 
-        let plan = run_host_health(&provider, no_unit, 0.7, &ports, &ports)
+        let plan = run_host_health(&provider, no_unit, 0.7, &ports, &ports, &ports)
             .await
             .expect("loop runs");
 
@@ -368,7 +464,7 @@ mod tests {
         ]));
         let ports = RecordingPorts::default();
 
-        let result = run_host_health(&provider, evidence(), 0.7, &ports, &ports).await;
+        let result = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports).await;
         assert!(matches!(result, Err(DecisionError::Validation(_))));
         assert!(ports.executed.lock().unwrap().is_empty());
     }
@@ -389,9 +485,16 @@ mod tests {
     async fn unavailable_engine_fails_closed() {
         let ports = RecordingPorts::default();
 
-        let plan = run_host_health(&UnavailableProvider, evidence(), 0.7, &ports, &ports)
-            .await
-            .expect("loop runs");
+        let plan = run_host_health(
+            &UnavailableProvider,
+            evidence(),
+            0.7,
+            &ports,
+            &ports,
+            &ports,
+        )
+        .await
+        .expect("loop runs");
 
         assert!(plan.is_none(), "an unavailable engine proposes nothing");
         assert!(ports.executed.lock().unwrap().is_empty());
@@ -404,10 +507,77 @@ mod tests {
         let recorder = RecordingPorts::default();
         let failing = FailingActionPort;
 
-        let result = run_host_health(&provider, evidence(), 0.7, &failing, &recorder).await;
+        let result =
+            run_host_health(&provider, evidence(), 0.7, &failing, &recorder, &recorder).await;
         assert!(result.is_err());
         let recorded = recorder.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "a failed execution is still recorded");
         assert!(!recorded[0].1, "recorded as not-executed");
+    }
+
+    #[tokio::test]
+    async fn a_repeated_observation_spawns_one_plan_and_the_repeat_is_a_noop() {
+        let provider = FakeDecisionProvider::new(answers(0.9, 0.9));
+        let ports = RecordingPorts::default();
+        let dedup = StatefulDedup::default();
+
+        let first = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &dedup)
+            .await
+            .expect("loop runs");
+        assert!(first.is_some(), "the first observation plans");
+
+        let second = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &dedup)
+            .await
+            .expect("loop runs");
+        assert!(second.is_none(), "the repeat spawns no plan");
+
+        assert_eq!(
+            ports.executed.lock().unwrap().len(),
+            1,
+            "exactly one execution"
+        );
+        assert_eq!(
+            ports.deduped.lock().unwrap().len(),
+            1,
+            "the repeat is recorded as a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transient_no_plan_does_not_suppress_a_later_identical_observation() {
+        let low = FakeDecisionProvider::new(answers(0.4, 0.4));
+        let high = FakeDecisionProvider::new(answers(0.9, 0.9));
+        let ports = RecordingPorts::default();
+        let dedup = StatefulDedup::default();
+
+        let first = run_host_health(&low, evidence(), 0.7, &ports, &ports, &dedup)
+            .await
+            .expect("loop runs");
+        assert!(first.is_none(), "low confidence proposes nothing");
+
+        let second = run_host_health(&high, evidence(), 0.7, &ports, &ports, &dedup)
+            .await
+            .expect("loop runs");
+        assert!(
+            second.is_some(),
+            "a later identical observation plans after a transient no-plan"
+        );
+    }
+
+    #[test]
+    fn observation_dedup_key_is_stable_across_evidence_order() {
+        let mut first = ContextBuilder::new();
+        first.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+        first.evidence("host:a", "unit", serde_json::json!("nginx.service"));
+
+        let mut second = ContextBuilder::new();
+        second.evidence("host:a", "unit", serde_json::json!("nginx.service"));
+        second.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
+
+        assert_eq!(
+            observation_dedup_key(&first),
+            observation_dedup_key(&second),
+            "the dedup key must not depend on evidence insertion order"
+        );
     }
 }

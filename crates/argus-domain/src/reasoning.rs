@@ -66,17 +66,30 @@ pub enum PlanStatus {
     Executing,
     Completed,
     Failed,
+    /// A failed plan's already-executed steps are being undone.
+    RollingBack,
     RolledBack,
+    /// A rollback itself failed; an operator must intervene.
+    NeedsManual,
+}
+
+/// One step of a plan: the action to perform and its declarative rollback.
+///
+/// Every step carries the action that undoes it, when one exists (ADR-0028 §4).
+/// The planner never substitutes actions mid-failure; recovery is re-authorization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub action: Action,
+    pub rollback: Option<Action>,
 }
 
 /// A proposed sequence of typed actions to move observed state toward desired state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub objective: String,
-    pub actions: Vec<Action>,
+    pub steps: Vec<PlanStep>,
     pub preconditions: Vec<String>,
     pub expected_outcomes: Vec<String>,
-    pub rollback: Option<String>,
     pub blast_radius: BlastRadius,
     pub confidence: f64,
     pub status: PlanStatus,
@@ -120,14 +133,16 @@ mod tests {
     fn plan_serde_round_trip() {
         let plan = Plan {
             objective: "restore nginx".into(),
-            actions: vec![Action {
-                capability: CapabilityId::new("host.service.restart").unwrap(),
-                resource: None,
-                arguments: serde_json::json!({ "unit": "nginx.service" }),
+            steps: vec![PlanStep {
+                action: Action {
+                    capability: CapabilityId::new("host.service.restart").unwrap(),
+                    resource: None,
+                    arguments: serde_json::json!({ "unit": "nginx.service" }),
+                },
+                rollback: None,
             }],
             preconditions: vec![],
             expected_outcomes: vec!["nginx running".into()],
-            rollback: None,
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
@@ -135,6 +150,18 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let back: Plan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan, back);
+    }
+
+    #[test]
+    fn plan_status_serde_includes_rollback_and_manual() {
+        for (status, expected) in [
+            (PlanStatus::RollingBack, "\"rolling_back\""),
+            (PlanStatus::NeedsManual, "\"needs_manual\""),
+        ] {
+            assert_eq!(serde_json::to_string(&status).unwrap(), expected);
+            let back: PlanStatus = serde_json::from_str(expected).unwrap();
+            assert_eq!(back, status);
+        }
     }
 
     #[test]

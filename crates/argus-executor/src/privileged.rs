@@ -15,6 +15,7 @@ use serde_json::json;
 
 use crate::action::{AuthorizedAction, ExecutionError, ExecutionResult, ReversalStatus};
 use crate::executor::Executor;
+use crate::guardrail::GuardrailRegistry;
 use crate::service::{ServiceController, ServiceError};
 
 /// A host-service operation, and its inverse.
@@ -69,11 +70,15 @@ impl ServiceOp {
 /// Executes environment-changing capabilities through a [`ServiceController`].
 pub struct PrivilegedExecutor {
     services: Arc<dyn ServiceController>,
+    guardrails: GuardrailRegistry,
 }
 
 impl PrivilegedExecutor {
-    pub fn new(services: Arc<dyn ServiceController>) -> Self {
-        Self { services }
+    pub fn new(services: Arc<dyn ServiceController>, guardrails: GuardrailRegistry) -> Self {
+        Self {
+            services,
+            guardrails,
+        }
     }
 }
 
@@ -95,6 +100,11 @@ impl Executor for PrivilegedExecutor {
                 ExecutionError::Failed("the request does not name a service unit".to_string())
             })?
             .to_string();
+
+        // Guardrails run at execution time on the freshly re-resolved target,
+        // immediately before the effect (ADR-0028 §1-§2). A violation refuses the
+        // effect and never reaches the controller.
+        self.guardrails.check(capability, &unit)?;
 
         let started_at = Utc::now();
 
@@ -223,6 +233,9 @@ mod tests {
         fn start(&self, _unit: &str) -> Result<(), ServiceError> {
             self.record_and_check("start")
         }
+        fn is_active(&self, _unit: &str) -> Result<bool, ServiceError> {
+            Ok(false)
+        }
     }
 
     fn action_for(capability: &str, unit: &str) -> AuthorizedAction {
@@ -244,7 +257,7 @@ mod tests {
     #[test]
     fn a_service_restart_executes_and_records_the_unit() {
         let controller = Arc::new(ScriptedController::default());
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let result = executor
             .execute(&action_for(
@@ -261,7 +274,7 @@ mod tests {
     #[test]
     fn an_unsupported_capability_never_reaches_the_controller() {
         let controller = Arc::new(ScriptedController::default());
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let err = executor
             .execute(&action_for("host.process.signal", "nginx.service"))
@@ -274,7 +287,7 @@ mod tests {
     #[test]
     fn a_request_without_a_unit_is_refused_before_touching_the_host() {
         let controller = Arc::new(ScriptedController::default());
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let request = CapabilityRequest::new(
             CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
@@ -299,7 +312,7 @@ mod tests {
     #[test]
     fn a_failed_stop_is_reversed_by_a_start() {
         let controller = Arc::new(ScriptedController::failing(&["stop"]));
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let err = executor
             .execute(&action_for(
@@ -328,7 +341,7 @@ mod tests {
     #[test]
     fn a_failed_start_is_reversed_by_a_stop() {
         let controller = Arc::new(ScriptedController::failing(&["start"]));
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let err = executor
             .execute(&action_for(
@@ -350,7 +363,7 @@ mod tests {
     #[test]
     fn a_failed_reversal_is_reported_as_such_and_not_as_success() {
         let controller = Arc::new(ScriptedController::failing(&["stop", "start"]));
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let err = executor
             .execute(&action_for(
@@ -375,7 +388,7 @@ mod tests {
     #[test]
     fn a_failed_restart_has_no_inverse_and_says_so() {
         let controller = Arc::new(ScriptedController::failing(&["restart"]));
-        let executor = PrivilegedExecutor::new(controller.clone());
+        let executor = PrivilegedExecutor::new(controller.clone(), GuardrailRegistry::default());
 
         let err = executor
             .execute(&action_for(
@@ -396,5 +409,53 @@ mod tests {
             vec!["restart"],
             "a restart must not be blindly re-run as a reversal"
         );
+    }
+
+    /// A registry with `never_target_argusd` wired for every service capability,
+    /// as the daemon wires it at build time.
+    fn guarded_executor(controller: Arc<ScriptedController>) -> PrivilegedExecutor {
+        let mut registry = GuardrailRegistry::default();
+        for capability in [
+            CapabilityId::HOST_SERVICE_RESTART,
+            CapabilityId::HOST_SERVICE_STOP,
+            CapabilityId::HOST_SERVICE_START,
+        ] {
+            registry.register(
+                CapabilityId::new(capability).unwrap(),
+                Arc::new(crate::guardrail::NeverTargetArgusd::default()),
+            );
+        }
+        PrivilegedExecutor::new(controller, registry)
+    }
+
+    #[test]
+    fn a_guardrail_violation_refuses_the_effect_before_it_runs() {
+        let controller = Arc::new(ScriptedController::default());
+        let executor = guarded_executor(controller.clone());
+
+        let err = executor
+            .execute(&action_for(CapabilityId::HOST_SERVICE_RESTART, "argusd"))
+            .unwrap_err();
+
+        assert!(matches!(err, ExecutionError::GuardrailViolation(_)));
+        assert!(
+            controller.recorded().is_empty(),
+            "a refused action must never reach the controller"
+        );
+    }
+
+    #[test]
+    fn a_safe_target_passes_guardrails_and_executes() {
+        let controller = Arc::new(ScriptedController::default());
+        let executor = guarded_executor(controller.clone());
+
+        executor
+            .execute(&action_for(
+                CapabilityId::HOST_SERVICE_RESTART,
+                "nginx.service",
+            ))
+            .expect("a safe target executes");
+
+        assert_eq!(controller.recorded(), vec!["restart"]);
     }
 }

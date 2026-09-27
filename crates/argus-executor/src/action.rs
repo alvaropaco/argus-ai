@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::guardrail::GuardrailViolation;
+
 /// An action that has been authorized by policy.
 ///
 /// Constructing an [`AuthorizedAction`] enforces that the decision is `Allow`,
@@ -78,6 +80,13 @@ pub enum ExecutionError {
 
     #[error("execution failed: {0}")]
     Failed(String),
+
+    /// A guardrail predicate refused the action before the effect ran.
+    ///
+    /// This is distinct from [`Self::Failed`]: no effect was attempted, and the
+    /// refusal reason is a deterministic predicate outcome, not a host error.
+    #[error(transparent)]
+    GuardrailViolation(#[from] GuardrailViolation),
 
     /// The operation failed after it had already changed the host.
     ///
