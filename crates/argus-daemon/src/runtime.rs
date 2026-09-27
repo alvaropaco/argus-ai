@@ -7,6 +7,7 @@ use std::time::Instant;
 use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::error::DecisionError;
 use argus_ai_core::decision::host_health::{ActionPort, RecordPort, run_host_health};
+use argus_ai_core::decision::provenance::DecisionProvenance;
 use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{
     Action, AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId,
@@ -383,7 +384,12 @@ struct RepoRecordPort<'a> {
 
 #[async_trait::async_trait]
 impl RecordPort for RepoRecordPort<'_> {
-    async fn record(&self, plan: &Plan, executed: bool) -> Result<(), DecisionError> {
+    async fn record(
+        &self,
+        plan: &Plan,
+        executed: bool,
+        provenance: &DecisionProvenance,
+    ) -> Result<(), DecisionError> {
         let now = Utc::now();
         let subject =
             ResourceId::new("host", "local").map_err(|e| DecisionError::Invalid(e.to_string()))?;
@@ -417,6 +423,7 @@ impl RecordPort for RepoRecordPort<'_> {
                 "objective": plan.objective,
                 "executed": executed,
                 "confidence": plan.confidence,
+                "provenance": provenance,
             }),
         );
         self.repository

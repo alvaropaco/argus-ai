@@ -14,6 +14,7 @@ use serde_json::Value;
 use crate::decision::context::ContextBuilder;
 use crate::decision::error::DecisionError;
 use crate::decision::gateway::{DecisionOutcome, propose_plan};
+use crate::decision::provenance::DecisionProvenance;
 use crate::decision::provider::DecisionProvider;
 use crate::decision::types::{
     DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse, NoulCriteria,
@@ -79,7 +80,12 @@ pub trait ActionPort: Send + Sync {
 /// A port the loop uses to record its outcome; the daemon wires evidence+audit.
 #[async_trait]
 pub trait RecordPort: Send + Sync {
-    async fn record(&self, plan: &Plan, executed: bool) -> Result<(), DecisionError>;
+    async fn record(
+        &self,
+        plan: &Plan,
+        executed: bool,
+        provenance: &DecisionProvenance,
+    ) -> Result<(), DecisionError>;
 }
 
 /// Runs one host-health step: decide, validate, gate on confidence, propose a
@@ -96,11 +102,13 @@ pub async fn run_host_health(
     recorder: &dyn RecordPort,
 ) -> Result<Option<Plan>, DecisionError> {
     let request = host_health_request(evidence);
+    let state = request.state.clone();
     let response =
         match crate::decision::gateway::decide_outcome_with(provider, request, threshold).await? {
             DecisionOutcome::NoDecision(_) => return Ok(None),
             DecisionOutcome::Decided(response) => response,
         };
+    let provenance = DecisionProvenance::from_response(&response, &state);
 
     let Some(action) = remediation_action(&response) else {
         return Ok(None);
@@ -118,11 +126,11 @@ pub async fn run_host_health(
     // including a failed execution — so the audit trail is never missing.
     for action in &plan.actions {
         if let Err(error) = actions.execute(action).await {
-            let _ = recorder.record(&plan, false).await;
+            let _ = recorder.record(&plan, false, &provenance).await;
             return Err(error);
         }
     }
-    recorder.record(&plan, true).await?;
+    recorder.record(&plan, true, &provenance).await?;
     Ok(Some(plan))
 }
 
@@ -136,7 +144,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingPorts {
         executed: Mutex<Vec<String>>,
-        recorded: Mutex<Vec<(String, bool)>>,
+        recorded: Mutex<Vec<(String, bool, DecisionProvenance)>>,
     }
 
     #[async_trait]
@@ -152,11 +160,17 @@ mod tests {
 
     #[async_trait]
     impl RecordPort for RecordingPorts {
-        async fn record(&self, plan: &Plan, executed: bool) -> Result<(), DecisionError> {
-            self.recorded
-                .lock()
-                .unwrap()
-                .push((plan.objective.clone(), executed));
+        async fn record(
+            &self,
+            plan: &Plan,
+            executed: bool,
+            provenance: &DecisionProvenance,
+        ) -> Result<(), DecisionError> {
+            self.recorded.lock().unwrap().push((
+                plan.objective.clone(),
+                executed,
+                provenance.clone(),
+            ));
             Ok(())
         }
     }
@@ -210,7 +224,12 @@ mod tests {
             ports.executed.lock().unwrap()[0],
             CapabilityId::HOST_SERVICE_RESTART
         );
-        assert_eq!(ports.recorded.lock().unwrap().len(), 1);
+        {
+            let recorded = ports.recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].2.model_id, crate::decision::provenance::UNKNOWN);
+            assert_eq!(recorded[0].2.context_hash.len(), 16);
+        }
     }
 
     #[tokio::test]

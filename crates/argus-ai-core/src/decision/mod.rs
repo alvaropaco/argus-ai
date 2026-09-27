@@ -7,6 +7,7 @@ pub mod context;
 pub mod error;
 pub mod gateway;
 pub mod host_health;
+pub mod provenance;
 pub mod provider;
 pub mod types;
 pub mod validate;
@@ -18,6 +19,7 @@ pub use gateway::{
     DecisionOutcome, NoDecisionReason, ReasoningGateway, aggregate_confidence, decide_outcome_with,
     propose_plan,
 };
+pub use provenance::DecisionProvenance;
 pub use provider::DecisionProvider;
 pub use types::{
     DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse, NoulCriteria,

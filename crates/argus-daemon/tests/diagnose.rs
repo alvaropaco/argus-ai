@@ -52,6 +52,16 @@ async fn diagnose_executes_through_dispatch_and_records() {
     );
     let events = repository.list_audit_events().await.expect("list events");
     assert_eq!(events.len(), 1, "an audit event was recorded");
+
+    // Reconstruct the decision's provenance from the log.
+    let provenance = &events[0].payload()["provenance"];
+    assert_eq!(provenance["model_id"], "unknown");
+    assert!(
+        provenance["context_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 16),
+        "the context hash is reconstructable from the log"
+    );
 }
 
 /// The manual hitl demo: run the loop against a live `laya-serve`.
