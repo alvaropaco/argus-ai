@@ -255,13 +255,20 @@ impl DecisionOutcome {
 
 /// A locally granted authorization for one approval-required invocation.
 ///
-/// Bound to a specific `command_id` rather than a capability: a standing
-/// capability-level approval would silently convert a reviewed action into an
-/// unreviewed one (ADR-0020 §3).
+/// Bound to a single-use `token` and the reviewed plan's `context_hash` rather
+/// than a standing capability: a capability-level approval would silently
+/// convert a reviewed action into an unreviewed one, and a hash-less approval
+/// could be replayed against a changed plan (ADR-0020 §3, ADR-0030 §3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionApproval {
     pub approval_id: Uuid,
-    pub command_id: Uuid,
+    /// `command_id` is the pre-ADR-0030 wire name, kept as an alias so
+    /// previously persisted rows still decode.
+    #[serde(alias = "command_id")]
+    pub token: Uuid,
+    /// The canonical digest of the reviewed plan's context; a mismatch refuses.
+    #[serde(default)]
+    pub context_hash: String,
     pub granted_by: String,
     pub granted_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -278,16 +285,18 @@ pub enum ApprovalState {
 }
 
 impl ExecutionApproval {
-    /// Grants approval for one invocation, bounded in time.
+    /// Grants approval for one invocation, bounded in time and to `context_hash`.
     pub fn grant(
-        command_id: Uuid,
+        token: Uuid,
+        context_hash: impl Into<String>,
         granted_by: impl Into<String>,
         granted_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> Self {
         Self {
             approval_id: Uuid::new_v4(),
-            command_id,
+            token,
+            context_hash: context_hash.into(),
             granted_by: granted_by.into(),
             granted_at,
             expires_at,
@@ -295,12 +304,36 @@ impl ExecutionApproval {
         }
     }
 
-    /// Whether this approval authorizes execution of `command_id` at `now`.
+    /// Records an explicit denial bound to the same token and context hash.
     ///
-    /// An expired approval authorizes nothing, even though it was granted.
-    pub fn authorizes(&self, command_id: Uuid, now: DateTime<Utc>) -> bool {
+    /// A denial has no expiry window: it authorizes nothing now or later, and a
+    /// later grant replaces it (ADR-0030 §4).
+    pub fn deny(
+        token: Uuid,
+        context_hash: impl Into<String>,
+        granted_by: impl Into<String>,
+        at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            approval_id: Uuid::new_v4(),
+            token,
+            context_hash: context_hash.into(),
+            granted_by: granted_by.into(),
+            granted_at: at,
+            expires_at: at,
+            state: ApprovalState::Denied,
+        }
+    }
+
+    /// Whether this approval authorizes execution of `token` bound to
+    /// `context_hash` at `now`.
+    ///
+    /// An expired, denied, hash-mismatched, or token-mismatched approval
+    /// authorizes nothing.
+    pub fn authorizes(&self, token: Uuid, context_hash: &str, now: DateTime<Utc>) -> bool {
         self.state == ApprovalState::Granted
-            && self.command_id == command_id
+            && self.token == token
+            && self.context_hash == context_hash
             && now < self.expires_at
     }
 }
@@ -647,24 +680,49 @@ mod tests {
     }
 
     #[test]
-    fn approval_is_bound_to_one_invocation_and_expires() {
-        let command = Uuid::new_v4();
+    fn approval_is_bound_to_one_token_a_hash_and_expires() {
+        let token = Uuid::new_v4();
         let other = Uuid::new_v4();
         let approval = ExecutionApproval::grant(
-            command,
+            token,
+            "hash-a",
             "uid=1000",
             ts(),
             ts() + chrono::Duration::minutes(10),
         );
 
-        assert!(approval.authorizes(command, ts()));
+        assert!(approval.authorizes(token, "hash-a", ts()));
         assert!(
-            !approval.authorizes(other, ts()),
-            "must not leak to another command"
+            !approval.authorizes(other, "hash-a", ts()),
+            "must not leak to another token"
         );
         assert!(
-            !approval.authorizes(command, ts() + chrono::Duration::minutes(11)),
+            !approval.authorizes(token, "hash-b", ts()),
+            "must not authorize a different context hash"
+        );
+        assert!(
+            !approval.authorizes(token, "hash-a", ts() + chrono::Duration::minutes(11)),
             "an expired approval authorizes nothing"
+        );
+    }
+
+    #[test]
+    fn execution_approval_decodes_the_legacy_command_id_key() {
+        let token = Uuid::new_v4();
+        let legacy = serde_json::json!({
+            "approval_id": Uuid::new_v4().to_string(),
+            "command_id": token.to_string(),
+            "granted_by": "uid=1000",
+            "granted_at": ts(),
+            "expires_at": ts(),
+            "state": "granted",
+        });
+
+        let approval: ExecutionApproval = serde_json::from_value(legacy).unwrap();
+        assert_eq!(approval.token, token);
+        assert_eq!(
+            approval.context_hash, "",
+            "a legacy row carries no context hash"
         );
     }
 

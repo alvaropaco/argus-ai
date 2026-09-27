@@ -4,15 +4,51 @@ use argus_ai_core::decision::autonomy::may_execute_without_approval;
 use argus_domain::{
     Action, AuthorizationRequest, AutonomyMode, CapabilityId, CapabilityRequest, DomainEvent,
     EventType, Execution, ExecutionStatus, Plan, PlanStatus, PolicyOutcome, Principal,
-    RequestContext, RiskClass, Severity,
+    RequestContext, RiskClass, Severity, plan_context_hash,
 };
 use argus_events::{EventBus, types};
 use argus_executor::ServiceController;
-use argus_policy::PolicyEvaluator;
+use argus_policy::{ApprovalStore, PolicyEvaluator};
 use chrono::Utc;
 use semver::Version;
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+/// A plan paused at an approval-requiring step, bound to a single-use token and
+/// its context hash (ADR-0030 §2, §3).
+#[derive(Debug, Clone)]
+pub struct PendingPlan {
+    pub plan: Plan,
+    pub token: Uuid,
+    pub context_hash: String,
+}
+
+/// The result of routing a plan through the safety boundary.
+#[derive(Debug)]
+pub enum RunOutcome {
+    /// The plan reached a terminal status.
+    Finished(ExecutionOutcome),
+    /// A step requires approval; the plan paused, executing nothing further.
+    Pending(PendingPlan),
+}
+
+/// Why a resume was refused (nothing executed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeRefusal {
+    /// The grant's context hash does not match the stored plan's.
+    Stale,
+    /// No valid grant exists (absent, denied, expired, or already consumed).
+    NoGrant,
+}
+
+/// The result of resuming a paused plan.
+#[derive(Debug)]
+pub enum ResumeOutcome {
+    /// The plan ran to a terminal status.
+    Finished(ExecutionOutcome),
+    /// The resume was refused; nothing executed.
+    Refused(ResumeRefusal),
+}
 
 /// The result of routing a plan through the safety boundary.
 #[derive(Debug)]
@@ -47,6 +83,21 @@ fn risk_for(capability: &CapabilityId) -> RiskClass {
     }
 }
 
+/// Whether a capability's descriptor declares a per-invocation approval
+/// requirement (mirrors the bootstrap descriptors' `.requiring_approval()`).
+///
+/// A capability that declares this always pauses for operator approval,
+/// regardless of autonomy mode; the approval-gate is stricter than the autonomy
+/// gate (ADR-0030 §1).
+fn requires_approval(capability: &CapabilityId) -> bool {
+    matches!(
+        capability.as_str(),
+        CapabilityId::HOST_SERVICE_RESTART
+            | CapabilityId::HOST_SERVICE_STOP
+            | CapabilityId::HOST_SERVICE_START
+    )
+}
+
 fn execute_action(action: &Action, service: &dyn ServiceController) -> Result<Value, String> {
     let unit = action
         .arguments
@@ -69,16 +120,81 @@ fn execute_action(action: &Action, service: &dyn ServiceController) -> Result<Va
 /// Routes every step in `plan` through policy, then autonomy, then execution.
 ///
 /// This is the only path from a proposed plan to execution (FR-004, FR-005).
-/// Execution is fail-stop: on a step failure the already-executed steps'
-/// declarative rollbacks run in reverse order, and the plan ends `Failed`,
-/// `RolledBack`, or `NeedsManual` — never substituting actions (ADR-0028 §4).
+/// When a step's policy returns `RequireApproval`, the plan pauses
+/// [`RunOutcome::Pending`] and nothing further executes (ADR-0030 §1); resume
+/// via [`resume_and_run`]. Execution is fail-stop: on a step failure the
+/// already-executed steps' declarative rollbacks run in reverse order, and the
+/// plan ends `Failed`, `RolledBack`, or `NeedsManual` — never substituting
+/// actions (ADR-0028 §4).
 pub async fn authorize_and_run(
     plan: &Plan,
     policy: &dyn PolicyEvaluator,
     service: &dyn ServiceController,
     events: &dyn EventBus,
     autonomy: AutonomyMode,
-) -> ExecutionOutcome {
+) -> RunOutcome {
+    match run_plan(plan, policy, service, events, autonomy, false).await {
+        PlanRun::Finished(outcome) => RunOutcome::Finished(outcome),
+        PlanRun::Paused(pending) => RunOutcome::Pending(pending),
+    }
+}
+
+/// Resumes a paused plan with a previously granted approval.
+///
+/// The grant is consumed exactly once before the stored plan is re-entered as-is
+/// (no re-observe); a missing, denied, expired, already-consumed, or
+/// hash-mismatched grant refuses the resume and executes nothing (ADR-0030 §4).
+pub async fn resume_and_run(
+    pending: &PendingPlan,
+    approvals: &ApprovalStore,
+    policy: &dyn PolicyEvaluator,
+    service: &dyn ServiceController,
+    events: &dyn EventBus,
+    autonomy: AutonomyMode,
+) -> ResumeOutcome {
+    // Consume the grant exactly once: it is the operator's single-use
+    // authorization for this plan, so a second resume finds nothing to consume.
+    if approvals
+        .consume(pending.token, &pending.context_hash, Utc::now())
+        .is_none()
+    {
+        let reason = if approvals
+            .get(pending.token)
+            .is_some_and(|approval| approval.context_hash != pending.context_hash)
+        {
+            ResumeRefusal::Stale
+        } else {
+            ResumeRefusal::NoGrant
+        };
+        return ResumeOutcome::Refused(reason);
+    }
+
+    match run_plan(&pending.plan, policy, service, events, autonomy, true).await {
+        PlanRun::Finished(outcome) => ResumeOutcome::Finished(outcome),
+        // A resumed plan is already authorized, so it can never pause again.
+        PlanRun::Paused(_) => unreachable!("a resumed plan is authorized and cannot pause"),
+    }
+}
+
+/// The internal outcome of the shared step loop.
+enum PlanRun {
+    Finished(ExecutionOutcome),
+    Paused(PendingPlan),
+}
+
+/// The shared step loop behind [`authorize_and_run`] and [`resume_and_run`].
+///
+/// `resumed` is `false` for a first run (pause on `RequireApproval`) and `true`
+/// for a resume, whose grant was already consumed by [`resume_and_run`], so an
+/// approval-requiring step proceeds as if allowed (ADR-0030 §5).
+async fn run_plan(
+    plan: &Plan,
+    policy: &dyn PolicyEvaluator,
+    service: &dyn ServiceController,
+    events: &dyn EventBus,
+    autonomy: AutonomyMode,
+    resumed: bool,
+) -> PlanRun {
     let correlation = Uuid::new_v4();
     let _ = events
         .publish(&event(
@@ -95,6 +211,11 @@ pub async fn authorize_and_run(
     };
     // Indices of steps that took effect, for reverse-order rollback.
     let mut executed: Vec<usize> = Vec::new();
+    let env = RunEnv {
+        service,
+        events,
+        correlation,
+    };
 
     for (index, step) in plan.steps.iter().enumerate() {
         let action = &step.action;
@@ -109,7 +230,8 @@ pub async fn authorize_and_run(
             ),
             risk,
             plan.blast_radius,
-        );
+        )
+        .requiring_approval(requires_approval(&action.capability));
 
         match policy.evaluate(&authz).outcome {
             PolicyOutcome::Deny => {
@@ -124,7 +246,25 @@ pub async fn authorize_and_run(
                     .await;
             }
             PolicyOutcome::RequireApproval => {
-                outcome.requires_approval.push(action.capability.clone());
+                if !resumed {
+                    // First run: pause, executing nothing further.
+                    let token = Uuid::new_v4();
+                    let context_hash = plan_context_hash(plan);
+                    let mut paused = plan.clone();
+                    paused.status = PlanStatus::AwaitingApproval;
+                    return PlanRun::Paused(PendingPlan {
+                        plan: paused,
+                        token,
+                        context_hash,
+                    });
+                }
+                // Resumed: the approval re-entered policy as input, never as
+                // authority; the consumed grant is what lets the step proceed.
+                if execute_allowed_step(&mut outcome, plan, index, action, &env, &mut executed)
+                    .await
+                {
+                    return PlanRun::Finished(outcome);
+                }
             }
             PolicyOutcome::Allow => {
                 if !may_execute_without_approval(autonomy, risk) {
@@ -132,71 +272,10 @@ pub async fn authorize_and_run(
                     continue;
                 }
 
-                // Idempotency: check the desired state before acting. "Already in
-                // the desired state" is a recorded success no-op (ADR-0028 §5).
-                match desired_state_holds(action, service) {
-                    Ok(true) => {
-                        let evidence = json!({ "already_desired": true });
-                        let _ = events
-                            .publish(&event(
-                                types::ACTION_ALREADY_DESIRED,
-                                evidence.clone(),
-                                correlation,
-                                None,
-                            ))
-                            .await;
-                        outcome.executions.push(Execution {
-                            action: action.clone(),
-                            status: ExecutionStatus::Completed,
-                            evidence,
-                        });
-                    }
-                    Ok(false) => match execute_action(action, service) {
-                        Ok(evidence) => {
-                            let _ = events
-                                .publish(&event(
-                                    types::ACTION_EXECUTED,
-                                    evidence.clone(),
-                                    correlation,
-                                    None,
-                                ))
-                                .await;
-                            outcome.executions.push(Execution {
-                                action: action.clone(),
-                                status: ExecutionStatus::Completed,
-                                evidence,
-                            });
-                            executed.push(index);
-                        }
-                        Err(err) => {
-                            record_failure(&mut outcome, action, err, events, correlation).await;
-                            rollback_executed(
-                                &mut outcome,
-                                plan,
-                                &executed,
-                                service,
-                                events,
-                                correlation,
-                            )
-                            .await;
-                            return outcome;
-                        }
-                    },
-                    Err(err) => {
-                        // A live-state read failure is fail-closed: acting on an
-                        // unknown desired state is refused.
-                        record_failure(&mut outcome, action, err, events, correlation).await;
-                        rollback_executed(
-                            &mut outcome,
-                            plan,
-                            &executed,
-                            service,
-                            events,
-                            correlation,
-                        )
-                        .await;
-                        return outcome;
-                    }
+                if execute_allowed_step(&mut outcome, plan, index, action, &env, &mut executed)
+                    .await
+                {
+                    return PlanRun::Finished(outcome);
                 }
             }
         }
@@ -207,7 +286,99 @@ pub async fn authorize_and_run(
     } else {
         PlanStatus::Completed
     };
-    outcome
+    PlanRun::Finished(outcome)
+}
+
+/// The injected execution environment shared across one plan run.
+struct RunEnv<'a> {
+    service: &'a dyn ServiceController,
+    events: &'a dyn EventBus,
+    correlation: Uuid,
+}
+
+/// Executes one policy-approved step: the desired-state idempotency check, then
+/// the effect, with fail-stop rollback on failure (ADR-0028 §4, §5).
+///
+/// Returns `true` when the plan reached a terminal status via rollback, in which
+/// case the caller must stop and return the finished outcome.
+async fn execute_allowed_step(
+    outcome: &mut ExecutionOutcome,
+    plan: &Plan,
+    index: usize,
+    action: &Action,
+    env: &RunEnv<'_>,
+    executed: &mut Vec<usize>,
+) -> bool {
+    // Idempotency: check the desired state before acting. "Already in the
+    // desired state" is a recorded success no-op (ADR-0028 §5).
+    match desired_state_holds(action, env.service) {
+        Ok(true) => {
+            let evidence = json!({ "already_desired": true });
+            let _ = env
+                .events
+                .publish(&event(
+                    types::ACTION_ALREADY_DESIRED,
+                    evidence.clone(),
+                    env.correlation,
+                    None,
+                ))
+                .await;
+            outcome.executions.push(Execution {
+                action: action.clone(),
+                status: ExecutionStatus::Completed,
+                evidence,
+            });
+            false
+        }
+        Ok(false) => match execute_action(action, env.service) {
+            Ok(evidence) => {
+                let _ = env
+                    .events
+                    .publish(&event(
+                        types::ACTION_EXECUTED,
+                        evidence.clone(),
+                        env.correlation,
+                        None,
+                    ))
+                    .await;
+                outcome.executions.push(Execution {
+                    action: action.clone(),
+                    status: ExecutionStatus::Completed,
+                    evidence,
+                });
+                executed.push(index);
+                false
+            }
+            Err(err) => {
+                record_failure(outcome, action, err, env.events, env.correlation).await;
+                rollback_executed(
+                    outcome,
+                    plan,
+                    executed,
+                    env.service,
+                    env.events,
+                    env.correlation,
+                )
+                .await;
+                true
+            }
+        },
+        Err(err) => {
+            // A live-state read failure is fail-closed: acting on an unknown
+            // desired state is refused.
+            record_failure(outcome, action, err, env.events, env.correlation).await;
+            rollback_executed(
+                outcome,
+                plan,
+                executed,
+                env.service,
+                env.events,
+                env.correlation,
+            )
+            .await;
+            true
+        }
+    }
 }
 
 /// Records a failed step and publishes the failure event.
@@ -386,7 +557,7 @@ mod tests {
     use argus_domain::{BlastRadius, PlanStatus, PlanStep};
     use argus_events::LocalEventBus;
     use argus_executor::MockServiceController;
-    use argus_policy::BootstrapPolicyEvaluator;
+    use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator};
 
     fn restart_action(unit: &str) -> Action {
         Action {
@@ -411,8 +582,59 @@ mod tests {
         }
     }
 
+    /// Pauses the plan, grants its token, resumes, and returns the executed
+    /// outcome. The common happy path shared by the execution-mechanics tests.
+    async fn run_approved(
+        plan: &Plan,
+        policy: &BootstrapPolicyEvaluator,
+        service: &dyn ServiceController,
+        events: &dyn EventBus,
+        autonomy: AutonomyMode,
+    ) -> ExecutionOutcome {
+        let approvals = ApprovalStore::new();
+        let pending = match authorize_and_run(plan, policy, service, events, autonomy).await {
+            RunOutcome::Pending(pending) => pending,
+            RunOutcome::Finished(outcome) => {
+                panic!("expected a pause, got a finished outcome: {outcome:?}")
+            }
+        };
+        approvals.grant_for_a_while(
+            pending.token,
+            pending.context_hash.clone(),
+            "operator",
+            Utc::now(),
+            chrono::Duration::minutes(5),
+        );
+        match resume_and_run(&pending, &approvals, policy, service, events, autonomy).await {
+            ResumeOutcome::Finished(outcome) => outcome,
+            ResumeOutcome::Refused(reason) => {
+                panic!("expected the resume to run, refused: {reason:?}")
+            }
+        }
+    }
+
+    /// Pauses a service-action plan and returns the pending approval.
+    async fn pause(service: &dyn ServiceController) -> PendingPlan {
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        match authorize_and_run(
+            &plan("nginx.service"),
+            &policy,
+            service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await
+        {
+            RunOutcome::Pending(pending) => pending,
+            RunOutcome::Finished(outcome) => {
+                panic!("expected a pause, got a finished outcome: {outcome:?}")
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn assisted_mode_executes_allowed_low_risk_action() {
+    async fn a_service_action_pauses_for_approval_and_executes_nothing() {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
@@ -426,35 +648,260 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome.executions.len(), 1);
-        assert_eq!(outcome.executions[0].status, ExecutionStatus::Completed);
-        assert!(outcome.denied.is_empty());
-        assert!(outcome.requires_approval.is_empty());
-        assert_eq!(
-            service.recorded_calls(),
-            vec![("restart".to_string(), "nginx.service".to_string())]
+        match outcome {
+            RunOutcome::Pending(pending) => {
+                assert_eq!(pending.plan.status, PlanStatus::AwaitingApproval);
+                assert!(!pending.token.is_nil(), "a single-use token is recorded");
+                assert_eq!(pending.context_hash, plan_context_hash(&pending.plan));
+                assert!(!pending.context_hash.is_empty());
+            }
+            RunOutcome::Finished(outcome) => {
+                panic!("expected a pause, got a finished outcome: {outcome:?}")
+            }
+        }
+        assert!(
+            service.recorded_calls().is_empty(),
+            "nothing executes on pause"
         );
     }
 
     #[tokio::test]
-    async fn propose_mode_requires_approval_and_never_executes() {
+    async fn a_matching_unexpired_grant_resumes_and_consumes_the_token() {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let approvals = ApprovalStore::new();
 
-        let outcome = authorize_and_run(
+        let pending = match authorize_and_run(
             &plan("nginx.service"),
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Propose,
+            AutonomyMode::Assisted,
+        )
+        .await
+        {
+            RunOutcome::Pending(pending) => pending,
+            RunOutcome::Finished(outcome) => {
+                panic!("expected a pause, got a finished outcome: {outcome:?}")
+            }
+        };
+        approvals.grant_for_a_while(
+            pending.token,
+            pending.context_hash.clone(),
+            "operator",
+            Utc::now(),
+            chrono::Duration::minutes(5),
+        );
+
+        let outcome = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
         )
         .await;
 
-        assert!(outcome.executions.is_empty());
-        assert_eq!(outcome.requires_approval.len(), 1);
-        assert_eq!(outcome.status, PlanStatus::Denied);
+        match outcome {
+            ResumeOutcome::Finished(outcome) => {
+                assert_eq!(outcome.executions.len(), 1);
+                assert_eq!(outcome.executions[0].status, ExecutionStatus::Completed);
+                assert!(outcome.denied.is_empty());
+                assert!(outcome.requires_approval.is_empty());
+            }
+            ResumeOutcome::Refused(reason) => {
+                panic!("expected the resume to run, refused: {reason:?}")
+            }
+        }
+        assert_eq!(
+            service.recorded_calls(),
+            vec![("restart".to_string(), "nginx.service".to_string())]
+        );
+        assert!(
+            approvals.get(pending.token).is_none(),
+            "the token is consumed exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_with_a_different_context_hash_is_refused_as_stale() {
+        let service = MockServiceController::new();
+        let pending = pause(&service).await;
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        let approvals = ApprovalStore::new();
+        approvals.grant_for_a_while(
+            pending.token,
+            "a-different-hash",
+            "operator",
+            Utc::now(),
+            chrono::Duration::minutes(5),
+        );
+
+        let outcome = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+
+        assert_eq!(outcome_refusal(&outcome), ResumeRefusal::Stale);
+        assert!(
+            service.recorded_calls().is_empty(),
+            "a stale grant executes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_already_consumed_token_is_refused_on_a_second_resume() {
+        let service = MockServiceController::new();
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        let approvals = ApprovalStore::new();
+
+        let pending = match authorize_and_run(
+            &plan("nginx.service"),
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await
+        {
+            RunOutcome::Pending(pending) => pending,
+            RunOutcome::Finished(outcome) => {
+                panic!("expected a pause, got a finished outcome: {outcome:?}")
+            }
+        };
+        approvals.grant_for_a_while(
+            pending.token,
+            pending.context_hash.clone(),
+            "operator",
+            Utc::now(),
+            chrono::Duration::minutes(5),
+        );
+
+        let first = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+        assert!(matches!(first, ResumeOutcome::Finished(_)));
+
+        let second = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+        assert_eq!(outcome_refusal(&second), ResumeRefusal::NoGrant);
+        assert_eq!(
+            service.recorded_calls(),
+            vec![("restart".to_string(), "nginx.service".to_string())],
+            "a replayed token executes nothing more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_grant_never_executes() {
+        let service = MockServiceController::new();
+        let pending = pause(&service).await;
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        let approvals = ApprovalStore::new();
+        approvals.deny(
+            pending.token,
+            pending.context_hash.clone(),
+            "operator",
+            Utc::now(),
+        );
+
+        let outcome = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+
+        assert_eq!(outcome_refusal(&outcome), ResumeRefusal::NoGrant);
         assert!(service.recorded_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expired_grant_never_executes() {
+        let service = MockServiceController::new();
+        let pending = pause(&service).await;
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        let approvals = ApprovalStore::new();
+        let now = Utc::now();
+        approvals.grant_for(
+            pending.token,
+            pending.context_hash.clone(),
+            "operator",
+            now - chrono::Duration::minutes(10),
+            now - chrono::Duration::minutes(5),
+        );
+
+        let outcome = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+
+        assert_eq!(outcome_refusal(&outcome), ResumeRefusal::NoGrant);
+        assert!(service.recorded_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_grant_keeps_the_plan_paused() {
+        let service = MockServiceController::new();
+        let pending = pause(&service).await;
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        let approvals = ApprovalStore::new();
+
+        let outcome = resume_and_run(
+            &pending,
+            &approvals,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+
+        assert_eq!(outcome_refusal(&outcome), ResumeRefusal::NoGrant);
+        assert!(service.recorded_calls().is_empty());
+    }
+
+    /// Extracts the refusal from a resume outcome, panicking on a finished run.
+    fn outcome_refusal(outcome: &ResumeOutcome) -> ResumeRefusal {
+        match outcome {
+            ResumeOutcome::Refused(reason) => *reason,
+            ResumeOutcome::Finished(outcome) => {
+                panic!("expected a refusal, got a finished outcome: {outcome:?}")
+            }
+        }
     }
 
     #[tokio::test]
@@ -466,17 +913,55 @@ mod tests {
         let mut p = plan("nginx.service");
         p.steps[0].action.capability = CapabilityId::new("host.process.signal").unwrap();
 
-        let outcome = authorize_and_run(
+        let outcome = match authorize_and_run(
             &p,
             &policy,
             &service,
             events.as_ref(),
             AutonomyMode::Assisted,
         )
-        .await;
+        .await
+        {
+            RunOutcome::Finished(outcome) => outcome,
+            RunOutcome::Pending(pending) => {
+                panic!("expected a finished run, got a pause: {pending:?}")
+            }
+        };
 
         assert!(outcome.executions.is_empty());
         assert_eq!(outcome.denied.len(), 1);
+        assert_eq!(outcome.status, PlanStatus::Denied);
+        assert!(service.recorded_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_policy_allowed_read_only_action_is_gated_in_propose_mode() {
+        let service = MockServiceController::new();
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+
+        // A read-only capability is allowed by policy (no approval requirement)
+        // but still gated by the autonomy mode: Propose executes nothing.
+        let mut p = plan("nginx.service");
+        p.steps[0].action.capability = CapabilityId::new(CapabilityId::HOST_STATUS_READ).unwrap();
+
+        let outcome = match authorize_and_run(
+            &p,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Propose,
+        )
+        .await
+        {
+            RunOutcome::Finished(outcome) => outcome,
+            RunOutcome::Pending(pending) => {
+                panic!("expected a finished run, got a pause: {pending:?}")
+            }
+        };
+
+        assert!(outcome.executions.is_empty(), "Propose mode never executes");
+        assert_eq!(outcome.requires_approval.len(), 1);
         assert_eq!(outcome.status, PlanStatus::Denied);
         assert!(service.recorded_calls().is_empty());
     }
@@ -490,7 +975,7 @@ mod tests {
         let mut p = plan("nginx.service");
         p.steps[0].action.arguments = json!({});
 
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &p,
             &policy,
             &service,
@@ -584,7 +1069,7 @@ mod tests {
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
 
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &restart_after_stop_plan(),
             &policy,
             &service,
@@ -614,7 +1099,7 @@ mod tests {
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
 
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &bounce_plan(),
             &policy,
             &service,
@@ -642,7 +1127,7 @@ mod tests {
         let policy = BootstrapPolicyEvaluator::new();
 
         // A restart toward "active" on an already-active unit is a no-op.
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &plan("nginx.service"),
             &policy,
             &service,
@@ -792,7 +1277,7 @@ mod tests {
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
 
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &restart_then_stop_plan(),
             &policy,
             &service,
@@ -810,7 +1295,7 @@ mod tests {
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
 
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &plan("nginx.service"),
             &policy,
             &service,
@@ -860,7 +1345,7 @@ mod tests {
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
 
-        let outcome = authorize_and_run(
+        let outcome = run_approved(
             &plan,
             &policy,
             &service,

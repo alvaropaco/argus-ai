@@ -1231,9 +1231,11 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
         return;
     }
 
-    // Check 6: an approval-requiring invocation needs a valid, unexpired approval.
+    // Check 6: an approval-requiring invocation needs a valid, unexpired approval,
+    // consumed exactly once so the same grant can never be replayed (ADR-0030 §4).
+    // The cloud flow has no plan context, so the hash binding is empty here.
     let decision = if decision.outcome == PolicyOutcome::RequireApproval {
-        if !deps.approvals.authorizes(command_id, Utc::now()) {
+        if deps.approvals.consume(command_id, "", Utc::now()).is_none() {
             record_execution_decision(deps, command_id, descriptor, &decision).await;
             refuse_command(
                 deps,
@@ -2856,8 +2858,13 @@ mod tests {
             deps.privileged_execution.store(false, Ordering::SeqCst);
 
             let id = Uuid::new_v4();
-            deps.approvals
-                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+            deps.approvals.grant_for_a_while(
+                id,
+                "",
+                "root",
+                Utc::now(),
+                chrono::Duration::minutes(5),
+            );
             let refused = invoke(&deps, &invoke_restart(id)).await;
             assert_eq!(
                 result_for(&refused, id)["status"],
@@ -2879,8 +2886,13 @@ mod tests {
             deps.privileged_execution.store(true, Ordering::SeqCst);
 
             let id = Uuid::new_v4();
-            deps.approvals
-                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+            deps.approvals.grant_for_a_while(
+                id,
+                "",
+                "root",
+                Utc::now(),
+                chrono::Duration::minutes(5),
+            );
             let allowed = invoke(&deps, &invoke_restart(id)).await;
             assert_eq!(
                 result_for(&allowed, id)["status"],
@@ -2948,8 +2960,13 @@ mod tests {
             let (deps, services, dir) =
                 command_deps(active_config(), published_capabilities()).await;
             let id = Uuid::new_v4();
-            deps.approvals
-                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+            deps.approvals.grant_for_a_while(
+                id,
+                "",
+                "root",
+                Utc::now(),
+                chrono::Duration::minutes(5),
+            );
 
             let transport = invoke(
                 &deps,
@@ -3085,8 +3102,13 @@ mod tests {
             let (deps, services, dir) =
                 command_deps(active_config(), published_capabilities()).await;
             let id = Uuid::new_v4();
-            deps.approvals
-                .grant_for_a_while(id, "root", Utc::now(), chrono::Duration::minutes(5));
+            deps.approvals.grant_for_a_while(
+                id,
+                "",
+                "root",
+                Utc::now(),
+                chrono::Duration::minutes(5),
+            );
 
             let frame = command_frame(
                 id,
@@ -3219,6 +3241,7 @@ mod tests {
             let executed_id = Uuid::new_v4();
             deps.approvals.grant_for_a_while(
                 executed_id,
+                "",
                 "root",
                 Utc::now(),
                 chrono::Duration::minutes(5),

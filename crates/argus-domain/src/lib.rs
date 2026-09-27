@@ -45,6 +45,6 @@ pub use observation::{Observation, ObservedValue, Provenance};
 pub use plugin::{Compatibility, PluginManifest, PluginType};
 pub use reasoning::{
     Action, AutonomyMode, Execution, ExecutionStatus, Hypothesis, HypothesisStatus, Intent, Plan,
-    PlanStatus, PlanStep,
+    PlanStatus, PlanStep, plan_context_hash,
 };
 pub use registry::CapabilityRegistry;

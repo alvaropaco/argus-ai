@@ -71,6 +71,8 @@ pub enum PlanStatus {
     RolledBack,
     /// A rollback itself failed; an operator must intervene.
     NeedsManual,
+    /// A step requires operator approval; the plan is paused pending a grant.
+    AwaitingApproval,
 }
 
 /// One step of a plan: the action to perform and its declarative rollback.
@@ -93,6 +95,34 @@ pub struct Plan {
     pub blast_radius: BlastRadius,
     pub confidence: f64,
     pub status: PlanStatus,
+}
+
+/// The deterministic context binding hash for a plan (ADR-0030 §3).
+///
+/// Hashes the plan's content — objective, steps, preconditions, expected
+/// outcomes, blast radius, and confidence — never its lifecycle `status`, so
+/// the digest is stable across a pause/resume round-trip. It shares the FNV-1a
+/// 64-bit hex semantics of decision provenance
+/// (`argus-ai-core::decision::provenance::DecisionProvenance::context_hash`),
+/// so an approval bound to this digest is invalidated by any change to the plan
+/// it reviewed.
+pub fn plan_context_hash(plan: &Plan) -> String {
+    let mut value = serde_json::to_value(plan).unwrap_or(serde_json::Value::Null);
+    if let serde_json::Value::Object(map) = &mut value {
+        map.remove("status");
+    }
+    let canonical = serde_json::to_string(&value).unwrap_or_default();
+    fnv1a_hex(&canonical)
+}
+
+/// A deterministic FNV-1a (64-bit) hex digest of `input`.
+fn fnv1a_hex(input: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Result of executing a single [`Action`].
@@ -162,6 +192,28 @@ mod tests {
             let back: PlanStatus = serde_json::from_str(expected).unwrap();
             assert_eq!(back, status);
         }
+    }
+
+    #[test]
+    fn plan_context_hash_is_stable_across_status_and_sensitive_to_content() {
+        let mut plan = Plan {
+            objective: "restore nginx".into(),
+            steps: vec![],
+            preconditions: vec![],
+            expected_outcomes: vec![],
+            blast_radius: BlastRadius::Host,
+            confidence: 0.9,
+            status: PlanStatus::Proposed,
+        };
+        let proposed = plan_context_hash(&plan);
+
+        // A lifecycle change must not invalidate the binding hash.
+        plan.status = PlanStatus::AwaitingApproval;
+        assert_eq!(proposed, plan_context_hash(&plan));
+
+        // A content change must.
+        plan.objective = "restart postgres".into();
+        assert_ne!(proposed, plan_context_hash(&plan));
     }
 
     #[test]

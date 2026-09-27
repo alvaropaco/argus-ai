@@ -17,7 +17,7 @@ use argus_domain::{
     Severity,
 };
 use argus_executor::{BootstrapExecutor, CapabilityProvider, ExecutionError, Executor};
-use argus_policy::{BootstrapPolicyEvaluator, PolicyEvaluator};
+use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
 use chrono::Utc;
 use semver::Version;
@@ -29,6 +29,7 @@ use argus_cloud::state::ConnectivityTracker;
 
 use crate::cloud::{CloudSecretStore, ManagedSettingsStore as CloudSettingsStore};
 use crate::config::DaemonConfig;
+use crate::control::PendingPlan;
 
 /// The running daemon and its bootstrap state.
 pub struct Daemon {
@@ -54,6 +55,12 @@ pub struct Daemon {
     /// changes, so a fresh credential is used immediately rather than after the
     /// current delay elapses.
     cloud_wake: Arc<tokio::sync::Notify>,
+    /// Plans paused at an approval-requiring step, awaiting an operator decision.
+    /// In-memory only (ADR-0028 §6); a restart drops them, which is fail-closed.
+    pending: PendingApprovals,
+    /// Operator grants and denials for the local plan path, bound to a token and
+    /// a context hash and consumed exactly once (ADR-0030 §4).
+    approvals: ApprovalStore,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -67,6 +74,13 @@ pub enum DispatchError {
 
     #[error("execution failed: {0}")]
     Execution(#[from] ExecutionError),
+}
+
+/// Errors from the operator approval surface.
+#[derive(Debug, thiserror::Error)]
+pub enum ApprovalError {
+    #[error("no pending approval with token '{0}'")]
+    UnknownToken(Uuid),
 }
 
 struct DaemonProvider {
@@ -145,6 +159,8 @@ impl Daemon {
             privileged_execution,
             dedup: InMemoryDedup::new(),
             cloud_wake: Arc::new(tokio::sync::Notify::new()),
+            pending: PendingApprovals::new(),
+            approvals: ApprovalStore::new(),
         })
     }
 
@@ -258,6 +274,49 @@ impl Daemon {
     /// The shared kill switch the cloud supervisor reads on every invocation.
     pub fn privileged_execution_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.privileged_execution)
+    }
+
+    /// Stores a paused plan awaiting operator approval.
+    ///
+    /// The plan loop pauses here when a step's policy returns `RequireApproval`;
+    /// the single-use token is what the operator later grants against.
+    pub fn store_pending(&self, pending: PendingPlan) {
+        self.pending.store(pending);
+    }
+
+    /// Lists plans currently paused awaiting an operator decision.
+    pub fn list_pending_approvals(&self) -> Vec<PendingPlan> {
+        self.pending.list()
+    }
+
+    /// Grants approval for a pending plan's token, bound to its context hash.
+    ///
+    /// The grant expires after a fixed window; a later grant replaces it, and a
+    /// resume consumes it exactly once (ADR-0030 §4).
+    pub fn grant_approval(&self, token: Uuid, granted_by: &str) -> Result<(), ApprovalError> {
+        let pending = self
+            .pending
+            .remove(token)
+            .ok_or(ApprovalError::UnknownToken(token))?;
+        self.approvals.grant_for_a_while(
+            token,
+            pending.context_hash,
+            granted_by,
+            Utc::now(),
+            chrono::Duration::minutes(15),
+        );
+        Ok(())
+    }
+
+    /// Denies a pending plan's token; a denied approval never executes.
+    pub fn deny_approval(&self, token: Uuid, granted_by: &str) -> Result<(), ApprovalError> {
+        let pending = self
+            .pending
+            .remove(token)
+            .ok_or(ApprovalError::UnknownToken(token))?;
+        self.approvals
+            .deny(token, pending.context_hash, granted_by, Utc::now());
+        Ok(())
     }
 
     /// Routes a capability request through the policy and executor boundaries.
@@ -544,6 +603,45 @@ fn is_service_capability(id: &CapabilityId) -> bool {
     )
 }
 
+/// In-memory pending-approval store: plans paused at an approval-requiring step,
+/// keyed by their single-use token.
+///
+/// Not persisted (ADR-0028 §6); a daemon restart drops pending plans, which is
+/// fail-closed — nothing executes without its approval.
+#[derive(Debug, Default)]
+struct PendingApprovals {
+    by_token: std::sync::Mutex<std::collections::HashMap<Uuid, PendingPlan>>,
+}
+
+impl PendingApprovals {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn store(&self, pending: PendingPlan) {
+        self.by_token
+            .lock()
+            .expect("pending store is not poisoned")
+            .insert(pending.token, pending);
+    }
+
+    fn list(&self) -> Vec<PendingPlan> {
+        self.by_token
+            .lock()
+            .expect("pending store is not poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn remove(&self, token: Uuid) -> Option<PendingPlan> {
+        self.by_token
+            .lock()
+            .expect("pending store is not poisoned")
+            .remove(&token)
+    }
+}
+
 /// The default upper bound on remembered dedup keys. When the set reaches this
 /// size, it is cleared so no observation is suppressed forever and the set does
 /// not grow without bound.
@@ -648,5 +746,36 @@ mod tests {
         );
         assert!(registry.check(&restart, "bad unit").is_err());
         assert!(registry.check(&restart, "nginx.service").is_ok());
+    }
+
+    #[test]
+    fn pending_approvals_are_keyed_by_token() {
+        let store = PendingApprovals::new();
+        let token = Uuid::new_v4();
+        let pending = PendingPlan {
+            plan: Plan {
+                objective: "restore nginx".into(),
+                steps: vec![],
+                preconditions: vec![],
+                expected_outcomes: vec![],
+                blast_radius: BlastRadius::Host,
+                confidence: 0.9,
+                status: argus_domain::PlanStatus::AwaitingApproval,
+            },
+            token,
+            context_hash: "hash-a".into(),
+        };
+
+        store.store(pending);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(
+            store.remove(token).map(|p| p.context_hash),
+            Some("hash-a".to_string())
+        );
+        assert_eq!(store.list().len(), 0, "removal drops the pending plan");
+        assert!(
+            store.remove(Uuid::new_v4()).is_none(),
+            "an unknown token finds nothing"
+        );
     }
 }

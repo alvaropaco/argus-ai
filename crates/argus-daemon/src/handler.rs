@@ -5,6 +5,7 @@ use argus_domain::Principal;
 use argus_ipc::{ErrorCode, Operation, Request, Response};
 use chrono::Utc;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::cloud::EnrollmentError;
 use crate::runtime::Daemon;
@@ -51,6 +52,9 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
         Operation::CloudSetPrivilegedExecution => {
             return set_privileged_execution(daemon, request);
         }
+        Operation::ApprovalList => return approval_list(daemon, request),
+        Operation::ApprovalGrant => return approval_grant(daemon, &principal, request),
+        Operation::ApprovalDeny => return approval_deny(daemon, &principal, request),
     };
 
     Response::ok(request.correlation_id, result)
@@ -109,6 +113,80 @@ fn set_privileged_execution(daemon: &Daemon, request: Request) -> Response {
         request.correlation_id,
         serde_json::json!({ "privileged_execution_enabled": enabled }),
     )
+}
+
+/// Lists plans paused at an approval-requiring step, with their token and the
+/// context hash the grant must be bound to.
+fn approval_list(daemon: &Daemon, request: Request) -> Response {
+    let pending = daemon
+        .list_pending_approvals()
+        .into_iter()
+        .map(|pending| {
+            serde_json::json!({
+                "token": pending.token.to_string(),
+                "context_hash": pending.context_hash,
+                "objective": pending.plan.objective,
+                "step_count": pending.plan.steps.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Response::ok(request.correlation_id, serde_json::json!(pending))
+}
+
+/// Grants approval for a pending plan's token.
+fn approval_grant(daemon: &Daemon, principal: &Principal, request: Request) -> Response {
+    let Some(token) = parse_token(&request) else {
+        return Response::err(
+            request.correlation_id,
+            ErrorCode::Malformed,
+            "approval.grant requires a 'token' in the payload",
+        );
+    };
+
+    match daemon.grant_approval(token, &granted_by(principal)) {
+        Ok(()) => Response::ok(
+            request.correlation_id,
+            serde_json::json!({ "token": token.to_string(), "state": "granted" }),
+        ),
+        Err(error) => Response::err(request.correlation_id, ErrorCode::Denied, error.to_string()),
+    }
+}
+
+/// Denies a pending plan's token; a denied approval never executes.
+fn approval_deny(daemon: &Daemon, principal: &Principal, request: Request) -> Response {
+    let Some(token) = parse_token(&request) else {
+        return Response::err(
+            request.correlation_id,
+            ErrorCode::Malformed,
+            "approval.deny requires a 'token' in the payload",
+        );
+    };
+
+    match daemon.deny_approval(token, &granted_by(principal)) {
+        Ok(()) => Response::ok(
+            request.correlation_id,
+            serde_json::json!({ "token": token.to_string(), "state": "denied" }),
+        ),
+        Err(error) => Response::err(request.correlation_id, ErrorCode::Denied, error.to_string()),
+    }
+}
+
+/// Parses the single-use token from an approval request's payload.
+fn parse_token(request: &Request) -> Option<Uuid> {
+    request
+        .payload
+        .get("token")
+        .and_then(Value::as_str)
+        .and_then(|token| token.parse::<Uuid>().ok())
+}
+
+/// The operator identity recorded on a grant, derived from the authorized peer.
+fn granted_by(principal: &Principal) -> String {
+    principal
+        .uid()
+        .map(|uid| format!("uid={uid}"))
+        .unwrap_or_else(|| "local".to_string())
 }
 
 /// Removes the enrollment, leaving the installation running locally.

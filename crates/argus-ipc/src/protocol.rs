@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// The protocol version spoken by this implementation.
 ///
 /// Adding an operation is a MINOR bump; removing or renaming one is MAJOR.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 3, 0);
+pub const PROTOCOL_VERSION: Version = Version::new(0, 4, 0);
 
 /// A typed IPC operation id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +25,9 @@ pub enum Operation {
     CloudStatus,
     CloudForget,
     CloudSetPrivilegedExecution,
+    ApprovalList,
+    ApprovalGrant,
+    ApprovalDeny,
 }
 
 impl Operation {
@@ -39,6 +42,9 @@ impl Operation {
             Operation::CloudStatus => "cloud.status",
             Operation::CloudForget => "cloud.forget",
             Operation::CloudSetPrivilegedExecution => "cloud.set-privileged-execution",
+            Operation::ApprovalList => "approval.list",
+            Operation::ApprovalGrant => "approval.grant",
+            Operation::ApprovalDeny => "approval.deny",
         }
     }
 }
@@ -69,6 +75,9 @@ impl FromStr for Operation {
             "cloud.status" => Ok(Operation::CloudStatus),
             "cloud.forget" => Ok(Operation::CloudForget),
             "cloud.set-privileged-execution" => Ok(Operation::CloudSetPrivilegedExecution),
+            "approval.list" => Ok(Operation::ApprovalList),
+            "approval.grant" => Ok(Operation::ApprovalGrant),
+            "approval.deny" => Ok(Operation::ApprovalDeny),
             _ => Err(UnknownOperationError),
         }
     }
@@ -191,6 +200,9 @@ mod tests {
             Operation::CloudStatus,
             Operation::CloudForget,
             Operation::CloudSetPrivilegedExecution,
+            Operation::ApprovalList,
+            Operation::ApprovalGrant,
+            Operation::ApprovalDeny,
         ] {
             assert_eq!(op.as_str().parse::<Operation>().ok(), Some(op));
         }

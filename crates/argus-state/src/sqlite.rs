@@ -379,7 +379,7 @@ impl DomainRepository for SqliteRepository {
     ) -> Result<(), RepositoryError> {
         self.put_json(
             "cloud_approvals",
-            &approval.command_id.to_string(),
+            &approval.token.to_string(),
             &Self::encode(approval)?,
         )
     }
@@ -668,6 +668,7 @@ mod tests {
 
         let approval = ExecutionApproval::grant(
             command_id,
+            "",
             "uid=1000",
             Utc::now(),
             Utc::now() + chrono::Duration::minutes(10),
@@ -681,7 +682,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded, approval);
         assert_eq!(loaded.state, ApprovalState::Granted);
-        assert!(loaded.authorizes(command_id, Utc::now()));
+        assert!(loaded.authorizes(command_id, "", Utc::now()));
     }
 
     #[tokio::test]

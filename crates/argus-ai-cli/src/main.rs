@@ -42,6 +42,11 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
+    /// Manage plans paused awaiting operator approval.
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -70,6 +75,22 @@ enum CloudCommand {
     EnableExecution,
 }
 
+#[derive(Subcommand)]
+enum ApprovalCommand {
+    /// List plans paused awaiting an operator decision.
+    List,
+    /// Grant approval for a pending plan's single-use token.
+    Grant {
+        /// The token shown by `argus approval list`.
+        token: Uuid,
+    },
+    /// Deny a pending plan's single-use token.
+    Deny {
+        /// The token shown by `argus approval list`.
+        token: Uuid,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -85,6 +106,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Upgrade) => run_upgrade(),
         Some(Command::Cloud { command }) => run_cloud(&cli.socket, command).await,
+        Some(Command::Approval { command }) => run_approval(&cli.socket, command).await,
         Some(cmd) => run_query(&cli.socket, cmd).await,
     }
 }
@@ -156,6 +178,23 @@ async fn cloud_client(socket: &PathBuf) -> Result<argus_ipc::Client> {
     argus_ipc::Client::connect(socket)
         .await
         .with_context(|| format!("failed to connect to argusd at {}", socket.display()))
+}
+
+async fn run_approval(socket: &PathBuf, command: ApprovalCommand) -> Result<()> {
+    let mut client = cloud_client(socket).await?;
+    let (operation, payload) = match command {
+        ApprovalCommand::List => (argus_ipc::Operation::ApprovalList, serde_json::json!({})),
+        ApprovalCommand::Grant { token } => (
+            argus_ipc::Operation::ApprovalGrant,
+            serde_json::json!({ "token": token.to_string() }),
+        ),
+        ApprovalCommand::Deny { token } => (
+            argus_ipc::Operation::ApprovalDeny,
+            serde_json::json!({ "token": token.to_string() }),
+        ),
+    };
+    let response = client.request(operation, Uuid::new_v4(), payload).await?;
+    report(response)
 }
 
 fn report(response: argus_ipc::Response) -> Result<()> {
@@ -232,7 +271,7 @@ async fn run_query(socket: &PathBuf, cmd: Command) -> Result<()> {
         Command::Capabilities => argus_ipc::Operation::CapabilitiesList,
         Command::Plugins => argus_ipc::Operation::PluginsList,
         Command::Config => argus_ipc::Operation::ConfigGet,
-        Command::Init | Command::Upgrade | Command::Cloud { .. } => {
+        Command::Init | Command::Upgrade | Command::Cloud { .. } | Command::Approval { .. } => {
             unreachable!("handled before run_query")
         }
     };

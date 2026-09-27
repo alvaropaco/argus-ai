@@ -1,9 +1,10 @@
 //! Per-invocation execution approvals.
 //!
-//! An approval authorizes exactly one invocation, identified by its `command_id`,
-//! and only until it expires. Binding approval to a capability instead would
-//! silently convert a reviewed action into a standing, unreviewed permission
-//! (ADR-0020 §3).
+//! An approval authorizes exactly one invocation, identified by its single-use
+//! `token` and bound to a `context_hash`, and only until it expires. Binding
+//! approval to a capability instead would silently convert a reviewed action
+//! into a standing, unreviewed permission (ADR-0020 §3); the hash binding ties
+//! the grant to the exact plan the operator reviewed (ADR-0030 §3).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -12,7 +13,7 @@ use argus_domain::ExecutionApproval;
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-/// Approvals granted locally, keyed by the invocation they authorize.
+/// Approvals granted locally, keyed by the single-use token they authorize.
 #[derive(Debug, Default)]
 pub struct ApprovalStore {
     approvals: Mutex<HashMap<Uuid, ExecutionApproval>>,
@@ -23,24 +24,26 @@ impl ApprovalStore {
         Self::default()
     }
 
-    /// Records an approval, replacing any earlier one for the same invocation.
+    /// Records an approval, replacing any earlier one for the same token.
     pub fn grant(&self, approval: ExecutionApproval) {
         let mut approvals = self
             .approvals
             .lock()
             .expect("approval store is not poisoned");
-        approvals.insert(approval.command_id, approval);
+        approvals.insert(approval.token, approval);
     }
 
     /// Grants a timed approval, attributing it to the local principal that gave it.
     pub fn grant_for(
         &self,
-        command_id: Uuid,
+        token: Uuid,
+        context_hash: impl Into<String>,
         granted_by: impl Into<String>,
         granted_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> ExecutionApproval {
-        let approval = ExecutionApproval::grant(command_id, granted_by, granted_at, expires_at);
+        let approval =
+            ExecutionApproval::grant(token, context_hash, granted_by, granted_at, expires_at);
         self.grant(approval.clone());
         approval
     }
@@ -48,43 +51,68 @@ impl ApprovalStore {
     /// Grants an approval valid for `ttl` from `now`.
     pub fn grant_for_a_while(
         &self,
-        command_id: Uuid,
+        token: Uuid,
+        context_hash: impl Into<String>,
         granted_by: impl Into<String>,
         now: DateTime<Utc>,
         ttl: Duration,
     ) -> ExecutionApproval {
-        self.grant_for(command_id, granted_by, now, now + ttl)
+        self.grant_for(token, context_hash, granted_by, now, now + ttl)
     }
 
-    /// Whether a valid, unexpired approval exists for this invocation.
+    /// Records an explicit denial for a token, replacing any earlier decision.
+    pub fn deny(
+        &self,
+        token: Uuid,
+        context_hash: impl Into<String>,
+        granted_by: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> ExecutionApproval {
+        let approval = ExecutionApproval::deny(token, context_hash, granted_by, now);
+        self.grant(approval.clone());
+        approval
+    }
+
+    /// Consumes the approval for `token` exactly once (ADR-0030 §4).
     ///
-    /// An approval for a different invocation never authorizes this one, and an
-    /// expired approval authorizes nothing.
-    pub fn authorizes(&self, command_id: Uuid, now: DateTime<Utc>) -> bool {
-        let approvals = self
-            .approvals
-            .lock()
-            .expect("approval store is not poisoned");
-        approvals
-            .get(&command_id)
-            .is_some_and(|approval| approval.authorizes(command_id, now))
-    }
-
-    pub fn get(&self, command_id: Uuid) -> Option<ExecutionApproval> {
-        let approvals = self
-            .approvals
-            .lock()
-            .expect("approval store is not poisoned");
-        approvals.get(&command_id).cloned()
-    }
-
-    /// Forgets an invocation's approval, so it cannot authorize a later attempt.
-    pub fn revoke(&self, command_id: Uuid) -> Option<ExecutionApproval> {
+    /// Returns the approval and removes it when a granted, unexpired,
+    /// hash-matching approval exists; otherwise returns `None` and leaves the
+    /// store untouched, so a second call with the same token refuses.
+    pub fn consume(
+        &self,
+        token: Uuid,
+        context_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Option<ExecutionApproval> {
         let mut approvals = self
             .approvals
             .lock()
             .expect("approval store is not poisoned");
-        approvals.remove(&command_id)
+        if approvals
+            .get(&token)
+            .is_some_and(|approval| approval.authorizes(token, context_hash, now))
+        {
+            approvals.remove(&token)
+        } else {
+            None
+        }
+    }
+
+    pub fn get(&self, token: Uuid) -> Option<ExecutionApproval> {
+        let approvals = self
+            .approvals
+            .lock()
+            .expect("approval store is not poisoned");
+        approvals.get(&token).cloned()
+    }
+
+    /// Forgets a token's approval, so it cannot authorize a later attempt.
+    pub fn revoke(&self, token: Uuid) -> Option<ExecutionApproval> {
+        let mut approvals = self
+            .approvals
+            .lock()
+            .expect("approval store is not poisoned");
+        approvals.remove(&token)
     }
 }
 
@@ -93,110 +121,143 @@ mod tests {
     use super::*;
     use argus_domain::ApprovalState;
 
+    const HASH: &str = "hash-a";
+
     fn now() -> DateTime<Utc> {
         Utc::now()
     }
 
     #[test]
-    fn a_granted_approval_authorizes_exactly_its_invocation() {
+    fn a_granted_approval_consumes_exactly_its_token_and_hash() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
+        let token = Uuid::new_v4();
         let other = Uuid::new_v4();
 
-        store.grant_for_a_while(command, "root", now(), Duration::minutes(5));
+        store.grant_for_a_while(token, HASH, "root", now(), Duration::minutes(5));
 
-        assert!(store.authorizes(command, now()));
+        assert!(store.consume(token, HASH, now()).is_some());
         assert!(
-            !store.authorizes(other, now()),
-            "an approval must never authorize a different invocation"
+            store.consume(other, HASH, now()).is_none(),
+            "an approval must never authorize a different token"
         );
     }
 
     #[test]
-    fn an_expired_approval_authorizes_nothing() {
+    fn a_hash_mismatch_never_consumes() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
+        let token = Uuid::new_v4();
+
+        store.grant_for_a_while(token, HASH, "root", now(), Duration::minutes(5));
+
+        assert!(
+            store.consume(token, "hash-b", now()).is_none(),
+            "a grant bound to a different context hash must not authorize"
+        );
+        // The grant is still present, so the correct hash can still consume it.
+        assert!(store.consume(token, HASH, now()).is_some());
+    }
+
+    #[test]
+    fn a_consumed_token_is_replayed_refused() {
+        let store = ApprovalStore::new();
+        let token = Uuid::new_v4();
+
+        store.grant_for_a_while(token, HASH, "root", now(), Duration::minutes(5));
+
+        assert!(store.consume(token, HASH, now()).is_some());
+        assert!(
+            store.consume(token, HASH, now()).is_none(),
+            "a consumed token must never authorize a second resume"
+        );
+    }
+
+    #[test]
+    fn an_expired_approval_consumes_nothing() {
+        let store = ApprovalStore::new();
+        let token = Uuid::new_v4();
         let granted_at = now() - Duration::minutes(10);
 
         store.grant_for(
-            command,
+            token,
+            HASH,
             "root",
             granted_at,
             granted_at + Duration::minutes(1),
         );
 
         assert!(
-            !store.authorizes(command, now()),
+            store.consume(token, HASH, now()).is_none(),
             "an approval past its expiry must not authorize execution"
         );
     }
 
     #[test]
-    fn an_approval_not_yet_in_force_still_authorizes_in_its_window() {
+    fn an_approval_consumes_within_its_window_only() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
+        let token = Uuid::new_v4();
         let granted_at = now();
 
         store.grant_for(
-            command,
+            token,
+            HASH,
             "root",
             granted_at,
             granted_at + Duration::seconds(60),
         );
 
-        assert!(store.authorizes(command, granted_at + Duration::seconds(30)));
-        assert!(!store.authorizes(command, granted_at + Duration::seconds(60)));
+        assert!(
+            store
+                .consume(token, HASH, granted_at + Duration::seconds(30))
+                .is_some()
+        );
     }
 
     #[test]
     fn the_granting_principal_is_recorded() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
+        let token = Uuid::new_v4();
 
-        let approval = store.grant_for_a_while(command, "operator", now(), Duration::minutes(5));
+        let approval =
+            store.grant_for_a_while(token, HASH, "operator", now(), Duration::minutes(5));
 
         assert_eq!(approval.granted_by, "operator");
         assert_eq!(approval.state, ApprovalState::Granted);
         assert_eq!(
-            store.get(command).map(|a| a.granted_by),
+            store.get(token).map(|a| a.granted_by),
             Some("operator".into())
         );
     }
 
     #[test]
-    fn a_denied_approval_never_authorizes() {
+    fn a_denied_approval_never_consumes() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
-        let mut approval =
-            ExecutionApproval::grant(command, "root", now(), now() + Duration::minutes(5));
-        approval.state = ApprovalState::Denied;
-        store.grant(approval);
+        let token = Uuid::new_v4();
 
-        assert!(!store.authorizes(command, now()));
+        store.deny(token, HASH, "root", now());
+
+        assert!(store.consume(token, HASH, now()).is_none());
     }
 
     #[test]
     fn revoking_removes_the_authorization() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
-        store.grant_for_a_while(command, "root", now(), Duration::minutes(5));
+        let token = Uuid::new_v4();
+        store.grant_for_a_while(token, HASH, "root", now(), Duration::minutes(5));
 
-        assert!(store.revoke(command).is_some());
-        assert!(!store.authorizes(command, now()));
-        assert!(store.get(command).is_none());
+        assert!(store.revoke(token).is_some());
+        assert!(store.consume(token, HASH, now()).is_none());
+        assert!(store.get(token).is_none());
     }
 
     #[test]
     fn regranting_replaces_the_earlier_decision() {
         let store = ApprovalStore::new();
-        let command = Uuid::new_v4();
-        let mut denied =
-            ExecutionApproval::grant(command, "root", now(), now() + Duration::minutes(5));
-        denied.state = ApprovalState::Denied;
-        store.grant(denied);
-        assert!(!store.authorizes(command, now()));
+        let token = Uuid::new_v4();
 
-        store.grant_for_a_while(command, "operator", now(), Duration::minutes(5));
-        assert!(store.authorizes(command, now()));
+        store.deny(token, HASH, "root", now());
+        assert!(store.consume(token, HASH, now()).is_none());
+
+        store.grant_for_a_while(token, HASH, "operator", now(), Duration::minutes(5));
+        assert!(store.consume(token, HASH, now()).is_some());
     }
 }
