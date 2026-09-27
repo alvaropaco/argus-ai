@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod host_health;
 pub mod provenance;
 pub mod provider;
+pub mod skill;
 pub mod types;
 pub mod validate;
 
@@ -21,6 +22,7 @@ pub use gateway::{
 };
 pub use provenance::DecisionProvenance;
 pub use provider::DecisionProvider;
+pub use skill::{NO_SKILL, SkillCatalogue, SkillManifest, selected_skill, selection_question};
 pub use types::{
     DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionResponse, NoulCriteria,
 };
