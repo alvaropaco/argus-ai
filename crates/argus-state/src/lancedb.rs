@@ -11,8 +11,9 @@ use argus_domain::{DomainEvent, EnvironmentId, HealthStatus, Observation};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lancedb::arrow::arrow_array::cast::AsArray;
-use lancedb::arrow::arrow_array::{ArrayRef, RecordBatch, StringArray};
+use lancedb::arrow::arrow_array::{Array, ArrayRef, RecordBatch, StringArray};
 use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
+use lancedb::query::ExecutableQuery;
 
 use crate::repository::{DomainRepository, RepositoryError};
 
@@ -75,6 +76,10 @@ impl LanceDbRepository {
     }
 
     /// Returns the JSON payloads for all rows of `kind`, in insertion order.
+    ///
+    /// The table is append-only, and a full scan returns rows in row-id order,
+    /// which is insertion order. This is what `list_observations`'s
+    /// insertion-order contract (see `DomainRepository`) relies on.
     async fn read_kind(&self, kind: &str) -> Result<Vec<String>, RepositoryError> {
         if !self.table_exists().await? {
             return Ok(Vec::new());
@@ -262,6 +267,44 @@ mod tests {
             serde_json::json!({}),
         );
         repo.put_audit_event(&event).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn list_observations_preserves_insertion_order() {
+        let path = temp_path("order");
+        let _ = std::fs::remove_dir_all(&path);
+
+        let repo = LanceDbRepository::connect(&path).await.unwrap();
+        let subject = argus_domain::ResourceId::new("host", "abc").unwrap();
+        for attribute in ["first", "second", "third"] {
+            let observation = argus_domain::Observation::new(
+                uuid::Uuid::new_v4(),
+                "argusd",
+                subject.clone(),
+                attribute,
+                argus_domain::ObservedValue::Bool(true),
+                1.0,
+                argus_domain::Provenance::new("systemd", "is_active", Utc::now()),
+                Utc::now(),
+            )
+            .unwrap();
+            repo.put_observation(&observation).await.unwrap();
+        }
+
+        let attributes: Vec<String> = repo
+            .list_observations()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|observation| observation.attribute().to_string())
+            .collect();
+        assert_eq!(
+            attributes,
+            vec!["first", "second", "third"],
+            "observations read back in insertion order"
+        );
 
         let _ = std::fs::remove_dir_all(&path);
     }

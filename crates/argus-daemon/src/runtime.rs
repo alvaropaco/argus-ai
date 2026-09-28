@@ -7,7 +7,7 @@ use std::time::Instant;
 use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::error::DecisionError;
 use argus_ai_core::decision::host_health::{
-    ActionPort, DedupPort, RecordPort, ValidatePort, run_host_health,
+    ActionPort, DedupPort, RecordPort, ValidationPort, run_host_health,
 };
 use argus_ai_core::decision::provenance::DecisionProvenance;
 use argus_ai_core::decision::provider::DecisionProvider;
@@ -18,13 +18,13 @@ use argus_domain::{
     PrivilegeDeclaration, Provenance, RequestContext, ResourceId, Reversibility, RiskClass,
     Severity, plan_context_hash,
 };
-use argus_events::{EventBus, types};
+use argus_events::EventBus;
 use argus_executor::{
     BootstrapExecutor, CapabilityProvider, ExecutionError, Executor, ServiceController,
 };
 use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
-use argus_validate::{ValidationOutcome, desired_state, validate};
+use argus_validate::{desired_state, read_failure_event, validation_event};
 use chrono::Utc;
 use semver::Version;
 use serde_json::Value;
@@ -340,31 +340,7 @@ impl Daemon {
         &self,
         request: CapabilityRequest,
     ) -> Result<Value, DispatchError> {
-        let Some(descriptor) = self.registry.get(&request.capability) else {
-            return Err(DispatchError::Denied(PolicyOutcome::Deny));
-        };
-
-        // Validate the call's `input` against the capability's declared schema
-        // before policy is consulted (ADR-0027 §4): a malformed call fails here,
-        // not at the executor.
-        if !argus_domain::input_matches(descriptor.input_schema(), &request.arguments) {
-            return Err(DispatchError::InvalidInput(request.capability.clone()));
-        }
-
-        let authz = AuthorizationRequest::new(
-            request,
-            descriptor.risk_class(),
-            descriptor.effective_blast_radius(),
-        );
-        let decision = self.policy.evaluate(&authz);
-
-        if !decision.is_allowed() {
-            return Err(DispatchError::Denied(decision.outcome));
-        }
-
-        let action = argus_executor::AuthorizedAction::new(authz.capability_request, decision)?;
-        let result = self.executor.execute(&action)?;
-        Ok(result.evidence)
+        authorize_and_execute_with(&self.registry, &self.policy, &self.executor, request)
     }
 
     /// Runs one host-health reasoning step end to end: build the request from
@@ -382,38 +358,87 @@ impl Daemon {
     ) -> Result<Option<Plan>, DecisionError> {
         diagnose_with(
             |request| self.authorize_and_execute(request),
-            self.repository.as_ref(),
-            provider,
+            DiagnoseContext {
+                repository: self.repository.as_ref(),
+                provider,
+                dedup: &self.dedup,
+                service: self.service.as_ref(),
+                events,
+            },
             evidence,
             confidence_threshold,
-            &self.dedup,
-            self.service.as_ref(),
-            events,
         )
         .await
     }
 }
 
-/// Runs one host-health step through an injected dispatch function and repository.
+/// Routes a capability request through an injected registry, policy, and
+/// executor.
+///
+/// This is the pure dispatch boundary behind [`Daemon::authorize_and_execute`],
+/// extracted so the validation-before-policy ordering is testable without a full
+/// [`Daemon`]: the input is validated against the descriptor's `input_schema`
+/// *before* the policy is consulted, so a malformed call is refused before any
+/// policy side effect (ADR-0027 §4).
+pub(crate) fn authorize_and_execute_with(
+    registry: &CapabilityRegistry,
+    policy: &dyn PolicyEvaluator,
+    executor: &dyn Executor,
+    request: CapabilityRequest,
+) -> Result<Value, DispatchError> {
+    let Some(descriptor) = registry.get(&request.capability) else {
+        return Err(DispatchError::Denied(PolicyOutcome::Deny));
+    };
+
+    // Validate the call's `input` against the capability's declared schema
+    // before policy is consulted (ADR-0027 §4): a malformed call fails here,
+    // not at the executor.
+    if !argus_domain::input_matches(descriptor.input_schema(), &request.arguments) {
+        return Err(DispatchError::InvalidInput(request.capability.clone()));
+    }
+
+    let authz = AuthorizationRequest::new(
+        request,
+        descriptor.risk_class(),
+        descriptor.effective_blast_radius(),
+    );
+    let decision = policy.evaluate(&authz);
+
+    if !decision.is_allowed() {
+        return Err(DispatchError::Denied(decision.outcome));
+    }
+
+    let action = argus_executor::AuthorizedAction::new(authz.capability_request, decision)?;
+    let result = executor.execute(&action)?;
+    Ok(result.evidence)
+}
+
+/// The injected loop dependencies shared by [`diagnose_with`]'s internal ports.
+///
+/// They are grouped into one value so the loop seam does not take a long
+/// positional argument list; the daemon assembles it from its own repository,
+/// provider, dedup, live-state reader, and event bus. Each field is an
+/// independent dependency, injected individually so the loop stays testable
+/// without a host or a full daemon.
+pub struct DiagnoseContext<'a> {
+    pub repository: &'a dyn DomainRepository,
+    pub provider: &'a dyn DecisionProvider,
+    pub dedup: &'a dyn DedupPort,
+    pub service: &'a dyn ServiceController,
+    pub events: &'a dyn EventBus,
+}
+
+/// Runs one host-health step through an injected dispatch function and
+/// [`DiagnoseContext`].
 ///
 /// This is the loop's wiring seam: [`Daemon::diagnose_once`] passes its own
 /// `authorize_and_execute`, and tests pass a dispatch that records calls —
 /// neither needs a full `Daemon`.
-///
-/// Every argument is an independent loop dependency (execution dispatch,
-/// persistence, the decision provider, evidence, the threshold, dedup, the
-/// live-state reader, and the event bus); they are injected individually so the
-/// loop stays testable without a host or a full daemon.
-#[allow(clippy::too_many_arguments)]
 pub async fn diagnose_with<F>(
     dispatch: F,
-    repository: &dyn DomainRepository,
-    provider: &dyn DecisionProvider,
+    context: DiagnoseContext<'_>,
     evidence: ContextBuilder,
     confidence_threshold: f64,
-    dedup: &dyn DedupPort,
-    service: &dyn ServiceController,
-    events: &dyn EventBus,
 ) -> Result<Option<Plan>, DecisionError>
 where
     F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
@@ -424,22 +449,22 @@ where
         correlation_id,
     };
     let recorder = RepoRecordPort {
-        repository,
+        repository: context.repository,
         correlation_id,
     };
-    let validator = ValidationPort {
-        service,
-        repository,
-        events,
+    let validator = DaemonValidationPort {
+        service: context.service,
+        repository: context.repository,
+        events: context.events,
         correlation_id,
     };
     run_host_health(
-        provider,
+        context.provider,
         evidence,
         confidence_threshold,
         &actions,
         &recorder,
-        dedup,
+        context.dedup,
         &validator,
     )
     .await
@@ -563,13 +588,13 @@ impl RecordPort for RepoRecordPort<'_> {
     }
 }
 
-/// A [`ValidatePort`] that re-observes live state through a [`ServiceController`],
-/// records the re-observation as an [`Observation`], and publishes the validation
-/// outcome (ADR-0031 §3, §4).
+/// A [`ValidationPort`] that re-observes live state through a
+/// [`ServiceController`], records the re-observation as an [`Observation`], and
+/// publishes the validation outcome (ADR-0031 §3, §4).
 ///
 /// A live-state read failure fails closed: no `VALIDATION_PASSED` is published
 /// and the failure is recorded as an audit event.
-struct ValidationPort<'a> {
+struct DaemonValidationPort<'a> {
     service: &'a dyn ServiceController,
     repository: &'a dyn DomainRepository,
     events: &'a dyn EventBus,
@@ -577,7 +602,7 @@ struct ValidationPort<'a> {
 }
 
 #[async_trait::async_trait]
-impl ValidatePort for ValidationPort<'_> {
+impl ValidationPort for DaemonValidationPort<'_> {
     async fn validate(&self, plan: &Plan) -> Result<(), DecisionError> {
         let context_hash = plan_context_hash(plan);
         for step in &plan.steps {
@@ -592,13 +617,13 @@ impl ValidatePort for ValidationPort<'_> {
             match self.service.is_active(unit) {
                 Ok(observed) => {
                     self.record_observation(unit, observed).await?;
-                    let outcome = validate(Some(expected), observed);
-                    self.publish_outcome(&context_hash, action, unit, expected, observed, outcome)
+                    self.publish_outcome(&context_hash, action, unit, expected, observed)
                         .await?;
                 }
                 Err(error) => {
                     // Fail closed: no pass is fabricated when the read fails.
-                    self.record_read_failure(action, unit, &error).await?;
+                    self.record_read_failure(&context_hash, action, unit, &error)
+                        .await?;
                 }
             }
         }
@@ -606,7 +631,7 @@ impl ValidatePort for ValidationPort<'_> {
     }
 }
 
-impl ValidationPort<'_> {
+impl DaemonValidationPort<'_> {
     /// Records the re-observed active state as immutable evidence.
     async fn record_observation(&self, unit: &str, observed: bool) -> Result<(), DecisionError> {
         let now = Utc::now();
@@ -630,7 +655,8 @@ impl ValidationPort<'_> {
     }
 
     /// Publishes and persists the validation outcome, or does nothing when it is
-    /// inconclusive.
+    /// inconclusive. The payload is built by the shared `argus_validate`
+    /// constructor so the two daemon hooks cannot drift (ADR-0031 §6).
     async fn publish_outcome(
         &self,
         context_hash: &str,
@@ -638,26 +664,11 @@ impl ValidationPort<'_> {
         unit: &str,
         expected: bool,
         observed: bool,
-        outcome: ValidationOutcome,
     ) -> Result<(), DecisionError> {
-        let (event_type, payload) = match outcome {
-            ValidationOutcome::Passed => (
-                types::VALIDATION_PASSED,
-                serde_json::json!({
-                    "plan_id": context_hash,
-                    "capability": action.capability.as_str(),
-                    "evidence": { "unit": unit, "observed": observed, "desired": expected },
-                }),
-            ),
-            ValidationOutcome::Failed => (
-                types::VALIDATION_FAILED,
-                serde_json::json!({
-                    "plan_id": context_hash,
-                    "capability": action.capability.as_str(),
-                    "reason": format!("observed {observed}, desired {expected}"),
-                }),
-            ),
-            ValidationOutcome::Inconclusive => return Ok(()),
+        let Some((event_type, payload)) =
+            validation_event(&action.capability, unit, expected, observed, context_hash)
+        else {
+            return Ok(());
         };
         let event = DomainEvent::new(
             Uuid::new_v4(),
@@ -685,13 +696,16 @@ impl ValidationPort<'_> {
     /// Records a failed live-state read as an audit event (no validation event).
     async fn record_read_failure(
         &self,
+        context_hash: &str,
         action: &Action,
         unit: &str,
         error: &argus_executor::ServiceError,
     ) -> Result<(), DecisionError> {
+        let payload =
+            read_failure_event(&action.capability, unit, context_hash, &error.to_string());
         let event = DomainEvent::new(
             Uuid::new_v4(),
-            EventType::new("brain.validation.read.failed")
+            EventType::new(argus_validate::VALIDATION_READ_FAILED)
                 .map_err(|e| DecisionError::Invalid(e.to_string()))?,
             Utc::now(),
             "argusd",
@@ -699,11 +713,7 @@ impl ValidationPort<'_> {
             Severity::Warning,
             Some(self.correlation_id),
             None,
-            serde_json::json!({
-                "capability": action.capability.as_str(),
-                "unit": unit,
-                "reason": error.to_string(),
-            }),
+            payload,
         );
         self.repository
             .put_audit_event(&event)
@@ -942,6 +952,7 @@ mod tests {
             },
             token,
             context_hash: "hash-a".into(),
+            executed: vec![],
         };
 
         store.store(pending);
@@ -954,6 +965,96 @@ mod tests {
         assert!(
             store.remove(Uuid::new_v4()).is_none(),
             "an unknown token finds nothing"
+        );
+    }
+
+    /// A policy that records whether it was consulted, for the ordering test.
+    struct SpyPolicy {
+        consulted: AtomicBool,
+    }
+
+    impl PolicyEvaluator for SpyPolicy {
+        fn evaluate(&self, _request: &AuthorizationRequest) -> argus_domain::PolicyDecision {
+            self.consulted.store(true, Ordering::SeqCst);
+            argus_domain::PolicyDecision::allow("spy", "allow")
+        }
+    }
+
+    /// An executor that records whether it was reached.
+    struct SpyExecutor {
+        reached: AtomicBool,
+    }
+
+    impl Executor for SpyExecutor {
+        fn execute(
+            &self,
+            _action: &argus_executor::AuthorizedAction,
+        ) -> Result<argus_executor::ExecutionResult, ExecutionError> {
+            self.reached.store(true, Ordering::SeqCst);
+            Ok(argus_executor::ExecutionResult {
+                capability: CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+                evidence: serde_json::json!({}),
+                started_at: Utc::now(),
+                finished_at: Utc::now(),
+            })
+        }
+    }
+
+    #[test]
+    fn invalid_input_is_refused_before_policy_is_consulted() {
+        let mut registry = CapabilityRegistry::new();
+        registry
+            .register(CapabilityDescriptor::new(
+                CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+                "argusd",
+                CapabilityId::HOST_SERVICE_RESTART,
+                RiskClass::LowRisk,
+                Version::new(0, 1, 0),
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["unit"],
+                    "properties": { "unit": { "type": "string" } },
+                    "additionalProperties": false,
+                }),
+                serde_json::json!({}),
+                Reversibility::Reversible,
+            ))
+            .unwrap();
+
+        let policy = SpyPolicy {
+            consulted: AtomicBool::new(false),
+        };
+        let executor = SpyExecutor {
+            reached: AtomicBool::new(false),
+        };
+
+        // `unit` is required, so empty arguments violate the schema. The gate
+        // must refuse before consulting policy or reaching the executor.
+        let request = CapabilityRequest::new(
+            CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+            Principal::new(Some(1000), Some(1000)),
+            None,
+            serde_json::json!({}),
+            RequestContext::new(
+                Uuid::new_v4(),
+                Version::new(0, 1, 0),
+                Principal::new(Some(1000), Some(1000)),
+                Utc::now(),
+            ),
+        );
+
+        let err = authorize_and_execute_with(&registry, &policy, &executor, request).unwrap_err();
+        assert!(
+            matches!(err, DispatchError::InvalidInput(_)),
+            "an input violating the schema must be refused before policy: {err:?}"
+        );
+        assert!(
+            !policy.consulted.load(Ordering::SeqCst),
+            "policy is not consulted for an invalid input"
+        );
+        assert!(
+            !executor.reached.load(Ordering::SeqCst),
+            "the executor is not reached for an invalid input"
         );
     }
 }

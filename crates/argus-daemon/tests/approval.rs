@@ -29,6 +29,7 @@ fn pending(token: Uuid) -> PendingPlan {
         },
         token,
         context_hash: "hash-a".into(),
+        executed: vec![],
     }
 }
 

@@ -31,7 +31,7 @@ pub fn explain_plan(plan: &Plan) -> String {
     let mut lines = Vec::new();
     lines.push(format!("objective: {}", plan.objective));
     lines.push(format!("status: {}", enum_label(&plan.status)));
-    lines.push(format!("confidence: {}", plan.confidence));
+    lines.push(format!("confidence: {}", format_float(plan.confidence)));
     lines.push(format!("blast_radius: {}", enum_label(&plan.blast_radius)));
     push_list(&mut lines, "preconditions", &plan.preconditions);
     push_list(&mut lines, "expected_outcomes", &plan.expected_outcomes);
@@ -79,7 +79,7 @@ pub fn summarize_evidence(entries: &[EvidenceEntry]) -> String {
         return NOTHING_TO_EXPLAIN.to_string();
     }
     let mut ordered: Vec<&EvidenceEntry> = entries.iter().collect();
-    ordered.sort_by_key(|entry| {
+    ordered.sort_by_cached_key(|entry| {
         (
             entry.subject.clone(),
             entry.attribute.clone(),
@@ -158,8 +158,9 @@ fn answer_label(answer: &DecisionAnswer) -> String {
             confidence,
             probabilities,
         } => format!(
-            "{choice} (confidence {confidence}, probabilities: {})",
-            map_label(probabilities)
+            "{choice} (confidence {}, probabilities: {})",
+            format_float(*confidence),
+            float_map_label(probabilities)
         ),
         DecisionAnswer::Score {
             score,
@@ -167,16 +168,18 @@ fn answer_label(answer: &DecisionAnswer) -> String {
             probabilities,
             legend,
         } => format!(
-            "score {score} (confidence {confidence}, probabilities: {}, legend: {})",
-            map_label(probabilities),
+            "score {} (confidence {}, probabilities: {}, legend: {})",
+            format_float(*score),
+            format_float(*confidence),
+            float_map_label(probabilities),
             map_label(legend)
         ),
-        DecisionAnswer::Noul { noul } => format!("noul {noul}"),
+        DecisionAnswer::Noul { noul } => format!("noul {}", format_float(*noul)),
     }
 }
 
-/// Renders a name=value map in sorted key order, or `none` when empty.
-fn map_label<V: std::fmt::Display>(map: &BTreeMap<String, V>) -> String {
+/// Renders a name=value map of strings in sorted key order, or `none` when empty.
+fn map_label(map: &BTreeMap<String, String>) -> String {
     if map.is_empty() {
         return "none".to_string();
     }
@@ -184,6 +187,25 @@ fn map_label<V: std::fmt::Display>(map: &BTreeMap<String, V>) -> String {
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+/// Renders a name=value map of floats in sorted key order, or `none` when empty,
+/// formatting each value canonically via [`format_float`].
+fn float_map_label(map: &BTreeMap<String, f64>) -> String {
+    if map.is_empty() {
+        return "none".to_string();
+    }
+    map.iter()
+        .map(|(name, value)| format!("{name}={}", format_float(*value)))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// Formats an `f64` canonically: the shortest round-trip representation, always
+/// carrying a fractional part for integral values (`3.0`, not `3`). This makes
+/// golden output independent of how a value was produced or represented.
+fn format_float(value: f64) -> String {
+    format!("{value:?}")
 }
 
 /// Renders a no-decision reason as its fail-closed explanation.
@@ -383,7 +405,7 @@ host:a unit = "nginx.service""#;
         };
         assert_eq!(
             answer_label(&score),
-            "score 3 (confidence 0.9, probabilities: severe=0.9, legend: 3=severe)"
+            "score 3.0 (confidence 0.9, probabilities: severe=0.9, legend: 3=severe)"
         );
 
         let noul = DecisionAnswer::Noul { noul: 0.95 };

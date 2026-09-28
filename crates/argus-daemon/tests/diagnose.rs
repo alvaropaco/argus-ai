@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use argus_ai_core::decision::adapters::FakeDecisionProvider;
 use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::types::DecisionAnswer;
-use argus_daemon::{DispatchError, InMemoryDedup, diagnose_with};
+use argus_daemon::{DiagnoseContext, DispatchError, InMemoryDedup, diagnose_with};
 use argus_domain::ObservedValue;
 use argus_events::LocalEventBus;
 use argus_executor::MockServiceController;
@@ -56,13 +56,15 @@ async fn diagnose_executes_through_dispatch_and_records() {
 
     let plan = diagnose_with(
         dispatch,
-        &repository,
-        &provider,
+        DiagnoseContext {
+            repository: &repository,
+            provider: &provider,
+            dedup: &InMemoryDedup::new(),
+            service: &service,
+            events: &bus,
+        },
         evidence,
         0.7,
-        &InMemoryDedup::new(),
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs");
@@ -126,13 +128,15 @@ async fn diagnose_against_live_laya() {
 
     let plan = diagnose_with(
         dispatch,
-        &repository,
-        &provider,
+        DiagnoseContext {
+            repository: &repository,
+            provider: &provider,
+            dedup: &InMemoryDedup::new(),
+            service: &service,
+            events: &bus,
+        },
         evidence,
         0.3,
-        &InMemoryDedup::new(),
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs against a live laya-serve");
@@ -181,13 +185,15 @@ async fn a_repeated_observation_spawns_one_plan() {
 
     let first = diagnose_with(
         dispatch.clone(),
-        &repository,
-        &provider,
+        DiagnoseContext {
+            repository: &repository,
+            provider: &provider,
+            dedup: &dedup,
+            service: &service,
+            events: &bus,
+        },
         evidence(),
         0.7,
-        &dedup,
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs");
@@ -195,13 +201,15 @@ async fn a_repeated_observation_spawns_one_plan() {
 
     let second = diagnose_with(
         dispatch,
-        &repository,
-        &provider,
+        DiagnoseContext {
+            repository: &repository,
+            provider: &provider,
+            dedup: &dedup,
+            service: &service,
+            events: &bus,
+        },
         evidence(),
         0.7,
-        &dedup,
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs");
@@ -290,13 +298,15 @@ async fn validation_passes_and_records_when_observed_matches_desired() {
 
     let plan = diagnose_with(
         restarting_dispatch(),
-        &repository,
-        &restart_provider(),
+        DiagnoseContext {
+            repository: &repository,
+            provider: &restart_provider(),
+            dedup: &InMemoryDedup::new(),
+            service: &service,
+            events: &bus,
+        },
         evidence(),
         0.7,
-        &InMemoryDedup::new(),
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs");
@@ -341,13 +351,15 @@ async fn validation_fails_when_observed_differs_from_desired() {
 
     let plan = diagnose_with(
         restarting_dispatch(),
-        &repository,
-        &restart_provider(),
+        DiagnoseContext {
+            repository: &repository,
+            provider: &restart_provider(),
+            dedup: &InMemoryDedup::new(),
+            service: &service,
+            events: &bus,
+        },
         evidence(),
         0.7,
-        &InMemoryDedup::new(),
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs");
@@ -366,13 +378,15 @@ async fn a_live_state_read_failure_fails_closed() {
 
     let plan = diagnose_with(
         restarting_dispatch(),
-        &repository,
-        &restart_provider(),
+        DiagnoseContext {
+            repository: &repository,
+            provider: &restart_provider(),
+            dedup: &InMemoryDedup::new(),
+            service: &service,
+            events: &bus,
+        },
         evidence(),
         0.7,
-        &InMemoryDedup::new(),
-        &service,
-        &bus,
     )
     .await
     .expect("loop runs");

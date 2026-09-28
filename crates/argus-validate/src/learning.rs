@@ -3,12 +3,7 @@
 use argus_domain::{DomainEvent, Observation};
 use serde::Serialize;
 
-/// The published validation event types (`contracts/events.md`).
-///
-/// Duplicated as literals so this crate stays free of the async event-bus
-/// dependency; the strings are the transport-independent contract.
-const VALIDATION_PASSED: &str = "validation.passed";
-const VALIDATION_FAILED: &str = "validation.failed";
+use crate::{VALIDATION_FAILED, VALIDATION_PASSED};
 
 /// A deterministic summary of the persisted evidence the learning pass read.
 ///

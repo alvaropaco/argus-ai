@@ -86,7 +86,11 @@ pub struct PlanStep {
 }
 
 /// A proposed sequence of typed actions to move observed state toward desired state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Serialization emits the current shape (`steps`); deserialization additionally
+/// accepts the pre-ADR-0028 shape (`actions` + a top-level `rollback` marker) so a
+/// plan persisted before the step contract can still be read back.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Plan {
     pub objective: String,
     pub steps: Vec<PlanStep>,
@@ -95,6 +99,57 @@ pub struct Plan {
     pub blast_radius: BlastRadius,
     pub confidence: f64,
     pub status: PlanStatus,
+}
+
+impl<'de> Deserialize<'de> for Plan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PlanWire {
+            objective: String,
+            #[serde(default)]
+            steps: Option<Vec<PlanStep>>,
+            /// The pre-ADR-0028 shape: a flat `actions` list plus a top-level
+            /// `rollback` marker. Each action migrates to a `PlanStep` with no
+            /// rollback; the marker was a description string, never an
+            /// executable action, so it is dropped rather than invented back.
+            #[serde(default)]
+            actions: Option<Vec<Action>>,
+            preconditions: Vec<String>,
+            expected_outcomes: Vec<String>,
+            blast_radius: BlastRadius,
+            confidence: f64,
+            status: PlanStatus,
+        }
+
+        let wire = PlanWire::deserialize(deserializer)?;
+        let steps = match (wire.steps, wire.actions) {
+            (Some(steps), _) => steps,
+            (None, Some(actions)) => actions
+                .into_iter()
+                .map(|action| PlanStep {
+                    action,
+                    rollback: None,
+                })
+                .collect(),
+            (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "plan must carry `steps` (or the legacy `actions`)",
+                ));
+            }
+        };
+        Ok(Plan {
+            objective: wire.objective,
+            steps,
+            preconditions: wire.preconditions,
+            expected_outcomes: wire.expected_outcomes,
+            blast_radius: wire.blast_radius,
+            confidence: wire.confidence,
+            status: wire.status,
+        })
+    }
 }
 
 /// The deterministic context binding hash for a plan (ADR-0030 §3).
@@ -192,6 +247,85 @@ mod tests {
             let back: PlanStatus = serde_json::from_str(expected).unwrap();
             assert_eq!(back, status);
         }
+    }
+
+    #[test]
+    fn a_legacy_actions_plan_deserializes_into_steps() {
+        // The pre-ADR-0028 wire shape: a flat `actions` list and a top-level
+        // `rollback` marker. It must read back as one step per action, with no
+        // rollback, and the marker is dropped.
+        let legacy = serde_json::json!({
+            "objective": "restore nginx",
+            "actions": [
+                { "capability": "host.service.restart", "resource": null,
+                  "arguments": { "unit": "nginx.service" } }
+            ],
+            "rollback": "restart",
+            "preconditions": [],
+            "expected_outcomes": ["nginx running"],
+            "blast_radius": "host",
+            "confidence": 0.9,
+            "status": "proposed",
+        });
+        let plan: Plan = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(plan.steps.len(), 1, "each legacy action becomes a step");
+        assert_eq!(
+            plan.steps[0].action.capability.as_str(),
+            "host.service.restart"
+        );
+        assert!(
+            plan.steps[0].rollback.is_none(),
+            "the legacy marker is a description, not an executable rollback"
+        );
+        assert_eq!(plan.expected_outcomes, vec!["nginx running".to_string()]);
+    }
+
+    #[test]
+    fn a_plan_serializes_in_the_current_steps_shape() {
+        let plan = Plan {
+            objective: "restore nginx".into(),
+            steps: vec![PlanStep {
+                action: Action {
+                    capability: CapabilityId::new("host.service.restart").unwrap(),
+                    resource: None,
+                    arguments: serde_json::json!({ "unit": "nginx.service" }),
+                },
+                rollback: None,
+            }],
+            preconditions: vec![],
+            expected_outcomes: vec![],
+            blast_radius: BlastRadius::Host,
+            confidence: 0.9,
+            status: PlanStatus::Proposed,
+        };
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(json.get("steps").is_some(), "serialized with `steps`");
+        assert!(
+            json.get("actions").is_none(),
+            "the legacy `actions` field is not emitted"
+        );
+        assert!(json.get("rollback").is_none());
+    }
+
+    #[test]
+    fn a_plan_without_steps_or_actions_is_rejected() {
+        // A truncated/corrupt plan carrying neither the current `steps` nor the
+        // legacy `actions` must not silently deserialize into an empty no-op
+        // plan; it is a serde error.
+        let wire = serde_json::json!({
+            "objective": "restore nginx",
+            "preconditions": [],
+            "expected_outcomes": [],
+            "blast_radius": "host",
+            "confidence": 0.9,
+            "status": "proposed",
+        });
+        let err = serde_json::from_value::<Plan>(wire).unwrap_err();
+        assert!(
+            err.to_string().contains("`steps`"),
+            "the rejection names the missing field: {err}"
+        );
     }
 
     #[test]

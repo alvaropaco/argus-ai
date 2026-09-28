@@ -263,49 +263,77 @@ impl CapabilityDescriptor {
 /// `additionalProperties: false` rule is respected so a typo in an invocation's
 /// arguments cannot slip through as an accepted input. This is the single shared
 /// validator used by both local dispatch and the cloud command ladder (ADR-0027 §4).
+///
+/// The check is recursive: each declared `properties` value is validated against
+/// its own schema, so a wrong-typed leaf (e.g. `{"unit": 42}` for a
+/// `{"type": "string"}` property) is refused before policy, not only at the
+/// executor.
 pub fn input_matches(schema: &Value, input: &Value) -> bool {
     let Some(schema) = schema.as_object() else {
         return true;
     };
 
-    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
-        let matches_kind = match kind {
-            "object" => input.is_object(),
-            "array" => input.is_array(),
-            "string" => input.is_string(),
-            "number" | "integer" => input.is_number(),
-            "boolean" => input.is_boolean(),
-            "null" => input.is_null(),
-            _ => true,
-        };
-        if !matches_kind {
-            return false;
-        }
-    }
-
-    let Some(input) = input.as_object() else {
-        return true;
-    };
-
-    if let Some(required) = schema.get("required").and_then(Value::as_array)
-        && !required
-            .iter()
-            .filter_map(Value::as_str)
-            .all(|key| input.contains_key(key))
+    if let Some(kind) = schema.get("type").and_then(Value::as_str)
+        && !matches_kind(kind, input)
     {
         return false;
     }
 
-    if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-        let properties = schema.get("properties").and_then(Value::as_object);
-        let permitted =
-            |key: &String| properties.is_some_and(|declared| declared.contains_key(key));
-        if !input.keys().all(permitted) {
+    if let Some(input) = input.as_object() {
+        if let Some(required) = schema.get("required").and_then(Value::as_array)
+            && !required
+                .iter()
+                .filter_map(Value::as_str)
+                .all(|key| input.contains_key(key))
+        {
             return false;
         }
+
+        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+            let properties = schema.get("properties").and_then(Value::as_object);
+            let permitted =
+                |key: &String| properties.is_some_and(|declared| declared.contains_key(key));
+            if !input.keys().all(permitted) {
+                return false;
+            }
+        }
+
+        // Leaf types: every declared property present in the input must itself
+        // satisfy its property schema, recursively.
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (key, property_schema) in properties {
+                if let Some(value) = input.get(key)
+                    && !input_matches(property_schema, value)
+                {
+                    return false;
+                }
+            }
+        }
+    } else if let Some(items) = input.as_array()
+        && let Some(item_schema) = schema.get("items")
+        && !items.iter().all(|item| input_matches(item_schema, item))
+    {
+        return false;
     }
 
     true
+}
+
+/// Whether `input` has the JSON type named by `kind`.
+///
+/// `"integer"` is distinguished from `"number"`: an integral value only, not
+/// `1.5`, satisfies an integer schema.
+fn matches_kind(kind: &str, input: &Value) -> bool {
+    match kind {
+        "object" => input.is_object(),
+        "array" => input.is_array(),
+        "string" => input.is_string(),
+        "integer" => input.is_i64() || input.is_u64(),
+        "number" => input.is_number(),
+        "boolean" => input.is_boolean(),
+        "null" => input.is_null(),
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -435,5 +463,62 @@ mod tests {
             descriptor().privileged_with(PrivilegeDeclaration::new(vec![OsPrivilege::Landlock]));
         assert!(desc.is_privileged());
         assert!(!desc.privileges().is_empty());
+    }
+
+    /// The registered service schema: `unit` required, string-typed, no extras.
+    fn service_schema() -> Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["unit"],
+            "properties": { "unit": { "type": "string" } },
+            "additionalProperties": false,
+        })
+    }
+
+    #[test]
+    fn input_matches_accepts_a_schema_valid_service_call() {
+        assert!(input_matches(
+            &service_schema(),
+            &serde_json::json!({ "unit": "nginx.service" })
+        ));
+    }
+
+    #[test]
+    fn input_matches_rejects_a_missing_required_unit() {
+        assert!(!input_matches(&service_schema(), &serde_json::json!({})));
+    }
+
+    #[test]
+    fn input_matches_rejects_a_wrong_typed_leaf_value() {
+        // A non-string `unit` must be refused by the validator, not only by the
+        // executor: the pre-policy gate checks the declared leaf type.
+        assert!(!input_matches(
+            &service_schema(),
+            &serde_json::json!({ "unit": 42 })
+        ));
+    }
+
+    #[test]
+    fn input_matches_rejects_an_undeclared_property() {
+        assert!(!input_matches(
+            &service_schema(),
+            &serde_json::json!({ "unit": "nginx.service", "force": true })
+        ));
+    }
+
+    #[test]
+    fn input_matches_distinguishes_integer_from_number() {
+        let integer_schema = serde_json::json!({ "type": "integer" });
+        assert!(input_matches(&integer_schema, &serde_json::json!(3)));
+        assert!(!input_matches(&integer_schema, &serde_json::json!(1.5)));
+    }
+
+    #[test]
+    fn input_matches_treats_an_unknown_constraint_as_satisfied() {
+        // A schema with no recognized constraint imposes nothing.
+        assert!(input_matches(
+            &serde_json::json!({}),
+            &serde_json::json!(42)
+        ));
     }
 }

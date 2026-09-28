@@ -8,10 +8,10 @@ description = "ARGUS post-execution validator and the read-only learning pass"
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 argus-domain = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 

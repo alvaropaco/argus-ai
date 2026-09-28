@@ -182,7 +182,7 @@ pub trait DedupPort: Send + Sync {
 /// daemon supplies the re-observed state, so the loop stays free of host IO and
 /// testable without one.
 #[async_trait]
-pub trait ValidatePort: Send + Sync {
+pub trait ValidationPort: Send + Sync {
     /// Re-observes the plan's executed steps against live state, records the
     /// outcome as evidence, and publishes `VALIDATION_PASSED`/`VALIDATION_FAILED`.
     ///
@@ -206,7 +206,7 @@ pub async fn run_host_health(
     actions: &dyn ActionPort,
     recorder: &dyn RecordPort,
     dedup: &dyn DedupPort,
-    validator: &dyn ValidatePort,
+    validator: &dyn ValidationPort,
 ) -> Result<Option<Plan>, DecisionError> {
     let key = observation_dedup_key(&evidence);
     if !dedup.claim(&key).await? {
@@ -262,6 +262,7 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::decision::adapters::FakeDecisionProvider;
+    use crate::decision::context::MAX_CONTEXT_ENTRIES;
 
     #[derive(Default)]
     struct RecordingPorts {
@@ -317,7 +318,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ValidatePort for RecordingPorts {
+    impl ValidationPort for RecordingPorts {
         async fn validate(&self, plan: &Plan) -> Result<(), DecisionError> {
             self.validated.lock().unwrap().push(plan.objective.clone());
             Ok(())
@@ -391,6 +392,33 @@ mod tests {
             unit_from_evidence(&unit_state(&["nginx.service", "postgres.service"])),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_trimmed_unit_evidence_fails_closed_without_an_action() {
+        // The `unit` evidence is the oldest entry, so once the context exceeds
+        // the cap it is trimmed by `into_state`. A restart then has no target
+        // and the loop proposes nothing (fail closed), rather than a wrong or
+        // silently absent action.
+        let provider = FakeDecisionProvider::new(answers(0.9, 0.9));
+        let ports = RecordingPorts::default();
+
+        let mut context = ContextBuilder::new();
+        context.evidence("host:a", "unit", serde_json::json!("nginx.service"));
+        for i in 0..MAX_CONTEXT_ENTRIES {
+            context.evidence("host:a", format!("metric.{i}"), serde_json::json!(i));
+        }
+
+        let plan = run_host_health(&provider, context, 0.7, &ports, &ports, &ports, &ports)
+            .await
+            .expect("loop runs");
+
+        assert!(
+            plan.is_none(),
+            "a trimmed unit evidence names no action (fail closed)"
+        );
+        assert!(ports.executed.lock().unwrap().is_empty());
+        assert!(ports.arguments.lock().unwrap().is_empty());
     }
 
     fn answers(choice_conf: f64, noul: f64) -> BTreeMap<String, DecisionAnswer> {

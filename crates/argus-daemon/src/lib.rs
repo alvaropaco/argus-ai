@@ -16,4 +16,4 @@ pub use cloud::{
 };
 pub use config::DaemonConfig;
 pub use privileged::{PrivilegedError, PrivilegedLimiter};
-pub use runtime::{Daemon, DispatchError, InMemoryDedup, diagnose_with};
+pub use runtime::{Daemon, DiagnoseContext, DispatchError, InMemoryDedup, diagnose_with};

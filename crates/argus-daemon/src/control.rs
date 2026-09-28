@@ -2,14 +2,14 @@
 
 use argus_ai_core::decision::autonomy::may_execute_without_approval;
 use argus_domain::{
-    Action, AuthorizationRequest, AutonomyMode, CapabilityId, CapabilityRequest, DomainEvent,
-    EventType, Execution, ExecutionStatus, Plan, PlanStatus, PolicyOutcome, Principal,
-    RequestContext, RiskClass, Severity, plan_context_hash,
+    Action, AuthorizationRequest, AutonomyMode, CapabilityId, CapabilityRegistry,
+    CapabilityRequest, DomainEvent, EventType, Execution, ExecutionStatus, Plan, PlanStatus,
+    PolicyOutcome, Principal, RequestContext, RiskClass, Severity, plan_context_hash,
 };
 use argus_events::{EventBus, types};
 use argus_executor::ServiceController;
 use argus_policy::{ApprovalStore, PolicyEvaluator};
-use argus_validate::{ValidationOutcome, desired_state, validate};
+use argus_validate::{desired_state, read_failure_event, validation_event};
 use chrono::Utc;
 use semver::Version;
 use serde_json::{Value, json};
@@ -22,6 +22,9 @@ pub struct PendingPlan {
     pub plan: Plan,
     pub token: Uuid,
     pub context_hash: String,
+    /// Indices of steps that already executed before the pause, so a post-resume
+    /// failure still rolls back pre-pause effects (ADR-0030 §5).
+    pub executed: Vec<usize>,
 }
 
 /// The result of routing a plan through the safety boundary.
@@ -84,21 +87,6 @@ fn risk_for(capability: &CapabilityId) -> RiskClass {
     }
 }
 
-/// Whether a capability's descriptor declares a per-invocation approval
-/// requirement (mirrors the bootstrap descriptors' `.requiring_approval()`).
-///
-/// A capability that declares this always pauses for operator approval,
-/// regardless of autonomy mode; the approval-gate is stricter than the autonomy
-/// gate (ADR-0030 §1).
-fn requires_approval(capability: &CapabilityId) -> bool {
-    matches!(
-        capability.as_str(),
-        CapabilityId::HOST_SERVICE_RESTART
-            | CapabilityId::HOST_SERVICE_STOP
-            | CapabilityId::HOST_SERVICE_START
-    )
-}
-
 fn execute_action(action: &Action, service: &dyn ServiceController) -> Result<Value, String> {
     let unit = action
         .arguments
@@ -129,12 +117,13 @@ fn execute_action(action: &Action, service: &dyn ServiceController) -> Result<Va
 /// actions (ADR-0028 §4).
 pub async fn authorize_and_run(
     plan: &Plan,
+    registry: &CapabilityRegistry,
     policy: &dyn PolicyEvaluator,
     service: &dyn ServiceController,
     events: &dyn EventBus,
     autonomy: AutonomyMode,
 ) -> RunOutcome {
-    match run_plan(plan, policy, service, events, autonomy, false).await {
+    match run_plan(plan, registry, policy, service, events, autonomy, None).await {
         PlanRun::Finished(outcome) => RunOutcome::Finished(outcome),
         PlanRun::Paused(pending) => RunOutcome::Pending(pending),
     }
@@ -148,6 +137,7 @@ pub async fn authorize_and_run(
 pub async fn resume_and_run(
     pending: &PendingPlan,
     approvals: &ApprovalStore,
+    registry: &CapabilityRegistry,
     policy: &dyn PolicyEvaluator,
     service: &dyn ServiceController,
     events: &dyn EventBus,
@@ -170,7 +160,17 @@ pub async fn resume_and_run(
         return ResumeOutcome::Refused(reason);
     }
 
-    match run_plan(&pending.plan, policy, service, events, autonomy, true).await {
+    match run_plan(
+        &pending.plan,
+        registry,
+        policy,
+        service,
+        events,
+        autonomy,
+        Some(pending.executed.clone()),
+    )
+    .await
+    {
         PlanRun::Finished(outcome) => ResumeOutcome::Finished(outcome),
         // A resumed plan is already authorized, so it can never pause again.
         PlanRun::Paused(_) => unreachable!("a resumed plan is authorized and cannot pause"),
@@ -185,16 +185,20 @@ enum PlanRun {
 
 /// The shared step loop behind [`authorize_and_run`] and [`resume_and_run`].
 ///
-/// `resumed` is `false` for a first run (pause on `RequireApproval`) and `true`
-/// for a resume, whose grant was already consumed by [`resume_and_run`], so an
-/// approval-requiring step proceeds as if allowed (ADR-0030 §5).
+/// `resume` is `None` for a first run (pause on `RequireApproval`) and
+/// `Some(executed)` for a resume, whose grant was already consumed by
+/// [`resume_and_run`]; an approval-requiring step then proceeds as if allowed
+/// (ADR-0030 §5). The carried `executed` indices are the steps already run
+/// before the pause, so a post-resume failure still rolls back pre-pause
+/// effects.
 async fn run_plan(
     plan: &Plan,
+    registry: &CapabilityRegistry,
     policy: &dyn PolicyEvaluator,
     service: &dyn ServiceController,
     events: &dyn EventBus,
     autonomy: AutonomyMode,
-    resumed: bool,
+    resume: Option<Vec<usize>>,
 ) -> PlanRun {
     let correlation = Uuid::new_v4();
     let _ = events
@@ -211,7 +215,8 @@ async fn run_plan(
         ..ExecutionOutcome::default()
     };
     // Indices of steps that took effect, for reverse-order rollback.
-    let mut executed: Vec<usize> = Vec::new();
+    let resumed = resume.is_some();
+    let mut executed = resume.unwrap_or_default();
     let env = RunEnv {
         service,
         events,
@@ -220,6 +225,11 @@ async fn run_plan(
     };
 
     for (index, step) in plan.steps.iter().enumerate() {
+        // A step already executed before the pause is not re-run on resume; its
+        // index stays in the rollback set so a later failure still undoes it.
+        if resumed && executed.contains(&index) {
+            continue;
+        }
         let action = &step.action;
         let risk = risk_for(&action.capability);
         let authz = AuthorizationRequest::new(
@@ -233,7 +243,17 @@ async fn run_plan(
             risk,
             plan.blast_radius,
         )
-        .requiring_approval(requires_approval(&action.capability));
+        // The approval requirement is sourced from the capability's own
+        // descriptor, never a hardcoded list, so the local gate cannot drift
+        // from the registry (ADR-0030 §1). A capability absent from the
+        // registry defaults to requiring approval — it must not silently lose
+        // the gate when its descriptor is missing (fail closed).
+        .requiring_approval(
+            registry
+                .get(&action.capability)
+                .map(|descriptor| descriptor.requires_approval())
+                .unwrap_or(true),
+        );
 
         match policy.evaluate(&authz).outcome {
             PolicyOutcome::Deny => {
@@ -258,6 +278,7 @@ async fn run_plan(
                         plan: paused,
                         token,
                         context_hash,
+                        executed: executed.clone(),
                     });
                 }
                 // Resumed: the approval re-entered policy as input, never as
@@ -533,16 +554,17 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
         Ok(observed) => observed,
         Err(error) => {
             // Fail closed: no pass is fabricated when the read fails; record it.
+            let payload = read_failure_event(
+                &action.capability,
+                unit,
+                &env.context_hash,
+                &error.to_string(),
+            );
             let _ = env
                 .events
                 .publish(&event(
-                    "brain.validation.read.failed",
-                    json!({
-                        "plan_id": env.context_hash,
-                        "capability": action.capability.as_str(),
-                        "unit": unit,
-                        "reason": error.to_string(),
-                    }),
+                    argus_validate::VALIDATION_READ_FAILED,
+                    payload,
                     env.correlation,
                     None,
                 ))
@@ -550,24 +572,16 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
             return;
         }
     };
-    let (event_type, payload) = match validate(Some(expected), observed) {
-        ValidationOutcome::Passed => (
-            types::VALIDATION_PASSED,
-            json!({
-                "plan_id": env.context_hash,
-                "capability": action.capability.as_str(),
-                "evidence": { "unit": unit, "observed": observed, "desired": expected },
-            }),
-        ),
-        ValidationOutcome::Failed => (
-            types::VALIDATION_FAILED,
-            json!({
-                "plan_id": env.context_hash,
-                "capability": action.capability.as_str(),
-                "reason": format!("observed {observed}, desired {expected}"),
-            }),
-        ),
-        ValidationOutcome::Inconclusive => return,
+    // The shared payload construction (argus_validate) is the single source for
+    // both daemon hooks, so they cannot drift (ADR-0031 §6).
+    let Some((event_type, payload)) = validation_event(
+        &action.capability,
+        unit,
+        expected,
+        observed,
+        &env.context_hash,
+    ) else {
+        return;
     };
     let _ = env
         .events
@@ -608,7 +622,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use argus_domain::{BlastRadius, PlanStatus, PlanStep};
+    use argus_domain::{BlastRadius, CapabilityDescriptor, PlanStatus, PlanStep, Reversibility};
     use argus_events::LocalEventBus;
     use argus_executor::MockServiceController;
     use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator};
@@ -619,6 +633,39 @@ mod tests {
             resource: None,
             arguments: json!({ "unit": unit }),
         }
+    }
+
+    /// A registry mirroring the bootstrap service descriptors: the three service
+    /// capabilities declare a per-invocation approval requirement, so the plan
+    /// loop sources `RequireApproval` from the descriptor, not a hardcoded list.
+    fn service_registry() -> CapabilityRegistry {
+        let mut registry = CapabilityRegistry::new();
+        for capability in [
+            CapabilityId::HOST_SERVICE_RESTART,
+            CapabilityId::HOST_SERVICE_STOP,
+            CapabilityId::HOST_SERVICE_START,
+        ] {
+            let id = CapabilityId::new(capability).expect("bootstrap capability id");
+            let descriptor = CapabilityDescriptor::new(
+                id,
+                "argusd",
+                capability,
+                RiskClass::LowRisk,
+                Version::new(0, 1, 0),
+                json!({
+                    "type": "object",
+                    "required": ["unit"],
+                    "properties": { "unit": { "type": "string" } },
+                    "additionalProperties": false,
+                }),
+                json!({}),
+                Reversibility::Reversible,
+            )
+            .with_blast_radius(BlastRadius::Host)
+            .requiring_approval();
+            registry.register(descriptor).expect("unique descriptor");
+        }
+        registry
     }
 
     fn plan(unit: &str) -> Plan {
@@ -645,13 +692,15 @@ mod tests {
         events: &dyn EventBus,
         autonomy: AutonomyMode,
     ) -> ExecutionOutcome {
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
-        let pending = match authorize_and_run(plan, policy, service, events, autonomy).await {
-            RunOutcome::Pending(pending) => pending,
-            RunOutcome::Finished(outcome) => {
-                panic!("expected a pause, got a finished outcome: {outcome:?}")
-            }
-        };
+        let pending =
+            match authorize_and_run(plan, &registry, policy, service, events, autonomy).await {
+                RunOutcome::Pending(pending) => pending,
+                RunOutcome::Finished(outcome) => {
+                    panic!("expected a pause, got a finished outcome: {outcome:?}")
+                }
+            };
         approvals.grant_for_a_while(
             pending.token,
             pending.context_hash.clone(),
@@ -659,7 +708,11 @@ mod tests {
             Utc::now(),
             chrono::Duration::minutes(5),
         );
-        match resume_and_run(&pending, &approvals, policy, service, events, autonomy).await {
+        match resume_and_run(
+            &pending, &approvals, &registry, policy, service, events, autonomy,
+        )
+        .await
+        {
             ResumeOutcome::Finished(outcome) => outcome,
             ResumeOutcome::Refused(reason) => {
                 panic!("expected the resume to run, refused: {reason:?}")
@@ -671,8 +724,10 @@ mod tests {
     async fn pause(service: &dyn ServiceController) -> PendingPlan {
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         match authorize_and_run(
             &plan("nginx.service"),
+            &registry,
             &policy,
             service,
             events.as_ref(),
@@ -692,9 +747,11 @@ mod tests {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
 
         let outcome = authorize_and_run(
             &plan("nginx.service"),
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -724,10 +781,12 @@ mod tests {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
 
         let pending = match authorize_and_run(
             &plan("nginx.service"),
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -751,6 +810,7 @@ mod tests {
         let outcome = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -785,6 +845,7 @@ mod tests {
         let pending = pause(&service).await;
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
         approvals.grant_for_a_while(
             pending.token,
@@ -797,6 +858,7 @@ mod tests {
         let outcome = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -816,10 +878,12 @@ mod tests {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
 
         let pending = match authorize_and_run(
             &plan("nginx.service"),
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -843,6 +907,7 @@ mod tests {
         let first = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -854,6 +919,7 @@ mod tests {
         let second = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -874,6 +940,7 @@ mod tests {
         let pending = pause(&service).await;
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
         approvals.deny(
             pending.token,
@@ -885,6 +952,7 @@ mod tests {
         let outcome = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -902,6 +970,7 @@ mod tests {
         let pending = pause(&service).await;
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
         let now = Utc::now();
         approvals.grant_for(
@@ -915,6 +984,7 @@ mod tests {
         let outcome = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -932,11 +1002,13 @@ mod tests {
         let pending = pause(&service).await;
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
         let approvals = ApprovalStore::new();
 
         let outcome = resume_and_run(
             &pending,
             &approvals,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -963,12 +1035,14 @@ mod tests {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let registry = service_registry();
 
         let mut p = plan("nginx.service");
         p.steps[0].action.capability = CapabilityId::new("host.process.signal").unwrap();
 
         let outcome = match authorize_and_run(
             &p,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -993,6 +1067,25 @@ mod tests {
         let service = MockServiceController::new();
         let events = Arc::new(LocalEventBus::new(16));
         let policy = BootstrapPolicyEvaluator::new();
+        let mut registry = service_registry();
+        // The read-only capability must be registered (and not declare approval)
+        // so the policy allows it and the autonomy gate — not the approval gate —
+        // is what stops it.
+        registry
+            .register(
+                CapabilityDescriptor::new(
+                    CapabilityId::new(CapabilityId::HOST_STATUS_READ).unwrap(),
+                    "argusd",
+                    CapabilityId::HOST_STATUS_READ,
+                    RiskClass::Read,
+                    Version::new(0, 1, 0),
+                    json!({ "type": "object", "additionalProperties": false }),
+                    json!({}),
+                    Reversibility::None,
+                )
+                .with_blast_radius(BlastRadius::None),
+            )
+            .expect("unique descriptor");
 
         // A read-only capability is allowed by policy (no approval requirement)
         // but still gated by the autonomy mode: Propose executes nothing.
@@ -1001,6 +1094,7 @@ mod tests {
 
         let outcome = match authorize_and_run(
             &p,
+            &registry,
             &policy,
             &service,
             events.as_ref(),
@@ -1017,6 +1111,34 @@ mod tests {
         assert!(outcome.executions.is_empty(), "Propose mode never executes");
         assert_eq!(outcome.requires_approval.len(), 1);
         assert_eq!(outcome.status, PlanStatus::Denied);
+        assert!(service.recorded_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_service_step_still_requires_approval() {
+        let service = MockServiceController::new();
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        // No service descriptor is registered: the approval gate must fail
+        // closed rather than defaulting to "no approval required".
+        let registry = CapabilityRegistry::new();
+
+        let outcome = authorize_and_run(
+            &plan("nginx.service"),
+            &registry,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+
+        match outcome {
+            RunOutcome::Pending(_) => {}
+            RunOutcome::Finished(_) => {
+                panic!("an unregistered service step must pause for approval, not execute");
+            }
+        }
         assert!(service.recorded_calls().is_empty());
     }
 
