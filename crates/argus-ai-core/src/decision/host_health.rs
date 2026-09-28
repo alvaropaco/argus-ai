@@ -175,6 +175,23 @@ pub trait DedupPort: Send + Sync {
     }
 }
 
+/// A port the loop uses to re-observe live state, record the evidence, and
+/// publish the validation outcome after the step loop completes (ADR-0031 §3, §4).
+///
+/// The validator itself (`argus_validate`) is pure; this port is where the
+/// daemon supplies the re-observed state, so the loop stays free of host IO and
+/// testable without one.
+#[async_trait]
+pub trait ValidatePort: Send + Sync {
+    /// Re-observes the plan's executed steps against live state, records the
+    /// outcome as evidence, and publishes `VALIDATION_PASSED`/`VALIDATION_FAILED`.
+    ///
+    /// A live-state read failure must fail closed (no pass is published and the
+    /// failure is recorded), not propagate as an error that aborts the
+    /// already-executed plan.
+    async fn validate(&self, plan: &Plan) -> Result<(), DecisionError>;
+}
+
 /// Runs one host-health step: decide, validate, gate on confidence, propose a
 /// plan, execute through the port, and record the outcome.
 ///
@@ -189,6 +206,7 @@ pub async fn run_host_health(
     actions: &dyn ActionPort,
     recorder: &dyn RecordPort,
     dedup: &dyn DedupPort,
+    validator: &dyn ValidatePort,
 ) -> Result<Option<Plan>, DecisionError> {
     let key = observation_dedup_key(&evidence);
     if !dedup.claim(&key).await? {
@@ -229,6 +247,12 @@ pub async fn run_host_health(
         }
     }
     recorder.record(&plan, true, &provenance).await?;
+    // Re-observe after the loop and publish the validation outcome (ADR-0031 §6).
+    // A validation failure here must not fail the loop: the plan already executed
+    // and was recorded, so a persistence/publish error is logged, not propagated.
+    if let Err(error) = validator.validate(&plan).await {
+        tracing::warn!(error = %error, "post-execution validation failed");
+    }
     Ok(Some(plan))
 }
 
@@ -245,6 +269,7 @@ mod tests {
         arguments: Mutex<Vec<Value>>,
         recorded: Mutex<Vec<(String, bool, DecisionProvenance)>>,
         deduped: Mutex<Vec<String>>,
+        validated: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -288,6 +313,14 @@ mod tests {
     impl DedupPort for RecordingPorts {
         async fn claim(&self, _key: &str) -> Result<bool, DecisionError> {
             Ok(true)
+        }
+    }
+
+    #[async_trait]
+    impl ValidatePort for RecordingPorts {
+        async fn validate(&self, plan: &Plan) -> Result<(), DecisionError> {
+            self.validated.lock().unwrap().push(plan.objective.clone());
+            Ok(())
         }
     }
 
@@ -382,7 +415,7 @@ mod tests {
         let provider = FakeDecisionProvider::new(answers(0.9, 0.9));
         let ports = RecordingPorts::default();
 
-        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports)
+        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports, &ports)
             .await
             .expect("loop runs");
 
@@ -406,6 +439,11 @@ mod tests {
             assert_eq!(recorded[0].2.model_id, crate::decision::provenance::UNKNOWN);
             assert_eq!(recorded[0].2.context_hash.len(), 16);
         }
+        assert_eq!(
+            ports.validated.lock().unwrap().len(),
+            1,
+            "validation runs after the loop"
+        );
     }
 
     #[tokio::test]
@@ -413,7 +451,7 @@ mod tests {
         let provider = FakeDecisionProvider::new(answers(0.4, 0.4));
         let ports = RecordingPorts::default();
 
-        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports)
+        let plan = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports, &ports)
             .await
             .expect("loop runs");
 
@@ -432,7 +470,7 @@ mod tests {
         let mut no_unit = ContextBuilder::new();
         no_unit.evidence("host:a", "service.nginx.state", serde_json::json!("failed"));
 
-        let plan = run_host_health(&provider, no_unit, 0.7, &ports, &ports, &ports)
+        let plan = run_host_health(&provider, no_unit, 0.7, &ports, &ports, &ports, &ports)
             .await
             .expect("loop runs");
 
@@ -464,7 +502,8 @@ mod tests {
         ]));
         let ports = RecordingPorts::default();
 
-        let result = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports).await;
+        let result =
+            run_host_health(&provider, evidence(), 0.7, &ports, &ports, &ports, &ports).await;
         assert!(matches!(result, Err(DecisionError::Validation(_))));
         assert!(ports.executed.lock().unwrap().is_empty());
     }
@@ -492,6 +531,7 @@ mod tests {
             &ports,
             &ports,
             &ports,
+            &ports,
         )
         .await
         .expect("loop runs");
@@ -507,8 +547,16 @@ mod tests {
         let recorder = RecordingPorts::default();
         let failing = FailingActionPort;
 
-        let result =
-            run_host_health(&provider, evidence(), 0.7, &failing, &recorder, &recorder).await;
+        let result = run_host_health(
+            &provider,
+            evidence(),
+            0.7,
+            &failing,
+            &recorder,
+            &recorder,
+            &recorder,
+        )
+        .await;
         assert!(result.is_err());
         let recorded = recorder.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "a failed execution is still recorded");
@@ -521,12 +569,12 @@ mod tests {
         let ports = RecordingPorts::default();
         let dedup = StatefulDedup::default();
 
-        let first = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &dedup)
+        let first = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &dedup, &ports)
             .await
             .expect("loop runs");
         assert!(first.is_some(), "the first observation plans");
 
-        let second = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &dedup)
+        let second = run_host_health(&provider, evidence(), 0.7, &ports, &ports, &dedup, &ports)
             .await
             .expect("loop runs");
         assert!(second.is_none(), "the repeat spawns no plan");
@@ -550,12 +598,12 @@ mod tests {
         let ports = RecordingPorts::default();
         let dedup = StatefulDedup::default();
 
-        let first = run_host_health(&low, evidence(), 0.7, &ports, &ports, &dedup)
+        let first = run_host_health(&low, evidence(), 0.7, &ports, &ports, &dedup, &ports)
             .await
             .expect("loop runs");
         assert!(first.is_none(), "low confidence proposes nothing");
 
-        let second = run_host_health(&high, evidence(), 0.7, &ports, &ports, &dedup)
+        let second = run_host_health(&high, evidence(), 0.7, &ports, &ports, &dedup, &ports)
             .await
             .expect("loop runs");
         assert!(

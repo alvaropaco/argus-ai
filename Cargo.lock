@@ -201,6 +201,7 @@ dependencies = [
  "argus-observability",
  "argus-policy",
  "argus-state",
+ "argus-validate",
  "async-trait",
  "chrono",
  "semver",
@@ -316,6 +317,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "argus-validate"
+version = "0.1.10"
+dependencies = [
+ "argus-domain",
+ "chrono",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

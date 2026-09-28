@@ -113,6 +113,16 @@ impl DomainRepository for LanceDbRepository {
             .await
     }
 
+    async fn list_observations(&self) -> Result<Vec<Observation>, RepositoryError> {
+        self.read_kind(KIND_OBSERVATION)
+            .await?
+            .iter()
+            .map(|data| {
+                serde_json::from_str(data).map_err(|e| RepositoryError::Corrupt(e.to_string()))
+            })
+            .collect()
+    }
+
     async fn put_audit_event(&self, event: &DomainEvent) -> Result<(), RepositoryError> {
         let data =
             serde_json::to_string(event).map_err(|e| RepositoryError::Failed(e.to_string()))?;

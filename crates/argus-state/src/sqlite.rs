@@ -263,6 +263,13 @@ impl DomainRepository for SqliteRepository {
         self.put_json("observations", &observation.id().to_string(), &data)
     }
 
+    async fn list_observations(&self) -> Result<Vec<Observation>, RepositoryError> {
+        self.list_json("observations")?
+            .iter()
+            .map(|data| Self::decode(data))
+            .collect()
+    }
+
     async fn put_audit_event(&self, event: &DomainEvent) -> Result<(), RepositoryError> {
         let data =
             serde_json::to_string(event).map_err(|e| RepositoryError::Failed(e.to_string()))?;
@@ -531,6 +538,28 @@ mod tests {
             serde_json::json!({}),
         );
         repo.put_audit_event(&event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_observations_returns_recorded_observations() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        assert!(repo.list_observations().await.unwrap().is_empty());
+
+        let subject = argus_domain::ResourceId::new("host", "abc").unwrap();
+        let observation = argus_domain::Observation::new(
+            uuid::Uuid::new_v4(),
+            "argusd",
+            subject,
+            "service.active",
+            argus_domain::ObservedValue::Bool(true),
+            1.0,
+            argus_domain::Provenance::new("systemd", "is_active", Utc::now()),
+            Utc::now(),
+        )
+        .unwrap();
+        repo.put_observation(&observation).await.unwrap();
+
+        assert_eq!(repo.list_observations().await.unwrap(), vec![observation]);
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ members = [
     "crates/argus-observability",
     "crates/argus-install",
     "crates/argus-cloud",
+    "crates/argus-validate",
 ]
 
 [workspace.package]
@@ -52,6 +53,7 @@ argus-events = { version = "0.1.10", path = "crates/argus-events" }
 argus-ai-tui = { version = "0.1.10", path = "crates/argus-ai-tui" }
 argus-install = { version = "0.1.10", path = "crates/argus-install" }
 argus-cloud = { version = "0.1.10", path = "crates/argus-cloud" }
+argus-validate = { version = "0.1.10", path = "crates/argus-validate" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

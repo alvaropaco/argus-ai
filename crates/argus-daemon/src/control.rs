@@ -9,6 +9,7 @@ use argus_domain::{
 use argus_events::{EventBus, types};
 use argus_executor::ServiceController;
 use argus_policy::{ApprovalStore, PolicyEvaluator};
+use argus_validate::{ValidationOutcome, desired_state, validate};
 use chrono::Utc;
 use semver::Version;
 use serde_json::{Value, json};
@@ -215,6 +216,7 @@ async fn run_plan(
         service,
         events,
         correlation,
+        context_hash: plan_context_hash(plan),
     };
 
     for (index, step) in plan.steps.iter().enumerate() {
@@ -294,6 +296,7 @@ struct RunEnv<'a> {
     service: &'a dyn ServiceController,
     events: &'a dyn EventBus,
     correlation: Uuid,
+    context_hash: String,
 }
 
 /// Executes one policy-approved step: the desired-state idempotency check, then
@@ -347,6 +350,9 @@ async fn execute_allowed_step(
                     evidence,
                 });
                 executed.push(index);
+                // Re-observe after the step executed and publish the validation
+                // outcome (ADR-0031 §6).
+                validate_step(action, env).await;
                 false
             }
             Err(err) => {
@@ -495,19 +501,11 @@ async fn rollback_executed(
         .await;
 }
 
-/// The desired state a service capability moves its unit toward, when the action
-/// is idempotent-checkable: start/restart move toward active, stop toward
-/// inactive. Other capabilities have no desired-state check.
-fn desired_state(capability: &CapabilityId) -> Option<bool> {
-    match capability.as_str() {
-        CapabilityId::HOST_SERVICE_START | CapabilityId::HOST_SERVICE_RESTART => Some(true),
-        CapabilityId::HOST_SERVICE_STOP => Some(false),
-        _ => None,
-    }
-}
-
 /// Whether the target is already in the action's desired state, read from live
 /// state at execution time. `Ok(false)` means the effect should run.
+///
+/// The desired-state mapping itself is shared with the post-execution validator
+/// via `argus_validate::desired_state` (ADR-0031 §2).
 fn desired_state_holds(action: &Action, service: &dyn ServiceController) -> Result<bool, String> {
     let Some(desired) = desired_state(&action.capability) else {
         return Ok(false);
@@ -519,6 +517,62 @@ fn desired_state_holds(action: &Action, service: &dyn ServiceController) -> Resu
         .ok_or_else(|| "action missing 'unit' argument".to_string())?;
     let active = service.is_active(unit).map_err(|e| e.to_string())?;
     Ok(active == desired)
+}
+
+/// Re-observes a just-executed step's target and publishes the validation
+/// outcome (ADR-0031 §6). Fail closed: a live-state read failure publishes
+/// nothing and records the failure.
+async fn validate_step(action: &Action, env: &RunEnv<'_>) {
+    let Some(expected) = desired_state(&action.capability) else {
+        return;
+    };
+    let Some(unit) = action.arguments.get("unit").and_then(Value::as_str) else {
+        return;
+    };
+    let observed = match env.service.is_active(unit) {
+        Ok(observed) => observed,
+        Err(error) => {
+            // Fail closed: no pass is fabricated when the read fails; record it.
+            let _ = env
+                .events
+                .publish(&event(
+                    "brain.validation.read.failed",
+                    json!({
+                        "plan_id": env.context_hash,
+                        "capability": action.capability.as_str(),
+                        "unit": unit,
+                        "reason": error.to_string(),
+                    }),
+                    env.correlation,
+                    None,
+                ))
+                .await;
+            return;
+        }
+    };
+    let (event_type, payload) = match validate(Some(expected), observed) {
+        ValidationOutcome::Passed => (
+            types::VALIDATION_PASSED,
+            json!({
+                "plan_id": env.context_hash,
+                "capability": action.capability.as_str(),
+                "evidence": { "unit": unit, "observed": observed, "desired": expected },
+            }),
+        ),
+        ValidationOutcome::Failed => (
+            types::VALIDATION_FAILED,
+            json!({
+                "plan_id": env.context_hash,
+                "capability": action.capability.as_str(),
+                "reason": format!("observed {observed}, desired {expected}"),
+            }),
+        ),
+        ValidationOutcome::Inconclusive => return,
+    };
+    let _ = env
+        .events
+        .publish(&event(event_type, payload, env.correlation, None))
+        .await;
 }
 
 fn request_context(correlation: Uuid) -> RequestContext {
@@ -1363,6 +1417,39 @@ mod tests {
                 ("restart".to_string(), "nginx.service".to_string()),
                 ("restart".to_string(), "postgres.service".to_string()),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_is_published_after_an_executed_step() {
+        // The unit starts inactive so the restart effect runs (not a no-op),
+        // then the mock's `restart` marks it active — so the post-execution
+        // re-observation matches the desired state and publishes a pass.
+        let service = MockServiceController::new();
+        let events = Arc::new(LocalEventBus::new(16));
+        let mut rx = events.subscribe();
+        let policy = BootstrapPolicyEvaluator::new();
+
+        let outcome = run_approved(
+            &plan("nginx.service"),
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::Assisted,
+        )
+        .await;
+        assert_eq!(outcome.status, PlanStatus::Completed);
+
+        // The plan-path hook publishes a validation.passed event.
+        let mut saw_passed = false;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.event_type().as_str() == "validation.passed" {
+                saw_passed = true;
+            }
+        }
+        assert!(
+            saw_passed,
+            "a validation.passed event is published after the step"
         );
     }
 }

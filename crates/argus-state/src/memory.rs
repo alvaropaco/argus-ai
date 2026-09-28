@@ -62,6 +62,15 @@ impl DomainRepository for InMemoryRepository {
         Ok(())
     }
 
+    async fn list_observations(&self) -> Result<Vec<Observation>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .observations
+            .clone())
+    }
+
     async fn put_audit_event(&self, event: &DomainEvent) -> Result<(), RepositoryError> {
         self.inner
             .lock()
@@ -124,6 +133,28 @@ mod tests {
         let health = HealthStatus::degraded("lancedb init failed", Utc::now());
         repo.save_health(&health).await.unwrap();
         assert_eq!(repo.get_health().await.unwrap(), Some(health));
+    }
+
+    #[tokio::test]
+    async fn observations_are_listable() {
+        let repo = InMemoryRepository::new();
+        assert!(repo.list_observations().await.unwrap().is_empty());
+
+        let subject = argus_domain::ResourceId::new("host", "abc").unwrap();
+        let observation = argus_domain::Observation::new(
+            uuid::Uuid::new_v4(),
+            "argusd",
+            subject,
+            "service.active",
+            argus_domain::ObservedValue::Bool(true),
+            1.0,
+            argus_domain::Provenance::new("systemd", "is_active", Utc::now()),
+            Utc::now(),
+        )
+        .unwrap();
+        repo.put_observation(&observation).await.unwrap();
+
+        assert_eq!(repo.list_observations().await.unwrap(), vec![observation]);
     }
 
     #[tokio::test]

@@ -6,7 +6,9 @@ use std::time::Instant;
 
 use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::error::DecisionError;
-use argus_ai_core::decision::host_health::{ActionPort, DedupPort, RecordPort, run_host_health};
+use argus_ai_core::decision::host_health::{
+    ActionPort, DedupPort, RecordPort, ValidatePort, run_host_health,
+};
 use argus_ai_core::decision::provenance::DecisionProvenance;
 use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{
@@ -14,11 +16,15 @@ use argus_domain::{
     CapabilityRegistry, CapabilityRequest, DomainEvent, EnvironmentId, EventType, HealthStatus,
     Observation, ObservedValue, Plan, PluginManifest, PolicyOutcome, Principal,
     PrivilegeDeclaration, Provenance, RequestContext, ResourceId, Reversibility, RiskClass,
-    Severity,
+    Severity, plan_context_hash,
 };
-use argus_executor::{BootstrapExecutor, CapabilityProvider, ExecutionError, Executor};
+use argus_events::{EventBus, types};
+use argus_executor::{
+    BootstrapExecutor, CapabilityProvider, ExecutionError, Executor, ServiceController,
+};
 use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
+use argus_validate::{ValidationOutcome, desired_state, validate};
 use chrono::Utc;
 use semver::Version;
 use serde_json::Value;
@@ -43,6 +49,10 @@ pub struct Daemon {
     managed_settings: CloudSettingsStore,
     policy: BootstrapPolicyEvaluator,
     executor: BootstrapExecutor,
+    /// The live-state reader for post-execution validation (ADR-0031 §3): the
+    /// daemon re-observes a unit's active state through `ServiceController` and
+    /// records it as evidence.
+    service: Arc<dyn ServiceController>,
     registry: CapabilityRegistry,
     plugins: Vec<PluginManifest>,
     /// The local kill switch, shared with the cloud supervisor so that changing it
@@ -154,6 +164,7 @@ impl Daemon {
             managed_settings: CloudSettingsStore::default_location(),
             policy: BootstrapPolicyEvaluator::new(),
             executor: BootstrapExecutor::new(provider),
+            service: Arc::new(argus_executor::SystemdServiceController::new()),
             registry,
             plugins: Vec::new(),
             privileged_execution,
@@ -367,6 +378,7 @@ impl Daemon {
         provider: &dyn DecisionProvider,
         evidence: ContextBuilder,
         confidence_threshold: f64,
+        events: &dyn EventBus,
     ) -> Result<Option<Plan>, DecisionError> {
         diagnose_with(
             |request| self.authorize_and_execute(request),
@@ -375,6 +387,8 @@ impl Daemon {
             evidence,
             confidence_threshold,
             &self.dedup,
+            self.service.as_ref(),
+            events,
         )
         .await
     }
@@ -385,6 +399,12 @@ impl Daemon {
 /// This is the loop's wiring seam: [`Daemon::diagnose_once`] passes its own
 /// `authorize_and_execute`, and tests pass a dispatch that records calls —
 /// neither needs a full `Daemon`.
+///
+/// Every argument is an independent loop dependency (execution dispatch,
+/// persistence, the decision provider, evidence, the threshold, dedup, the
+/// live-state reader, and the event bus); they are injected individually so the
+/// loop stays testable without a host or a full daemon.
+#[allow(clippy::too_many_arguments)]
 pub async fn diagnose_with<F>(
     dispatch: F,
     repository: &dyn DomainRepository,
@@ -392,6 +412,8 @@ pub async fn diagnose_with<F>(
     evidence: ContextBuilder,
     confidence_threshold: f64,
     dedup: &dyn DedupPort,
+    service: &dyn ServiceController,
+    events: &dyn EventBus,
 ) -> Result<Option<Plan>, DecisionError>
 where
     F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
@@ -405,6 +427,12 @@ where
         repository,
         correlation_id,
     };
+    let validator = ValidationPort {
+        service,
+        repository,
+        events,
+        correlation_id,
+    };
     run_host_health(
         provider,
         evidence,
@@ -412,6 +440,7 @@ where
         &actions,
         &recorder,
         dedup,
+        &validator,
     )
     .await
 }
@@ -531,6 +560,155 @@ impl RecordPort for RepoRecordPort<'_> {
             .await
             .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
         Ok(())
+    }
+}
+
+/// A [`ValidatePort`] that re-observes live state through a [`ServiceController`],
+/// records the re-observation as an [`Observation`], and publishes the validation
+/// outcome (ADR-0031 §3, §4).
+///
+/// A live-state read failure fails closed: no `VALIDATION_PASSED` is published
+/// and the failure is recorded as an audit event.
+struct ValidationPort<'a> {
+    service: &'a dyn ServiceController,
+    repository: &'a dyn DomainRepository,
+    events: &'a dyn EventBus,
+    correlation_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl ValidatePort for ValidationPort<'_> {
+    async fn validate(&self, plan: &Plan) -> Result<(), DecisionError> {
+        let context_hash = plan_context_hash(plan);
+        for step in &plan.steps {
+            let action = &step.action;
+            let Some(expected) = desired_state(&action.capability) else {
+                continue;
+            };
+            let Some(unit) = action.arguments.get("unit").and_then(Value::as_str) else {
+                continue;
+            };
+
+            match self.service.is_active(unit) {
+                Ok(observed) => {
+                    self.record_observation(unit, observed).await?;
+                    let outcome = validate(Some(expected), observed);
+                    self.publish_outcome(&context_hash, action, unit, expected, observed, outcome)
+                        .await?;
+                }
+                Err(error) => {
+                    // Fail closed: no pass is fabricated when the read fails.
+                    self.record_read_failure(action, unit, &error).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ValidationPort<'_> {
+    /// Records the re-observed active state as immutable evidence.
+    async fn record_observation(&self, unit: &str, observed: bool) -> Result<(), DecisionError> {
+        let now = Utc::now();
+        let subject =
+            ResourceId::new("service", unit).map_err(|e| DecisionError::Invalid(e.to_string()))?;
+        let observation = Observation::new(
+            Uuid::new_v4(),
+            "argusd",
+            subject,
+            "service.active",
+            ObservedValue::Bool(observed),
+            1.0,
+            Provenance::new("systemd", "is_active", now),
+            now,
+        )
+        .map_err(|e| DecisionError::Invalid(e.to_string()))?;
+        self.repository
+            .put_observation(&observation)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))
+    }
+
+    /// Publishes and persists the validation outcome, or does nothing when it is
+    /// inconclusive.
+    async fn publish_outcome(
+        &self,
+        context_hash: &str,
+        action: &Action,
+        unit: &str,
+        expected: bool,
+        observed: bool,
+        outcome: ValidationOutcome,
+    ) -> Result<(), DecisionError> {
+        let (event_type, payload) = match outcome {
+            ValidationOutcome::Passed => (
+                types::VALIDATION_PASSED,
+                serde_json::json!({
+                    "plan_id": context_hash,
+                    "capability": action.capability.as_str(),
+                    "evidence": { "unit": unit, "observed": observed, "desired": expected },
+                }),
+            ),
+            ValidationOutcome::Failed => (
+                types::VALIDATION_FAILED,
+                serde_json::json!({
+                    "plan_id": context_hash,
+                    "capability": action.capability.as_str(),
+                    "reason": format!("observed {observed}, desired {expected}"),
+                }),
+            ),
+            ValidationOutcome::Inconclusive => return Ok(()),
+        };
+        let event = DomainEvent::new(
+            Uuid::new_v4(),
+            EventType::new(event_type).map_err(|e| DecisionError::Invalid(e.to_string()))?,
+            Utc::now(),
+            "argusd",
+            "argusd",
+            Severity::Info,
+            Some(self.correlation_id),
+            None,
+            payload,
+        );
+        self.events
+            .publish(&event)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
+        // Persist the outcome too: the read-only learning pass reads repository
+        // audit events, not the bus (ADR-0031 §5).
+        self.repository
+            .put_audit_event(&event)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))
+    }
+
+    /// Records a failed live-state read as an audit event (no validation event).
+    async fn record_read_failure(
+        &self,
+        action: &Action,
+        unit: &str,
+        error: &argus_executor::ServiceError,
+    ) -> Result<(), DecisionError> {
+        let event = DomainEvent::new(
+            Uuid::new_v4(),
+            EventType::new("brain.validation.read.failed")
+                .map_err(|e| DecisionError::Invalid(e.to_string()))?,
+            Utc::now(),
+            "argusd",
+            "argusd",
+            Severity::Warning,
+            Some(self.correlation_id),
+            None,
+            serde_json::json!({
+                "capability": action.capability.as_str(),
+                "unit": unit,
+                "reason": error.to_string(),
+            }),
+        );
+        self.repository
+            .put_audit_event(&event)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))
     }
 }
 

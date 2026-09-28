@@ -32,6 +32,13 @@ pub trait DomainRepository: Send + Sync {
 
     async fn put_observation(&self, observation: &Observation) -> Result<(), RepositoryError>;
 
+    /// The observations recorded so far, in insertion order.
+    ///
+    /// The read is what lets the validator and the learning pass read persisted
+    /// evidence (ADR-0031 §3); `put_observation` alone made observations
+    /// write-only.
+    async fn list_observations(&self) -> Result<Vec<Observation>, RepositoryError>;
+
     async fn put_audit_event(&self, event: &DomainEvent) -> Result<(), RepositoryError>;
 
     /// The audit events recorded so far.
