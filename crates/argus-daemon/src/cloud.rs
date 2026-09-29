@@ -27,11 +27,13 @@ use argus_cloud::client::supervisor::{
 use argus_cloud::config::CloudConfig;
 use argus_cloud::error::CloudError;
 use argus_cloud::mapping::capability as capability_mapping;
+use argus_cloud::mapping::health as health_mapping;
+use argus_cloud::mapping::telemetry as telemetry_mapping;
 use argus_cloud::protocol::errors::PairingDenialCode;
 use argus_cloud::protocol::messages::{
     CommandInvokePayload, CommandResultPayload, CommandResultStatus, ConfigApplyPayload,
     ConfigResultPayload, ConfigResultStatus, ConfigStatePayload, ConfigurationStateEntry,
-    IngestAckPayload, SessionRotatePayload, StreamThrottlePayload,
+    HealthStateWire, IngestAckPayload, SessionRotatePayload, StreamThrottlePayload,
 };
 use argus_cloud::protocol::{Envelope, MessageType};
 use argus_cloud::state::{ConnectivityTracker, EnrolledIdentity};
@@ -45,6 +47,7 @@ use argus_domain::{
 };
 use argus_events::LocalEventBus;
 use argus_executor::{AuthorizedAction, Executor};
+use argus_observability::RuntimeMetrics;
 use argus_policy::{ApprovalStore, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError};
 
@@ -565,6 +568,10 @@ pub struct SupervisorDeps {
     pub events: Arc<LocalEventBus>,
     /// Undelivered reports; shared so IPC can surface occupancy (T048).
     pub queue: Arc<Mutex<ReportQueue>>,
+    /// The runtime's own counters (uptime, event severity counts) that feed the
+    /// periodic telemetry report. Shared so the collection step reads a live
+    /// snapshot rather than a value captured at startup.
+    pub metrics: Arc<RuntimeMetrics>,
     /// The capability surface to publish on connect (T062).
     ///
     /// A snapshot taken at startup: the bootstrap registers no plugins, so the
@@ -1053,20 +1060,26 @@ async fn rotate_session_credential(deps: &SupervisorDeps, frame: &Envelope) {
 /// Schema version reported alongside the published capability surface.
 const CAPABILITY_SCHEMA_VERSION: &str = "0.1.0";
 
-/// Publishes the capability surface, unless the cloud already holds this exact
-/// one.
+/// Publishes the capability surface once per connection session.
 ///
-/// The no-op check is by content hash, so a reconnection does not re-send a
-/// surface the cloud already has. An empty surface is still published: the cloud
-/// must be able to tell "this installation can do nothing" from "this
-/// installation has not said".
+/// The content-hash no-op check only suppresses a *second* publish within the
+/// same session (`published_this_session`), so a session never re-sends a
+/// surface spuriously. A reconnect starts a fresh session and therefore always
+/// re-publishes, even when the surface is unchanged: the cloud must refresh
+/// `published_at`/`is_current` to know this installation is still alive. The
+/// persisted record still answers "has this installation ever published / what
+/// version", but it no longer gates a reconnect. An empty surface is still
+/// published: the cloud must be able to tell "this installation can do nothing"
+/// from "this installation has not said".
 async fn publish_capabilities(
     deps: &SupervisorDeps,
     transport: &dyn Transport,
+    published_this_session: bool,
 ) -> Result<(), TransportError> {
     let descriptors = deps.capabilities.as_ref();
 
-    if let Ok(Some(previous)) = deps.repository.get_capability_publication().await
+    if published_this_session
+        && let Ok(Some(previous)) = deps.repository.get_capability_publication().await
         && previous.is_noop_for(descriptors)
     {
         return Ok(());
@@ -1593,7 +1606,13 @@ async fn run_session(
     let mut in_flight: HashMap<Uuid, BufferedReport> = HashMap::new();
     let mut ticker = tokio::time::interval(SESSION_TICK);
 
-    if let Err(error) = publish_capabilities(deps, transport).await {
+    // Publish the capability surface once per connection session. Passing
+    // `published_this_session = false` forces the first publish of a fresh
+    // session to always go through — a reconnect re-publishes an unchanged
+    // surface so the cloud refreshes `published_at`/`is_current` — while the
+    // content-hash no-op check inside `publish_capabilities` still suppresses a
+    // second publish within this same session.
+    if let Err(error) = publish_capabilities(deps, transport, false).await {
         return ConnectionOutcome::TransportFailed(error.to_string());
     }
 
@@ -1633,6 +1652,7 @@ async fn run_session(
                 collect_bus_events(deps, event_rx).await;
 
                 if schedule.telemetry_due(now) {
+                    collect_telemetry_and_health(deps, Utc::now()).await;
                     if let Err(error) = flush_reports(deps, transport, &mut in_flight).await {
                         requeue_in_flight(deps, &mut in_flight).await;
                         return ConnectionOutcome::TransportFailed(error.to_string());
@@ -1674,6 +1694,56 @@ async fn collect_bus_events(
 ) {
     let mut queue = deps.queue.lock().await;
     collect_events(event_rx, &mut queue, Utc::now());
+}
+
+/// Collects the periodic telemetry and health readings into the report queue.
+///
+/// Everything reported here is read from the installation's real state — the
+/// persisted health, the runtime's own counters, the capability surface, and the
+/// buffer occupancy — so an idle installation reports honest readings rather
+/// than a host it never measured (research R9).
+async fn collect_telemetry_and_health(deps: &SupervisorDeps, now: DateTime<Utc>) {
+    let health = deps.repository.get_health().await.ok().flatten();
+
+    let snapshot = deps.metrics.snapshot();
+    let connectivity = deps.tracker.lock().await.state();
+    let buffer = deps.queue.lock().await.stats();
+
+    let health_state = health
+        .as_ref()
+        .map(|held| health_mapping::health_state(held.state()))
+        .unwrap_or(HealthStateWire::Unknown);
+
+    let source = telemetry_mapping::TelemetrySource {
+        health_state,
+        uptime_seconds: snapshot.uptime_seconds,
+        event_counts: telemetry_mapping::EventCounts {
+            info: snapshot.info,
+            warning: snapshot.warning,
+            error: snapshot.error,
+        },
+        capability_count: deps.capabilities.len(),
+        plugin_count: 0,
+        connectivity,
+        buffered_reports: buffer.count,
+        dropped_reports: buffer.dropped_total,
+    };
+
+    let telemetry = telemetry_mapping::telemetry_report(&source, now)
+        .ok()
+        .and_then(|payload| serde_json::to_value(&payload).ok());
+    let health_report = health
+        .as_ref()
+        .map(health_mapping::health_report)
+        .and_then(|payload| serde_json::to_value(&payload).ok());
+
+    let mut queue = deps.queue.lock().await;
+    if let Some(payload) = telemetry {
+        queue.enqueue(ReportKind::Telemetry, payload, now);
+    }
+    if let Some(payload) = health_report {
+        queue.enqueue(ReportKind::Health, payload, now);
+    }
 }
 
 fn message_type_for(kind: ReportKind) -> MessageType {
@@ -2351,6 +2421,7 @@ mod tests {
             factory,
             events: Arc::new(LocalEventBus::new(16)),
             queue: Arc::new(Mutex::new(ReportQueue::new(256))),
+            metrics: Arc::new(RuntimeMetrics::new()),
             capabilities: Arc::new(Vec::new()),
             managed_settings: Arc::new(ManagedSettingsStore::new(std::env::temp_dir().join(
                 format!("argus-cloud-settings-{}.toml", uuid::Uuid::new_v4()),
@@ -2457,6 +2528,110 @@ mod tests {
         assert!(
             connection.last_exchange_at.is_some(),
             "the last exchange must survive a restart (FR-022)"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn the_cadence_enqueues_and_sends_telemetry_and_health() {
+        // Mirror Daemon::init: persist an observed health record so the report
+        // carries a real state rather than a fabricated one.
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        repository
+            .save_health(&argus_domain::HealthStatus::ready(now()))
+            .await
+            .unwrap();
+
+        let (secrets, dir) = store();
+        let tracker = Arc::new(Mutex::new(ConnectivityTracker::new()));
+        tracker
+            .lock()
+            .await
+            .transition(CloudConnectivityState::Connected);
+        let factory = Arc::new(argus_cloud::transport::fake::FakeFactory::new());
+        let deps = supervisor_deps(
+            active_config(),
+            secrets,
+            Arc::clone(&repository),
+            Arc::clone(&tracker),
+            Arc::clone(&factory),
+        );
+
+        // The collection step is what the cadence tick runs before flushing.
+        collect_telemetry_and_health(&deps, now()).await;
+
+        let mut in_flight: HashMap<Uuid, BufferedReport> = HashMap::new();
+        let transport = FakeTransport::new();
+        flush_reports(&deps, &transport, &mut in_flight)
+            .await
+            .expect("the buffered reports are delivered");
+
+        let telemetry = transport.sent_of_type(MessageType::TelemetryReport);
+        let health = transport.sent_of_type(MessageType::HealthReport);
+        assert_eq!(telemetry.len(), 1, "one telemetry report per cadence");
+        assert_eq!(health.len(), 1, "one health report per cadence");
+
+        let metrics = &telemetry[0].payload["metrics"];
+        assert_eq!(metrics["health"], "healthy");
+        assert_eq!(metrics["connectivity"], "connected");
+        assert_eq!(metrics["capabilities"], 0);
+        assert_eq!(health[0].payload["state"], "healthy");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_republishes_the_capability_surface() {
+        let (secrets, dir) = store();
+        store_identity(&secrets);
+        secrets
+            .store_session_credential(&SessionCredential::new(SESSION_TOKEN))
+            .unwrap();
+
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        repository
+            .save_cloud_enrollment(&argus_domain::CloudEnrollment::new(
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                "web-01",
+                now(),
+            ))
+            .await
+            .unwrap();
+
+        let tracker = Arc::new(Mutex::new(ConnectivityTracker::new()));
+        let factory = Arc::new(argus_cloud::transport::fake::FakeFactory::new());
+        // One script per connection. Each session ends cleanly when its frames
+        // run out, so the supervisor reconnects and consumes the second script.
+        factory.script_connection(vec![hello(), ready()]);
+        factory.script_connection(vec![hello(), ready()]);
+
+        let deps = supervisor_deps(
+            active_config(),
+            secrets,
+            Arc::clone(&repository),
+            Arc::clone(&tracker),
+            Arc::clone(&factory),
+        );
+        let (stop, stop_rx) = watch::channel(false);
+        let handle = tokio::spawn(supervise(deps, stop_rx));
+
+        // Two connect attempts mean the first session ended and a reconnect
+        // happened.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && factory.connect_attempts() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let _ = stop.send(true);
+        let _ = handle.await;
+
+        assert_eq!(factory.connect_attempts(), 2);
+        assert_eq!(
+            factory.count_sent(MessageType::CapabilitiesPublish),
+            2,
+            "the capability surface must be re-published on reconnect, so the \
+             cloud refreshes published_at / is_current"
         );
         fs::remove_dir_all(&dir).ok();
     }

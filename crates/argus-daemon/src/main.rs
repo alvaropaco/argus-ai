@@ -13,7 +13,7 @@ use argus_daemon::{Daemon, cloud::SupervisorDeps, config::DaemonConfig};
 use argus_domain::{DomainEvent, EventType, Severity};
 use argus_events::{EventBus, LocalEventBus};
 use argus_ipc::serve;
-use argus_observability::{LogFormat, init};
+use argus_observability::{LogFormat, RuntimeMetrics, init};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -94,6 +94,7 @@ fn spawn_cloud_supervisor(
         queue: Arc::new(Mutex::new(ReportQueue::new(
             config.cloud.report_buffer_max_records,
         ))),
+        metrics: Arc::new(RuntimeMetrics::new()),
         capabilities: Arc::new(daemon.registry().list().cloned().collect()),
         managed_settings: Arc::new(daemon.managed_settings().clone()),
         environment_id: daemon.environment_id(),
