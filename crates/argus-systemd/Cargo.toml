@@ -1,0 +1,17 @@
+[package]
+name = "argus-systemd"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS systemd adapter: observe unit state, failures, and restart loops over D-Bus"
+
+[dependencies]
+argus-domain = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[lints]
+workspace = true

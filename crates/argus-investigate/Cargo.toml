@@ -1,0 +1,13 @@
+[package]
+name = "argus-investigate"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS investigation engine: hypothesis-driven root-cause analysis (CAP-8/9, ADR-0034)"
+
+[dependencies]
+uuid = { workspace = true }
+
+[lints]
+workspace = true

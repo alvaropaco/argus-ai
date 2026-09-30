@@ -1,0 +1,17 @@
+[package]
+name = "argus-observe"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS observation coordinator: process inventory, lifecycle diffing, and anomaly detection"
+
+[dependencies]
+argus-domain = { workspace = true }
+argus-sensors = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

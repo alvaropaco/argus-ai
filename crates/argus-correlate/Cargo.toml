@@ -1,0 +1,15 @@
+[package]
+name = "argus-correlate"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS correlation: the operational environment graph and event-to-situation correlation"
+
+[dependencies]
+argus-domain = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

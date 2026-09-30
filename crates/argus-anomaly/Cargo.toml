@@ -1,0 +1,10 @@
+[package]
+name = "argus-anomaly"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS anomaly detection: operational baselines, deviation detection, and restart-loop detection"
+
+[lints]
+workspace = true

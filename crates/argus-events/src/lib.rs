@@ -28,4 +28,22 @@ pub mod types {
     pub const VALIDATION_PASSED: &str = "validation.passed";
     pub const VALIDATION_FAILED: &str = "validation.failed";
     pub const PROVIDER_DEGRADED: &str = "provider.degraded";
+
+    // Observation / sensor (ADR-0032)
+    pub const SENSOR_HEALTHY: &str = "sensor.healthy";
+    pub const SENSOR_DEGRADED: &str = "sensor.degraded";
+    pub const OBSERVATION_COLLECTED: &str = "observation.collected";
+
+    // Baseline (CAP-4)
+    pub const BASELINE_ESTABLISHED: &str = "baseline.established";
+    pub const BASELINE_DEVIATION: &str = "baseline.deviation";
+
+    // Process lifecycle + anomaly (CAP-2)
+    pub const PROCESS_STARTED: &str = "process.started";
+    pub const PROCESS_EXITED: &str = "process.exited";
+    pub const PROCESS_CHANGED: &str = "process.changed";
+    pub const PROCESS_ANOMALY: &str = "process.anomaly";
+
+    // Restart loop (CAP-3)
+    pub const UNIT_RESTART_LOOP: &str = "unit.restart.loop";
 }

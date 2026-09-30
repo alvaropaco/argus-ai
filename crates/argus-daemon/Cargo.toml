@@ -32,6 +32,17 @@ argus-executor = { workspace = true }
 argus-events = { workspace = true }
 argus-validate = { workspace = true }
 async-trait = { workspace = true }
+argus-sensors = { workspace = true }
+argus-observe = { workspace = true }
+argus-anomaly = { workspace = true }
+argus-systemd = { workspace = true }
+argus-container = { workspace = true }
+
+[dev-dependencies]
+argus-correlate = { workspace = true }
+argus-risk = { workspace = true }
+argus-incidents = { workspace = true }
+argus-investigate = { workspace = true }
 
 [lints]
 workspace = true

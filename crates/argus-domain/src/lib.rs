@@ -13,6 +13,7 @@ mod cloud;
 mod context;
 mod error;
 mod event;
+mod graph;
 mod health;
 mod id;
 mod mcp;
@@ -38,6 +39,7 @@ pub use cloud::{
 pub use context::{Principal, RequestContext};
 pub use error::DomainError;
 pub use event::{DomainEvent, EventType, Severity};
+pub use graph::{NodeKind, RelationshipKind};
 pub use health::{HealthState, HealthStatus};
 pub use id::{CapabilityId, EnvironmentId, ResourceId};
 pub use mcp::McpRuntime;

@@ -10,8 +10,9 @@ use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 
 use argus_daemon::{Daemon, cloud::SupervisorDeps, config::DaemonConfig};
-use argus_domain::{DomainEvent, EventType, Severity};
+use argus_domain::{DomainEvent, EventType, ResourceId, Severity};
 use argus_events::{EventBus, LocalEventBus};
+use argus_observe::{AnomalyConfig, ProcSnapshotter};
 use argus_ipc::serve;
 use argus_observability::{LogFormat, RuntimeMetrics, init};
 use chrono::Utc;
@@ -61,6 +62,7 @@ async fn main() -> Result<()> {
     );
 
     let _cloud_stop = spawn_cloud_supervisor(&daemon, &config, Arc::clone(&events));
+    spawn_observation_loop(&daemon, &events);
 
     let handler = {
         let daemon = Arc::clone(&daemon);
@@ -109,6 +111,22 @@ fn spawn_cloud_supervisor(
     };
     tokio::spawn(argus_daemon::cloud::supervise(deps, stop_rx));
     stop
+}
+
+/// Starts the continuous observation loop as an isolated task (ADR-0032).
+///
+/// Like cloud supervision, nothing here is awaited by the daemon, so an absent
+/// systemd/D-Bus or Docker socket can never delay startup or local operation.
+fn spawn_observation_loop(daemon: &Arc<Daemon>, events: &Arc<LocalEventBus>) {
+    let host = ResourceId::new("host", "local").expect("valid host resource id");
+    let observation = argus_daemon::ObservationLoop::new(
+        Arc::clone(daemon.repository()),
+        Arc::clone(events),
+        host,
+        ProcSnapshotter::new(),
+        AnomalyConfig::default(),
+    );
+    tokio::spawn(observation.run());
 }
 
 fn event(event_type: &str, severity: Severity, payload: serde_json::Value) -> DomainEvent {

@@ -1,0 +1,16 @@
+[package]
+name = "argus-risk"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS risk engine: advisory, typed risk signals (never an authorization mechanism)"
+
+[dependencies]
+argus-anomaly = { workspace = true }
+argus-domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

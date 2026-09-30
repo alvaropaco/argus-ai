@@ -15,6 +15,15 @@ members = [
     "crates/argus-install",
     "crates/argus-cloud",
     "crates/argus-validate",
+    "crates/argus-sensors",
+    "crates/argus-observe",
+    "crates/argus-anomaly",
+    "crates/argus-systemd",
+    "crates/argus-container",
+    "crates/argus-correlate",
+    "crates/argus-risk",
+    "crates/argus-incidents",
+    "crates/argus-investigate",
 ]
 
 [workspace.package]
@@ -54,6 +63,15 @@ argus-ai-tui = { version = "0.1.10", path = "crates/argus-ai-tui" }
 argus-install = { version = "0.1.10", path = "crates/argus-install" }
 argus-cloud = { version = "0.1.10", path = "crates/argus-cloud" }
 argus-validate = { version = "0.1.10", path = "crates/argus-validate" }
+argus-sensors = { version = "0.1.10", path = "crates/argus-sensors" }
+argus-observe = { version = "0.1.10", path = "crates/argus-observe" }
+argus-anomaly = { version = "0.1.10", path = "crates/argus-anomaly" }
+argus-systemd = { version = "0.1.10", path = "crates/argus-systemd" }
+argus-container = { version = "0.1.10", path = "crates/argus-container" }
+argus-correlate = { version = "0.1.10", path = "crates/argus-correlate" }
+argus-risk = { version = "0.1.10", path = "crates/argus-risk" }
+argus-incidents = { version = "0.1.10", path = "crates/argus-incidents" }
+argus-investigate = { version = "0.1.10", path = "crates/argus-investigate" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -7,6 +7,7 @@ pub mod cloud;
 pub mod config;
 pub mod control;
 pub mod handler;
+pub mod observe;
 pub mod privileged;
 pub mod runtime;
 
@@ -15,5 +16,6 @@ pub use cloud::{
     SessionCredential,
 };
 pub use config::DaemonConfig;
+pub use observe::{BaselineManager, ObservationLoop};
 pub use privileged::{PrivilegedError, PrivilegedLimiter};
 pub use runtime::{Daemon, DiagnoseContext, DispatchError, InMemoryDedup, diagnose_with};
