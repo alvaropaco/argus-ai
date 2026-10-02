@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use argus_domain::{ObservedValue, Observation, Provenance, ResourceId};
+use argus_domain::{Observation, ObservedValue, Provenance, ResourceId};
 
 use crate::inventory::ProcessRecord;
 
@@ -29,34 +29,119 @@ impl ObservationEmitter {
         &self.host
     }
 
-    pub fn memory(&self, now: DateTime<Utc>, mem: &argus_sensors::meminfo::MemInfo) -> Vec<Observation> {
+    pub fn memory(
+        &self,
+        now: DateTime<Utc>,
+        mem: &argus_sensors::meminfo::MemInfo,
+    ) -> Vec<Observation> {
         vec![
-            number(&self.host, "memory.total_kib", mem.mem_total as f64, "procfs", "read_meminfo", now),
-            number(&self.host, "memory.available_kib", mem.mem_available as f64, "procfs", "read_meminfo", now),
-            number(&self.host, "memory.swap_total_kib", mem.swap_total as f64, "procfs", "read_meminfo", now),
+            number(
+                &self.host,
+                "memory.total_kib",
+                mem.mem_total as f64,
+                "procfs",
+                "read_meminfo",
+                now,
+            ),
+            number(
+                &self.host,
+                "memory.available_kib",
+                mem.mem_available as f64,
+                "procfs",
+                "read_meminfo",
+                now,
+            ),
+            number(
+                &self.host,
+                "memory.swap_total_kib",
+                mem.swap_total as f64,
+                "procfs",
+                "read_meminfo",
+                now,
+            ),
         ]
     }
 
-    pub fn load(&self, now: DateTime<Utc>, load: &argus_sensors::loadavg::LoadAverage) -> Vec<Observation> {
+    pub fn load(
+        &self,
+        now: DateTime<Utc>,
+        load: &argus_sensors::loadavg::LoadAverage,
+    ) -> Vec<Observation> {
         vec![
-            number(&self.host, "load.1m", load.load1, "procfs", "read_loadavg", now),
-            number(&self.host, "load.5m", load.load5, "procfs", "read_loadavg", now),
-            number(&self.host, "load.15m", load.load15, "procfs", "read_loadavg", now),
+            number(
+                &self.host,
+                "load.1m",
+                load.load1,
+                "procfs",
+                "read_loadavg",
+                now,
+            ),
+            number(
+                &self.host,
+                "load.5m",
+                load.load5,
+                "procfs",
+                "read_loadavg",
+                now,
+            ),
+            number(
+                &self.host,
+                "load.15m",
+                load.load15,
+                "procfs",
+                "read_loadavg",
+                now,
+            ),
         ]
     }
 
     pub fn cpu(&self, now: DateTime<Utc>, cpu: &argus_sensors::stat::CpuTimes) -> Vec<Observation> {
         vec![
-            number(&self.host, "cpu.user_ticks", cpu.user as f64, "procfs", "read_stat", now),
-            number(&self.host, "cpu.system_ticks", cpu.system as f64, "procfs", "read_stat", now),
-            number(&self.host, "cpu.idle_ticks", cpu.idle as f64, "procfs", "read_stat", now),
+            number(
+                &self.host,
+                "cpu.user_ticks",
+                cpu.user as f64,
+                "procfs",
+                "read_stat",
+                now,
+            ),
+            number(
+                &self.host,
+                "cpu.system_ticks",
+                cpu.system as f64,
+                "procfs",
+                "read_stat",
+                now,
+            ),
+            number(
+                &self.host,
+                "cpu.idle_ticks",
+                cpu.idle as f64,
+                "procfs",
+                "read_stat",
+                now,
+            ),
         ]
     }
 
     pub fn vm(&self, now: DateTime<Utc>, vm: &argus_sensors::vmstat::VmStat) -> Vec<Observation> {
         vec![
-            number(&self.host, "vm.oom_kill", vm.oom_kill as f64, "procfs", "read_vmstat", now),
-            number(&self.host, "vm.pgmajfault", vm.pgmajfault as f64, "procfs", "read_vmstat", now),
+            number(
+                &self.host,
+                "vm.oom_kill",
+                vm.oom_kill as f64,
+                "procfs",
+                "read_vmstat",
+                now,
+            ),
+            number(
+                &self.host,
+                "vm.pgmajfault",
+                vm.pgmajfault as f64,
+                "procfs",
+                "read_vmstat",
+                now,
+            ),
         ]
     }
 
@@ -66,22 +151,78 @@ impl ObservationEmitter {
         let subject = ResourceId::new("process", &rec.pid.to_string())
             .expect("a numeric pid is a valid resource identifier");
         vec![
-            text(&subject, "process.state", &rec.state, "procfs", "read_status", now),
-            number(&subject, "process.rss_kib", rec.vm_rss_kib as f64, "procfs", "read_status", now),
-            number(&subject, "process.cpu_ticks", (rec.utime + rec.stime) as f64, "procfs", "read_stat", now),
+            text(
+                &subject,
+                "process.state",
+                &rec.state,
+                "procfs",
+                "read_status",
+                now,
+            ),
+            number(
+                &subject,
+                "process.rss_kib",
+                rec.vm_rss_kib as f64,
+                "procfs",
+                "read_status",
+                now,
+            ),
+            number(
+                &subject,
+                "process.cpu_ticks",
+                (rec.utime + rec.stime) as f64,
+                "procfs",
+                "read_stat",
+                now,
+            ),
         ]
     }
 }
 
-fn number(subject: &ResourceId, attribute: &str, value: f64, src: &str, method: &str, now: DateTime<Utc>) -> Observation {
-    emit(subject, attribute, ObservedValue::Number(value), src, method, now)
+fn number(
+    subject: &ResourceId,
+    attribute: &str,
+    value: f64,
+    src: &str,
+    method: &str,
+    now: DateTime<Utc>,
+) -> Observation {
+    emit(
+        subject,
+        attribute,
+        ObservedValue::Number(value),
+        src,
+        method,
+        now,
+    )
 }
 
-fn text(subject: &ResourceId, attribute: &str, value: &str, src: &str, method: &str, now: DateTime<Utc>) -> Observation {
-    emit(subject, attribute, ObservedValue::Text(value.to_string()), src, method, now)
+fn text(
+    subject: &ResourceId,
+    attribute: &str,
+    value: &str,
+    src: &str,
+    method: &str,
+    now: DateTime<Utc>,
+) -> Observation {
+    emit(
+        subject,
+        attribute,
+        ObservedValue::Text(value.to_string()),
+        src,
+        method,
+        now,
+    )
 }
 
-fn emit(subject: &ResourceId, attribute: &str, value: ObservedValue, src: &str, method: &str, now: DateTime<Utc>) -> Observation {
+fn emit(
+    subject: &ResourceId,
+    attribute: &str,
+    value: ObservedValue,
+    src: &str,
+    method: &str,
+    now: DateTime<Utc>,
+) -> Observation {
     Observation::new(
         Uuid::new_v4(),
         "argusd",
@@ -129,8 +270,14 @@ mod tests {
             assert_eq!(o.subject().kind(), "host");
             assert_eq!(o.source(), "argusd");
         }
-        assert_eq!(value(&obs, "memory.total_kib"), &ObservedValue::Number(16_384_000.0));
-        assert_eq!(value(&obs, "memory.available_kib"), &ObservedValue::Number(10_240_000.0));
+        assert_eq!(
+            value(&obs, "memory.total_kib"),
+            &ObservedValue::Number(16_384_000.0)
+        );
+        assert_eq!(
+            value(&obs, "memory.available_kib"),
+            &ObservedValue::Number(10_240_000.0)
+        );
     }
 
     #[test]
@@ -182,8 +329,17 @@ mod tests {
             assert_eq!(o.subject().kind(), "process");
             assert_eq!(o.subject().identifier(), "1234");
         }
-        assert_eq!(value(&obs, "process.state"), &ObservedValue::Text("S".to_string()));
-        assert_eq!(value(&obs, "process.rss_kib"), &ObservedValue::Number(12_345.0));
-        assert_eq!(value(&obs, "process.cpu_ticks"), &ObservedValue::Number(150.0));
+        assert_eq!(
+            value(&obs, "process.state"),
+            &ObservedValue::Text("S".to_string())
+        );
+        assert_eq!(
+            value(&obs, "process.rss_kib"),
+            &ObservedValue::Number(12_345.0)
+        );
+        assert_eq!(
+            value(&obs, "process.cpu_ticks"),
+            &ObservedValue::Number(150.0)
+        );
     }
 }

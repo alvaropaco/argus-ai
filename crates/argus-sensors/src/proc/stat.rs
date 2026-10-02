@@ -26,7 +26,13 @@ impl CpuTimes {
 
     /// Total accounted time across all fields.
     pub fn total(&self) -> u64 {
-        self.user + self.nice + self.system + self.idle + self.iowait + self.irq + self.softirq
+        self.user
+            + self.nice
+            + self.system
+            + self.idle
+            + self.iowait
+            + self.irq
+            + self.softirq
             + self.steal
     }
 
@@ -86,7 +92,10 @@ fn required_tick(name: &'static str, fields: &[&str], i: usize) -> Result<u64, S
 }
 
 fn optional_tick(fields: &[&str], i: usize) -> u64 {
-    fields.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+    fields
+        .get(i)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 /// Read `/proc/stat`.
@@ -147,7 +156,10 @@ procs_blocked 0
     fn rejects_input_without_aggregate_cpu_line() {
         assert!(matches!(
             parse("intr 1\nctxt 2\n"),
-            Err(SensorError::Parse { name: "host.cpu", .. })
+            Err(SensorError::Parse {
+                name: "host.cpu",
+                ..
+            })
         ));
     }
 

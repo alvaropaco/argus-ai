@@ -158,8 +158,20 @@ mod tests {
     #[test]
     fn repeated_observations_deduplicate() {
         let mut m = IncidentManager::new();
-        let (a, created_a) = m.open("service:checkout-api", Severity::Warning, vec![], "sensor", now());
-        let (b, created_b) = m.open("service:checkout-api", Severity::Warning, vec![], "sensor", now());
+        let (a, created_a) = m.open(
+            "service:checkout-api",
+            Severity::Warning,
+            vec![],
+            "sensor",
+            now(),
+        );
+        let (b, created_b) = m.open(
+            "service:checkout-api",
+            Severity::Warning,
+            vec![],
+            "sensor",
+            now(),
+        );
         assert!(created_a);
         assert!(!created_b);
         assert_eq!(a, b);
@@ -188,7 +200,13 @@ mod tests {
     #[test]
     fn valid_lifecycle_advances() {
         let mut m = IncidentManager::new();
-        let (id, _) = m.open("service:a", Severity::Error, vec![rid("service", "a")], "s", now());
+        let (id, _) = m.open(
+            "service:a",
+            Severity::Error,
+            vec![rid("service", "a")],
+            "s",
+            now(),
+        );
         m.transition(id, IncidentStatus::Investigating).unwrap();
         m.transition(id, IncidentStatus::Mitigated).unwrap();
         m.transition(id, IncidentStatus::Resolved).unwrap();

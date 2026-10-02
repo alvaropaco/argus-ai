@@ -104,7 +104,12 @@ impl Correlator {
     /// Close a situation, moving it out of the open set. Later events with the
     /// same key start a new situation.
     pub fn close(&mut self, id: Uuid) -> Option<Situation> {
-        let key = self.open.values().find(|s| s.id == id)?.correlation_key.clone();
+        let key = self
+            .open
+            .values()
+            .find(|s| s.id == id)?
+            .correlation_key
+            .clone();
         let situation = self.open.remove(&key)?;
         self.closed.push(situation.clone());
         Some(situation)

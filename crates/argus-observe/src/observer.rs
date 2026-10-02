@@ -5,10 +5,10 @@
 //! (periodic tick + event publishing) is the daemon's job; this coordinator is
 //! synchronous and deterministic so it is testable without a host or a model.
 
-use crate::anomaly::{detect_lifecycle_anomalies, detect_runaway, AnomalyConfig, ProcessAnomaly};
-use crate::inventory::{diff, LifecycleChange, ProcessInventory};
-use crate::snapshot::ProcSnapshotter;
 use crate::ObserveError;
+use crate::anomaly::{AnomalyConfig, ProcessAnomaly, detect_lifecycle_anomalies, detect_runaway};
+use crate::inventory::{LifecycleChange, ProcessInventory, diff};
+use crate::snapshot::ProcSnapshotter;
 
 /// The result of one observation tick.
 #[derive(Debug, Clone)]
@@ -94,17 +94,18 @@ mod tests {
     fn write_pid(root: &Path, pid: u32) {
         let dir = root.join(pid.to_string());
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("status"), STATUS.replace("__PID__", &pid.to_string())).unwrap();
+        std::fs::write(
+            dir.join("status"),
+            STATUS.replace("__PID__", &pid.to_string()),
+        )
+        .unwrap();
     }
 
     #[test]
     fn first_tick_has_no_changes() {
         let root = unique_root();
         write_pid(&root, 1234);
-        let mut obs = Observer::new(
-            ProcSnapshotter::with_root(&root),
-            AnomalyConfig::default(),
-        );
+        let mut obs = Observer::new(ProcSnapshotter::with_root(&root), AnomalyConfig::default());
         let out = obs.tick().unwrap();
         assert_eq!(out.inventory.len(), 1);
         assert!(out.changes.is_empty());
@@ -116,10 +117,7 @@ mod tests {
     fn detects_processes_started_between_ticks() {
         let root = unique_root();
         write_pid(&root, 1234);
-        let mut obs = Observer::new(
-            ProcSnapshotter::with_root(&root),
-            AnomalyConfig::default(),
-        );
+        let mut obs = Observer::new(ProcSnapshotter::with_root(&root), AnomalyConfig::default());
         obs.tick().unwrap();
 
         write_pid(&root, 5678);
@@ -141,10 +139,7 @@ mod tests {
         let root = unique_root();
         write_pid(&root, 1234);
         write_pid(&root, 5678);
-        let mut obs = Observer::new(
-            ProcSnapshotter::with_root(&root),
-            AnomalyConfig::default(),
-        );
+        let mut obs = Observer::new(ProcSnapshotter::with_root(&root), AnomalyConfig::default());
         obs.tick().unwrap();
 
         std::fs::remove_dir_all(root.join("5678")).unwrap();

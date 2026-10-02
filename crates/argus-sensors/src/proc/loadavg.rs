@@ -30,10 +30,12 @@ pub fn parse(input: &str) -> Result<LoadAverage, SensorError> {
         });
     }
 
-    let (running, total) = tokens[3].split_once('/').ok_or_else(|| SensorError::Parse {
-        name: NAME,
-        message: format!("invalid threads field `{}`", tokens[3]),
-    })?;
+    let (running, total) = tokens[3]
+        .split_once('/')
+        .ok_or_else(|| SensorError::Parse {
+            name: NAME,
+            message: format!("invalid threads field `{}`", tokens[3]),
+        })?;
 
     Ok(LoadAverage {
         load1: parse_f64(NAME, tokens[0])?,
@@ -104,7 +106,10 @@ mod tests {
     fn rejects_too_few_fields() {
         assert!(matches!(
             parse("0.12 0.31 0.46"),
-            Err(SensorError::Parse { name: "host.loadavg", .. })
+            Err(SensorError::Parse {
+                name: "host.loadavg",
+                ..
+            })
         ));
     }
 

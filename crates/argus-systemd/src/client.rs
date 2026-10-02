@@ -5,10 +5,10 @@
 //! [`SystemdClient::connect`] returns [`SystemdError::Unavailable`] and the
 //! daemon degrades gracefully.
 
-use zbus::{proxy, zvariant::OwnedObjectPath, Connection};
+use zbus::{Connection, proxy, zvariant::OwnedObjectPath};
 
-use crate::model::SystemdUnit;
 use crate::SystemdError;
+use crate::model::SystemdUnit;
 
 /// The `org.freedesktop.systemd1.Manager` subset ARGUS uses.
 #[proxy(
@@ -95,18 +95,19 @@ mod tests {
 
     #[test]
     fn normalize_maps_the_list_units_tuple() {
-        let path = OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/nginx_2eservice").unwrap();
+        let path =
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/nginx_2eservice").unwrap();
         let tuple = (
-            "nginx.service".to_string(),     // name
+            "nginx.service".to_string(),                 // name
             "A high performance web server".to_string(), // description
-            "loaded".to_string(),            // load_state
-            "active".to_string(),            // active_state
-            "running".to_string(),           // sub_state
-            String::new(),                   // following
-            path.clone(),                    // unit_path
-            0,                               // job_id
-            String::new(),                   // job_type
-            OwnedObjectPath::try_from("/").unwrap(), // job_path
+            "loaded".to_string(),                        // load_state
+            "active".to_string(),                        // active_state
+            "running".to_string(),                       // sub_state
+            String::new(),                               // following
+            path.clone(),                                // unit_path
+            0,                                           // job_id
+            String::new(),                               // job_type
+            OwnedObjectPath::try_from("/").unwrap(),     // job_path
         );
 
         let unit = normalize(tuple);

@@ -8,8 +8,8 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use crate::model::{parse_containers, Container};
 use crate::ContainerError;
+use crate::model::{Container, parse_containers};
 
 /// Default Docker socket path (Docker Desktop on macOS and dockerd on Linux).
 pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
@@ -47,7 +47,8 @@ impl DockerClient {
             .await
             .map_err(|e| ContainerError::Unavailable(format!("{}: {e}", self.socket_path)))?;
 
-        let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .await
@@ -76,9 +77,9 @@ impl Default for DockerClient {
 
 /// Split an HTTP/1.1 response into its status code and body.
 fn parse_http_response(response: &str) -> Result<(&str, &str), ContainerError> {
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| ContainerError::Parse("response has no header/body separator".to_string()))?;
+    let (head, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
+        ContainerError::Parse("response has no header/body separator".to_string())
+    })?;
     let status = head
         .split_whitespace()
         .nth(1)
@@ -92,7 +93,8 @@ mod tests {
 
     #[test]
     fn splits_status_and_body() {
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n[]\n";
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n[]\n";
         let (status, body) = parse_http_response(response).unwrap();
         assert_eq!(status, "200");
         assert_eq!(body, "[]\n");

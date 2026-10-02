@@ -13,15 +13,17 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use argus_anomaly::{detect_deviation, detect_restart_loops, Baseline, DeviationConfig, RestartLoop, UnitState};
-use argus_container::{container_observations, DockerClient};
+use argus_anomaly::{
+    Baseline, DeviationConfig, RestartLoop, UnitState, detect_deviation, detect_restart_loops,
+};
+use argus_container::{DockerClient, container_observations};
 use argus_domain::{DomainEvent, EventType, Observation, ResourceId, Severity};
 use argus_events::{EventBus, LocalEventBus};
 use argus_observe::{
-    AnomalyConfig, LifecycleChange, ObservationEmitter, Observer, ProcessAnomaly, ProcSnapshotter,
+    AnomalyConfig, LifecycleChange, ObservationEmitter, Observer, ProcSnapshotter, ProcessAnomaly,
 };
 use argus_state::DomainRepository;
-use argus_systemd::{unit_observations, SystemdClient};
+use argus_systemd::{SystemdClient, unit_observations};
 
 /// Default interval between observation ticks.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
@@ -304,7 +306,9 @@ impl ObservationLoop {
 
     async fn tick_systemd(&mut self, now: DateTime<Utc>) {
         let Some(client) = &self.systemd else { return };
-        let Ok(units) = client.list_units().await else { return };
+        let Ok(units) = client.list_units().await else {
+            return;
+        };
 
         let mut observations = Vec::new();
         let mut events = Vec::new();
@@ -325,7 +329,9 @@ impl ObservationLoop {
 
     async fn tick_docker(&mut self, now: DateTime<Utc>) {
         let Some(client) = &self.docker else { return };
-        let Ok(containers) = client.list_containers().await else { return };
+        let Ok(containers) = client.list_containers().await else {
+            return;
+        };
 
         let mut observations = Vec::new();
         let mut current: HashMap<String, UnitState> = HashMap::new();
@@ -364,7 +370,10 @@ impl ObservationLoop {
                 .map_err(|e| e.to_string())?;
         }
         for event in events {
-            self.events.publish(event).await.map_err(|e| e.to_string())?;
+            self.events
+                .publish(event)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }

@@ -16,7 +16,7 @@ mod model;
 
 pub use client::DockerClient;
 pub use convert::container_observations;
-pub use model::{parse_containers, Container};
+pub use model::{Container, parse_containers};
 
 /// Adapter error. `Unavailable` means the Docker socket is not reachable, which
 /// the daemon treats as graceful degradation rather than a failure.

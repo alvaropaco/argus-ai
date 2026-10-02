@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::inventory::{ProcessInventory, ProcessRecord};
 use crate::ObserveError;
+use crate::inventory::{ProcessInventory, ProcessRecord};
 
 /// Reads a live process inventory from a `/proc`-shaped directory tree.
 #[derive(Debug, Clone)]
@@ -107,7 +107,8 @@ mod tests {
     fn fixture_root() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("argus-observe-test-{}-{n}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("argus-observe-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(root.join("1234")).unwrap();
         std::fs::create_dir_all(root.join("5678")).unwrap();
         std::fs::create_dir_all(root.join("not-a-pid")).unwrap();

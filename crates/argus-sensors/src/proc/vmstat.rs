@@ -116,7 +116,10 @@ nr_free_pages 50000
     fn empty_input_is_a_parse_error() {
         assert!(matches!(
             parse(""),
-            Err(SensorError::Parse { name: "host.vmstat", .. })
+            Err(SensorError::Parse {
+                name: "host.vmstat",
+                ..
+            })
         ));
     }
 }

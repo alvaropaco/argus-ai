@@ -121,10 +121,8 @@ mod tests {
     fn skips_short_lines() {
         // A truncated line (major/minor/name only) is ignored while a valid line
         // on the same input is still parsed.
-        let disks = parse(
-            "   8       0 sda\n   8       0 sda 1 2 3 4 5 6 7 8 9 10 11 12 13\n",
-        )
-        .unwrap();
+        let disks =
+            parse("   8       0 sda\n   8       0 sda 1 2 3 4 5 6 7 8 9 10 11 12 13\n").unwrap();
         assert_eq!(disks.len(), 1);
         assert_eq!(disks[0].name, "sda");
     }
@@ -133,7 +131,10 @@ mod tests {
     fn empty_input_is_a_parse_error() {
         assert!(matches!(
             parse(""),
-            Err(SensorError::Parse { name: "host.diskstats", .. })
+            Err(SensorError::Parse {
+                name: "host.diskstats",
+                ..
+            })
         ));
     }
 }

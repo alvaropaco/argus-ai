@@ -14,6 +14,6 @@ mod multisignal;
 mod restart;
 
 pub use baseline::Baseline;
-pub use deviation::{detect_deviation, Deviation, DeviationConfig, DeviationKind};
-pub use multisignal::{detect_multi_signal, MultiSignalAnomaly, MultiSignalConfig};
-pub use restart::{detect_restart_loops, RestartLoop, UnitState};
+pub use deviation::{Deviation, DeviationConfig, DeviationKind, detect_deviation};
+pub use multisignal::{MultiSignalAnomaly, MultiSignalConfig, detect_multi_signal};
+pub use restart::{RestartLoop, UnitState, detect_restart_loops};

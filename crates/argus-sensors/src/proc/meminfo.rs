@@ -147,7 +147,10 @@ SwapFree:        2048000 kB
     fn empty_input_is_a_parse_error() {
         assert!(matches!(
             parse(""),
-            Err(SensorError::Parse { name: "host.meminfo", .. })
+            Err(SensorError::Parse {
+                name: "host.meminfo",
+                ..
+            })
         ));
     }
 }

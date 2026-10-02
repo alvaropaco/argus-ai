@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use argus_domain::{ObservedValue, Observation, Provenance, ResourceId};
+use argus_domain::{Observation, ObservedValue, Provenance, ResourceId};
 
 use crate::model::SystemdUnit;
 
@@ -61,9 +61,15 @@ mod tests {
             assert_eq!(o.subject().kind(), "service");
             assert_eq!(o.subject().identifier(), "nginx.service");
         }
-        let active = obs.iter().find(|o| o.attribute() == "service.active").unwrap();
+        let active = obs
+            .iter()
+            .find(|o| o.attribute() == "service.active")
+            .unwrap();
         assert_eq!(active.value(), &ObservedValue::Bool(false));
-        let failed = obs.iter().find(|o| o.attribute() == "service.failed").unwrap();
+        let failed = obs
+            .iter()
+            .find(|o| o.attribute() == "service.failed")
+            .unwrap();
         assert_eq!(failed.value(), &ObservedValue::Bool(true));
     }
 }

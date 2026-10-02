@@ -7,14 +7,14 @@
 
 use std::sync::Arc;
 
-use argus_anomaly::{detect_multi_signal, Deviation, DeviationKind, MultiSignalConfig};
+use argus_anomaly::{Deviation, DeviationKind, MultiSignalConfig, detect_multi_signal};
 use argus_correlate::{CorrelatedEvent, Correlator};
 use argus_domain::{ResourceId, Severity};
 use argus_incidents::IncidentManager;
 use argus_investigate::{
     Evidence, Hypothesis, HypothesisGenerator, HypothesisStatus, InvestigationEngine,
 };
-use argus_risk::{multi_signal_risk, RiskKind};
+use argus_risk::{RiskKind, multi_signal_risk};
 use chrono::{Duration, TimeZone, Utc};
 use uuid::Uuid;
 
@@ -97,8 +97,7 @@ fn checkout_api_scenario_produces_the_deployment_root_cause() {
     let (incident_id, created) =
         incidents.open(key, Severity::Error, vec![subject.clone()], "anomaly", t0());
     assert!(created);
-    let (dedup_id, dedup_created) =
-        incidents.open(key, Severity::Error, vec![], "anomaly", t0());
+    let (dedup_id, dedup_created) = incidents.open(key, Severity::Error, vec![], "anomaly", t0());
     assert!(!dedup_created);
     assert_eq!(incident_id, dedup_id);
 
@@ -112,7 +111,8 @@ fn checkout_api_scenario_produces_the_deployment_root_cause() {
     let engine = InvestigationEngine::new(generator);
     let evidence = vec![
         Evidence {
-            description: "deployment revision 184 occurred 11 minutes before the incident".to_string(),
+            description: "deployment revision 184 occurred 11 minutes before the incident"
+                .to_string(),
             supports: vec!["deployment introduced a retry-loop change".to_string()],
             contradicts: vec!["database failure".to_string()],
         },
@@ -144,5 +144,8 @@ fn checkout_api_scenario_produces_the_deployment_root_cause() {
     assert_eq!(db.status, HypothesisStatus::Eliminated);
     // The remediation is a *candidate capability id* — data, not an executed
     // action. No executor exists anywhere in the M2 crates by construction.
-    assert_eq!(investigation.remediation, vec!["host.service.restart".to_string()]);
+    assert_eq!(
+        investigation.remediation,
+        vec!["host.service.restart".to_string()]
+    );
 }

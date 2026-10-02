@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use argus_domain::{ObservedValue, Observation, Provenance, ResourceId};
+use argus_domain::{Observation, ObservedValue, Provenance, ResourceId};
 
 use crate::model::Container;
 
@@ -38,7 +38,12 @@ fn text_obs(subject: &ResourceId, attribute: &str, value: &str, now: DateTime<Ut
     .expect("confidence 1.0 is valid")
 }
 
-fn number_obs(subject: &ResourceId, attribute: &str, value: f64, now: DateTime<Utc>) -> Observation {
+fn number_obs(
+    subject: &ResourceId,
+    attribute: &str,
+    value: f64,
+    now: DateTime<Utc>,
+) -> Observation {
     Observation::new(
         Uuid::new_v4(),
         "argusd",
@@ -88,9 +93,15 @@ mod tests {
             assert_eq!(o.subject().kind(), "container");
             assert_eq!(o.subject().identifier(), "8dfafdbc3a40");
         }
-        let state = obs.iter().find(|o| o.attribute() == "container.state").unwrap();
+        let state = obs
+            .iter()
+            .find(|o| o.attribute() == "container.state")
+            .unwrap();
         assert_eq!(state.value(), &ObservedValue::Text("running".to_string()));
-        let restarts = obs.iter().find(|o| o.attribute() == "container.restart_count").unwrap();
+        let restarts = obs
+            .iter()
+            .find(|o| o.attribute() == "container.restart_count")
+            .unwrap();
         assert_eq!(restarts.value(), &ObservedValue::Number(12.0));
     }
 }

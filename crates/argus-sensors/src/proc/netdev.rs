@@ -40,7 +40,12 @@ pub fn parse(input: &str) -> Result<Vec<NetDevLine>, SensorError> {
         if fields.len() < 16 {
             continue;
         }
-        let u = |i: usize| fields.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let u = |i: usize| {
+            fields
+                .get(i)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
         out.push(NetDevLine {
             name: iface.to_string(),
             rx_bytes: u(0),
@@ -133,7 +138,10 @@ Inter-|   Receive                                                |  Transmit
     fn empty_input_is_a_parse_error() {
         assert!(matches!(
             parse(""),
-            Err(SensorError::Parse { name: "host.network", .. })
+            Err(SensorError::Parse {
+                name: "host.network",
+                ..
+            })
         ));
     }
 }

@@ -59,7 +59,10 @@ pub fn detect_deviation(
         });
     }
 
-    if let Some(z) = baseline.z_score(value).filter(|z| z.abs() >= cfg.z_threshold) {
+    if let Some(z) = baseline
+        .z_score(value)
+        .filter(|z| z.abs() >= cfg.z_threshold)
+    {
         return Some(Deviation {
             signal: signal.to_string(),
             value,

@@ -195,7 +195,10 @@ CapBnd:	0000003fffffffff
     fn empty_input_is_a_parse_error() {
         assert!(matches!(
             parse(""),
-            Err(SensorError::Parse { name: "process.status", .. })
+            Err(SensorError::Parse {
+                name: "process.status",
+                ..
+            })
         ));
     }
 
@@ -212,7 +215,8 @@ CapBnd:	0000003fffffffff
 
     #[test]
     fn stat_comm_may_contain_spaces_and_parens() {
-        let s = parse_stat("42 (a (b) c) S 1 0 0 0 -1 0 0 0 0 0 11 12 0 0 20 0 1 0 777 0 0 0 0 0").unwrap();
+        let s = parse_stat("42 (a (b) c) S 1 0 0 0 -1 0 0 0 0 0 11 12 0 0 20 0 1 0 777 0 0 0 0 0")
+            .unwrap();
         assert_eq!(s.utime, 11);
         assert_eq!(s.stime, 12);
         assert_eq!(s.start_ticks, 777);
@@ -225,13 +229,23 @@ CapBnd:	0000003fffffffff
 
     #[test]
     fn parses_null_separated_cmdline() {
-        assert_eq!(parse_cmdline("nginx\0-master\0process\0"), vec!["nginx", "-master", "process"]);
+        assert_eq!(
+            parse_cmdline("nginx\0-master\0process\0"),
+            vec!["nginx", "-master", "process"]
+        );
         assert_eq!(parse_cmdline(""), Vec::<String>::new());
     }
 
     #[test]
     fn parses_cgroup_lines() {
-        let c = parse_cgroup("0::/user.slice/user-1000.slice/session.scope\n12:cpuset:/docker/abc\n");
-        assert_eq!(c, vec!["0::/user.slice/user-1000.slice/session.scope", "12:cpuset:/docker/abc"]);
+        let c =
+            parse_cgroup("0::/user.slice/user-1000.slice/session.scope\n12:cpuset:/docker/abc\n");
+        assert_eq!(
+            c,
+            vec![
+                "0::/user.slice/user-1000.slice/session.scope",
+                "12:cpuset:/docker/abc"
+            ]
+        );
     }
 }

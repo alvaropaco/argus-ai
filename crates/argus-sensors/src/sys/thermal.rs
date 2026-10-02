@@ -75,7 +75,8 @@ mod tests {
     fn fixture_root() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("argus-thermal-test-{}-{n}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("argus-thermal-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(root.join("thermal_zone0")).unwrap();
         std::fs::create_dir_all(root.join("thermal_zone1")).unwrap();
         std::fs::create_dir_all(root.join("cooling_device0")).unwrap();

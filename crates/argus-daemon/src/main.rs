@@ -12,9 +12,9 @@ use tokio::sync::{Mutex, watch};
 use argus_daemon::{Daemon, cloud::SupervisorDeps, config::DaemonConfig};
 use argus_domain::{DomainEvent, EventType, ResourceId, Severity};
 use argus_events::{EventBus, LocalEventBus};
-use argus_observe::{AnomalyConfig, ProcSnapshotter};
 use argus_ipc::serve;
 use argus_observability::{LogFormat, RuntimeMetrics, init};
+use argus_observe::{AnomalyConfig, ProcSnapshotter};
 use chrono::Utc;
 use uuid::Uuid;
 

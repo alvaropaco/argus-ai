@@ -110,9 +110,24 @@ macro_rules! pressure_sensor {
     };
 }
 
-pressure_sensor!(CpuPressureSensor, "host.pressure.cpu", "/proc/pressure/cpu", read_cpu);
-pressure_sensor!(MemoryPressureSensor, "host.pressure.memory", "/proc/pressure/memory", read_memory);
-pressure_sensor!(IoPressureSensor, "host.pressure.io", "/proc/pressure/io", read_io);
+pressure_sensor!(
+    CpuPressureSensor,
+    "host.pressure.cpu",
+    "/proc/pressure/cpu",
+    read_cpu
+);
+pressure_sensor!(
+    MemoryPressureSensor,
+    "host.pressure.memory",
+    "/proc/pressure/memory",
+    read_memory
+);
+pressure_sensor!(
+    IoPressureSensor,
+    "host.pressure.io",
+    "/proc/pressure/io",
+    read_io
+);
 
 #[cfg(test)]
 mod tests {
@@ -151,7 +166,10 @@ some avg10=0.00 avg60=0.00 avg300=0.00 total=0
     fn empty_input_is_a_parse_error() {
         assert!(matches!(
             parse(""),
-            Err(SensorError::Parse { name: "host.pressure", .. })
+            Err(SensorError::Parse {
+                name: "host.pressure",
+                ..
+            })
         ));
     }
 }

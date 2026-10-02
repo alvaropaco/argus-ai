@@ -70,9 +70,20 @@ pub enum Field {
 /// A lifecycle change between two ticks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleChange {
-    Started { pid: u32, name: String, ppid: u32 },
-    Exited { pid: u32, name: String },
-    Changed { pid: u32, name: String, fields: Vec<Field> },
+    Started {
+        pid: u32,
+        name: String,
+        ppid: u32,
+    },
+    Exited {
+        pid: u32,
+        name: String,
+    },
+    Changed {
+        pid: u32,
+        name: String,
+        fields: Vec<Field>,
+    },
 }
 
 /// Diff two snapshots into lifecycle changes.

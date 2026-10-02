@@ -20,11 +20,7 @@ pub struct CgroupSnapshot {
 /// Parse `memory.max`: `"max"` → `None`, otherwise the byte value.
 pub fn parse_memory_max(input: &str) -> Option<u64> {
     let s = input.trim();
-    if s == "max" {
-        None
-    } else {
-        s.parse().ok()
-    }
+    if s == "max" { None } else { s.parse().ok() }
 }
 
 /// Extract the `oom_kill` counter from `memory.events`.
@@ -75,7 +71,8 @@ impl CgroupV2Reader {
     pub fn snapshot(&self) -> CgroupSnapshot {
         CgroupSnapshot {
             memory_current_bytes: read_u64(&self.root.join("memory.current")).unwrap_or(0),
-            memory_max_bytes: read_str(&self.root.join("memory.max")).and_then(|s| parse_memory_max(&s)),
+            memory_max_bytes: read_str(&self.root.join("memory.max"))
+                .and_then(|s| parse_memory_max(&s)),
             oom_kill: read_str(&self.root.join("memory.events"))
                 .map(|s| parse_memory_events(&s))
                 .unwrap_or(0),
@@ -129,11 +126,16 @@ mod tests {
     fn fixture_root() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("argus-cgroup-test-{}-{n}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("argus-cgroup-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("memory.current"), "1073741824\n").unwrap();
         std::fs::write(root.join("memory.max"), "8589934592\n").unwrap();
-        std::fs::write(root.join("memory.events"), "low 0\nhigh 0\nmax 0\noom 3\noom_kill 3\n").unwrap();
+        std::fs::write(
+            root.join("memory.events"),
+            "low 0\nhigh 0\nmax 0\noom 3\noom_kill 3\n",
+        )
+        .unwrap();
         std::fs::write(root.join("cpu.stat"), "usage_usec 123456789\n").unwrap();
         root
     }

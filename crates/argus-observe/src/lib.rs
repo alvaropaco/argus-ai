@@ -16,10 +16,10 @@ mod observer;
 mod snapshot;
 
 pub use anomaly::{
-    detect_lifecycle_anomalies, detect_runaway, AnomalyConfig, ProcessAnomaly, ProcessAnomalyKind,
+    AnomalyConfig, ProcessAnomaly, ProcessAnomalyKind, detect_lifecycle_anomalies, detect_runaway,
 };
 pub use convert::ObservationEmitter;
-pub use inventory::{diff, Field, LifecycleChange, ProcessInventory, ProcessRecord};
+pub use inventory::{Field, LifecycleChange, ProcessInventory, ProcessRecord, diff};
 pub use observer::{Observer, TickOutput};
 pub use snapshot::ProcSnapshotter;
 
