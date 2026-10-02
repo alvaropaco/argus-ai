@@ -22,31 +22,39 @@
 | M5 | CAP-11, CAP-18 | FR-012..013 |
 | M6 | CAP-16..24 | FR-018..025 |
 
+> **Status note (2026-10-02).** Checkbox state reconciled against git history:
+> Milestones 1–2 (T001–T018) were implemented and committed in `1bbb676`
+> ("feat(brain): autonomous operations brain") but left unchecked here; they
+> are now marked. Milestones 3–6 (T019–T035) are not started — verified in
+> code (`argus-kubernetes`, `argus-memory`, `argus-runbooks`, `argus-reporting`
+> do not exist; no autopilot governance in `argus-policy`; `host.process.signal`
+> remains a future capability in `argus-executor`).
+
 ## Tasks
 
 ### Phase 1 — Milestone 1: Environment Intelligence (CAP-1..4)
 
-- [ ] T001 [P0] Confirm ADRs 0032 and constitutional invariants (kernel-native, graceful degradation)
-- [ ] T002 [P0] Add graph/situation/baseline/risk/prediction/change/runbook typed entities + `AutonomyMode` L0–L5 to `crates/argus-domain` (data-model.md §1–§7)
-- [ ] T003 [P1] Create `crates/argus-sensors` with the `Sensor` trait and `/proc` readers: `meminfo`, `loadavg`, `vmstat`, `stat` (cpu), `pressure` (PSI)
-- [ ] T004 [P1] Add `crates/argus-sensors` readers for `/sys` (block devices, thermal) and cgroup v2 (current/stat)
-- [ ] T005 [P0] Unit-test sensors against `/proc`-tree fixtures (no live host required)
-- [ ] T006 [P1] Create `crates/argus-observe` with the observation coordinator (periodic + event-driven schedule, per-sensor degradation)
-- [ ] T007 [P1] Implement the live process inventory in `argus-observe` (PID/PPID/user/exe/cmdline/hash/cpu/mem/threads/fds/sockets/ports/caps/namespaces/cgroup/container/unit/start/lifecycle) with lifecycle diffing
-- [ ] T008 [P1] Implement process anomaly detection (unexpected listener/binaries, explosions, churn, runaway) as evidence-backed anomaly events
-- [ ] T009 [P1] Create `crates/argus-systemd` (zbus) and `crates/argus-container` (runtime adapters) for service + container monitoring (state, failures, restart loops, restart counts)
-- [ ] T010 [P1] Implement baseline generation + deviation detection (static rules + historical + multi-signal) in `crates/argus-anomaly`
-- [ ] T011 [P0] Emit observation/sensor/baseline events per `contracts/events.md` in `crates/argus-events`
-- [ ] T012 [P1] Integration tests: observation loop, process-inventory diff, baseline deviation (deterministic, fake decision engine)
-- [ ] T013 [P0] Security tests: no arbitrary command execution; readers hold no privileges
+- [X T001 [P0] Confirm ADRs 0032 and constitutional invariants (kernel-native, graceful degradation)
+- [X T002 [P0] Add graph/situation/baseline/risk/prediction/change/runbook typed entities + `AutonomyMode` L0–L5 to `crates/argus-domain` (data-model.md §1–§7)
+- [X T003 [P1] Create `crates/argus-sensors` with the `Sensor` trait and `/proc` readers: `meminfo`, `loadavg`, `vmstat`, `stat` (cpu), `pressure` (PSI)
+- [X T004 [P1] Add `crates/argus-sensors` readers for `/sys` (block devices, thermal) and cgroup v2 (current/stat)
+- [X T005 [P0] Unit-test sensors against `/proc`-tree fixtures (no live host required)
+- [X T006 [P1] Create `crates/argus-observe` with the observation coordinator (periodic + event-driven schedule, per-sensor degradation)
+- [X T007 [P1] Implement the live process inventory in `argus-observe` (PID/PPID/user/exe/cmdline/hash/cpu/mem/threads/fds/sockets/ports/caps/namespaces/cgroup/container/unit/start/lifecycle) with lifecycle diffing
+- [X T008 [P1] Implement process anomaly detection (unexpected listener/binaries, explosions, churn, runaway) as evidence-backed anomaly events
+- [X T009 [P1] Create `crates/argus-systemd` (zbus) and `crates/argus-container` (runtime adapters) for service + container monitoring (state, failures, restart loops, restart counts)
+- [X T010 [P1] Implement baseline generation + deviation detection (static rules + historical + multi-signal) in `crates/argus-anomaly`
+- [X T011 [P0] Emit observation/sensor/baseline events per `contracts/events.md` in `crates/argus-events`
+- [X T012 [P1] Integration tests: observation loop, process-inventory diff, baseline deviation (deterministic, fake decision engine)
+- [X T013 [P0] Security tests: no arbitrary command execution; readers hold no privileges
 
 ### Phase 2 — Milestone 2: Operational Brain (CAP-5..10)
 
-- [ ] T014 [P1] Create `crates/argus-correlate`: typed environment graph (nodes/edges) + event→situation correlation
-- [ ] T015 [P1] Add anomaly detection (multi-signal) to `argus-anomaly`; create `crates/argus-risk` (advisory risk signals)
-- [ ] T016 [P1] Create `crates/argus-incidents`: incident lifecycle (open→investigating→mitigated→resolved→closed) with deduplication
-- [ ] T017 [P1] Create `crates/argus-investigate`: investigation state machine + RCA (hypothesis generation via DecisionEngine; deterministic testing/elimination)
-- [ ] T018 [P0] Security tests: risk signals and investigation output never authorize; no model→command path
+- [X T014 [P1] Create `crates/argus-correlate`: typed environment graph (nodes/edges) + event→situation correlation
+- [X T015 [P1] Add anomaly detection (multi-signal) to `argus-anomaly`; create `crates/argus-risk` (advisory risk signals)
+- [X T016 [P1] Create `crates/argus-incidents`: incident lifecycle (open→investigating→mitigated→resolved→closed) with deduplication
+- [X T017 [P1] Create `crates/argus-investigate`: investigation state machine + RCA (hypothesis generation via DecisionEngine; deterministic testing/elimination)
+- [X T018 [P0] Security tests: risk signals and investigation output never authorize; no model→command path
 
 ### Phase 3 — Milestone 3: Autonomous Remediation (CAP-14 host, CAP-15)
 

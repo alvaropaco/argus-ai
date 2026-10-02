@@ -34,7 +34,7 @@ The spec expresses requirements as FRs; the mapping to implementation increments
 - [X] T003 Add native `DecisionQuestion` (`Choice | Score | Noul`) and `DecisionAnswer` types in `crates/argus-ai-core/src/decision/types.rs`; enforce "2–50 criteria" and "Score levels ordered lowest→highest" (data-model.md §1)
 - [X] T004 Add the `DecisionProvider` trait (`Send + Sync`) in `crates/argus-ai-core/src/decision/provider.rs`
 - [X] T005 [P] Add domain entities `Intent`, `Hypothesis`, `Plan`, `Action`, `Execution`, `AutonomyMode` in `crates/argus-domain/src/reasoning.rs` with fields and transitions from data-model.md §2–§3
-- [ ] T006 [P] Add `credential_ref` to the decision-provider config and extend the `0600` secret store read path (reuse `argus.secrets.toml`) in `crates/argus-ai-tui/src/setup.rs`
+- [X T006 [P] Add `credential_ref` to the decision-provider config and extend the `0600` secret store read path (reuse `argus.secrets.toml`) in `crates/argus-ai-tui/src/setup.rs`
 
 ### Phase 3 — US1: Structured decision foundation
 
@@ -62,17 +62,17 @@ The spec expresses requirements as FRs; the mapping to implementation increments
 ### Phase 6 — US4: Audit, observability, degradation
 
 - [X] T021 [US4] Add `hypothesis.*`/`plan.*`/`action.*`/`validation.*`/`provider.degraded` events per `contracts/events.md` in `crates/argus-events/src/lib.rs`
-- [ ] T022 [US4] Persist hypotheses/plans/executions/audit behind `DomainRepository` (SQLite interim) in `crates/argus-state/src/repository.rs`
-- [ ] T023 [US4] Add decision-provider health + `degraded` status (FR-009) in `crates/argus-daemon/src/runtime.rs`
-- [ ] T024 [US4] Add tracing spans + correlation IDs across `decide → plan → policy → execute` in `crates/argus-daemon/src/control.rs`
+- [X T022 [US4] Persist hypotheses/plans/executions/audit behind `DomainRepository` (SQLite interim) in `crates/argus-state/src/repository.rs`
+- [X T023 [US4] Add decision-provider health + `degraded` status (FR-009) in `crates/argus-daemon/src/runtime.rs`
+- [X T024 [US4] Add tracing spans + correlation IDs across `decide → plan → policy → execute` in `crates/argus-daemon/src/control.rs`
 - [X] T025 [US4] Failure/recovery tests (provider unreachable, invalid output, execution failure, validation failure) in `crates/argus-daemon/tests/failure.rs`
 
 ### Phase 7 — Polish & cross-cutting
 
 - [X] T026 Decision-authoring eval harness with fixed fixtures (research.md §7) in `crates/argus-ai-core/tests/decision_eval.rs`
-- [ ] T027 Expose plan/approval/audit IPC operations in `crates/argus-ipc/src/lib.rs`
-- [ ] T028 [P] Add plans/approvals/audit views to the TUI in `crates/argus-ai-tui/src/app.rs`
-- [ ] T029 Run and document the validation scenarios end-to-end in `specs/002-ai-runtime/quickstart.md`
+- [X T027 Expose plan/approval/audit IPC operations in `crates/argus-ipc/src/lib.rs`
+- [X T028 [P] Add plans/approvals/audit views to the TUI in `crates/argus-ai-tui/src/app.rs`
+- [X T029 Run and document the validation scenarios end-to-end in `specs/002-ai-runtime/quickstart.md`
 
 ## Dependencies
 
@@ -109,5 +109,5 @@ Phase 1 (Setup) → Phase 2 (Foundational) → US1 → US2 → US3 → US4 → P
 - [X] No unauthorized privilege expansion (US3 tasks)
 - [X] Domain model remains infrastructure-agnostic (data-model.md)
 - [X] Tests pass (`cargo test --workspace`)
-- [ ] Telemetry present (T024 — deferred)
+- [X] Telemetry present (T024)
 - [X] Rollback/failure behavior documented (T025, quickstart.md Scenario 6–8)
