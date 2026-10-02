@@ -22,14 +22,18 @@ enum View {
     Capabilities,
     Plugins,
     Config,
+    Plans,
+    Audit,
 }
 
-const VIEWS: [(&str, &str); 5] = [
+const VIEWS: [(&str, &str); 7] = [
     ("1", "Overview"),
     ("2", "Health"),
     ("3", "Capabilities"),
     ("4", "Plugins"),
     ("5", "Config"),
+    ("6", "Plans"),
+    ("7", "Audit"),
 ];
 
 pub fn run(data: Data) -> Result<()> {
@@ -52,6 +56,8 @@ pub fn run(data: Data) -> Result<()> {
                 KeyCode::Char('3') => view = View::Capabilities,
                 KeyCode::Char('4') => view = View::Plugins,
                 KeyCode::Char('5') => view = View::Config,
+                KeyCode::Char('6') => view = View::Plans,
+                KeyCode::Char('7') => view = View::Audit,
                 KeyCode::Tab | KeyCode::Right => view = next_view(view),
                 KeyCode::Left => view = previous_view(view),
                 _ => {}
@@ -70,17 +76,21 @@ fn next_view(view: View) -> View {
         View::Health => View::Capabilities,
         View::Capabilities => View::Plugins,
         View::Plugins => View::Config,
-        View::Config => View::Overview,
+        View::Config => View::Plans,
+        View::Plans => View::Audit,
+        View::Audit => View::Overview,
     }
 }
 
 fn previous_view(view: View) -> View {
     match view {
-        View::Overview => View::Config,
+        View::Overview => View::Audit,
         View::Health => View::Overview,
         View::Capabilities => View::Health,
         View::Plugins => View::Capabilities,
         View::Config => View::Plugins,
+        View::Plans => View::Config,
+        View::Audit => View::Plans,
     }
 }
 
@@ -163,6 +173,8 @@ fn label_for(view: View) -> &'static str {
         View::Capabilities => "Capabilities",
         View::Plugins => "Plugins",
         View::Config => "Config",
+        View::Plans => "Plans",
+        View::Audit => "Audit",
     }
 }
 
@@ -173,6 +185,8 @@ fn draw_content(f: &mut Frame, area: Rect, data: &Data, view: View) {
         View::Capabilities => draw_json_card(f, area, "Capabilities", &data.capabilities),
         View::Plugins => draw_json_card(f, area, "Plugins", &data.plugins),
         View::Config => draw_json_card(f, area, "Configuration", &data.config),
+        View::Plans => draw_plans(f, area, data),
+        View::Audit => draw_json_card(f, area, "Audit trail", &data.audit),
     }
 }
 
@@ -285,7 +299,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(Color::DarkGray));
     let help = vec![
         Line::from(vec![
-            Span::styled("1–5", Style::default().fg(Color::Yellow)),
+            Span::styled("1–7", Style::default().fg(Color::Yellow)),
             Span::raw(" switch views"),
         ]),
         Line::from(vec![
@@ -317,6 +331,112 @@ fn draw_json_card(f: &mut Frame, area: Rect, title: &str, value: &serde_json::Va
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// The plans view: plans paused awaiting an operator decision on top, the
+/// recorded plan history below. Execution happens only through the policy +
+/// executor boundary, so a pending approval here is the one gate a plan can
+/// stop at (ADR-0030 §2).
+fn draw_plans(f: &mut Frame, area: Rect, data: &Data) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Min(0)])
+        .split(area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Awaiting approval ")
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(rows[0]);
+    f.render_widget(block, rows[0]);
+    let pending = data.approvals.as_array().cloned().unwrap_or_default();
+    let items: Vec<ListItem> = if pending.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "No plans are paused awaiting approval.",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        pending
+            .iter()
+            .map(|approval| {
+                let token = approval
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let objective = approval
+                    .get("objective")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let steps = approval
+                    .get("step_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{token} "), Style::default().fg(Color::Yellow)),
+                    Span::raw(format!("{objective} ")),
+                    Span::styled(
+                        format!("({steps} step{})", if steps == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    f.render_widget(List::new(items), inner);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Plan history ")
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(rows[1]);
+    f.render_widget(block, rows[1]);
+    let plans = data.plans.as_array().cloned().unwrap_or_default();
+    let items: Vec<ListItem> = if plans.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "No plans have been recorded yet.",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        plans
+            .iter()
+            .rev()
+            .map(|plan| {
+                let correlation = plan
+                    .get("correlation_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let objective = plan
+                    .get("objective")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let status = plan.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let confidence = plan
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let status_style = match status {
+                    "completed" => Style::default().fg(Color::Green),
+                    "failed" | "rolled_back" | "needs_manual" => Style::default().fg(Color::Red),
+                    "denied" => Style::default().fg(Color::Yellow),
+                    _ => Style::default().fg(Color::Cyan),
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", &correlation[..correlation.len().min(8)]),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(format!("{objective} ")),
+                    Span::styled(status.to_string(), status_style),
+                    Span::styled(
+                        format!("  confidence {confidence:.2}"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    f.render_widget(List::new(items), inner);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {

@@ -55,6 +55,8 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
         Operation::ApprovalList => return approval_list(daemon, request),
         Operation::ApprovalGrant => return approval_grant(daemon, &principal, request),
         Operation::ApprovalDeny => return approval_deny(daemon, &principal, request),
+        Operation::PlanList => return plan_list(daemon, request).await,
+        Operation::AuditList => return audit_list(daemon, request).await,
     };
 
     Response::ok(request.correlation_id, result)
@@ -169,6 +171,68 @@ fn approval_deny(daemon: &Daemon, principal: &Principal, request: Request) -> Re
             serde_json::json!({ "token": token.to_string(), "state": "denied" }),
         ),
         Err(error) => Response::err(request.correlation_id, ErrorCode::Denied, error.to_string()),
+    }
+}
+
+/// Lists the recorded plans with their correlation ids (FR-008): the
+/// reasoning history an operator reviews alongside the audit trail.
+async fn plan_list(daemon: &Daemon, request: Request) -> Response {
+    match daemon.list_plans().await {
+        Ok(plans) => {
+            let plans = plans
+                .into_iter()
+                .map(|(id, plan)| {
+                    serde_json::json!({
+                        "correlation_id": id.to_string(),
+                        "objective": plan.objective,
+                        "status": plan.status,
+                        "confidence": plan.confidence,
+                        "step_count": plan.steps.len(),
+                        "steps": plan.steps.iter().map(|step| {
+                            serde_json::json!({
+                                "capability": step.action.capability.as_str(),
+                                "rollback": step.rollback.as_ref().map(|r| r.capability.as_str()),
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Response::ok(request.correlation_id, serde_json::json!(plans))
+        }
+        Err(error) => Response::err(
+            request.correlation_id,
+            ErrorCode::Internal,
+            error.to_string(),
+        ),
+    }
+}
+
+/// Lists the append-only audit trail (FR-008).
+async fn audit_list(daemon: &Daemon, request: Request) -> Response {
+    match daemon.list_audit_events().await {
+        Ok(events) => {
+            let events = events
+                .iter()
+                .map(|event| {
+                    serde_json::json!({
+                        "id": event.id().to_string(),
+                        "event_type": event.event_type().as_str(),
+                        "timestamp": event.timestamp().to_rfc3339(),
+                        "source": event.source(),
+                        "subject": event.subject(),
+                        "severity": event.severity(),
+                        "correlation_id": event.correlation_id().map(|id| id.to_string()),
+                        "payload": event.payload(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Response::ok(request.correlation_id, serde_json::json!(events))
+        }
+        Err(error) => Response::err(
+            request.correlation_id,
+            ErrorCode::Internal,
+            error.to_string(),
+        ),
     }
 }
 

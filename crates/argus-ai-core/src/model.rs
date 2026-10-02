@@ -10,6 +10,11 @@ pub struct ModelProviderConfig {
     pub fallback_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Where the provider credential lives — a pointer into the `0600` secret
+    /// store (e.g. `argus.secrets.toml`), never the credential itself (FR-010).
+    /// Secrets are kept out of the main configuration by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,9 +119,31 @@ mod tests {
             model: "gpt-5.6".into(),
             fallback_models: vec!["deepseek/deepseek-flash".into()],
             base_url: Some("http://localhost:4000".into()),
+            credential_ref: Some("argus.secrets.toml".into()),
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ModelProviderConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn config_without_credential_ref_stays_secret_free() {
+        // A configuration without a credential must serialize without any
+        // credential-shaped field, and an old file without `credential_ref`
+        // still deserializes (FR-010).
+        let config = ModelProviderConfig {
+            provider: "openai".into(),
+            model: "gpt-5.6".into(),
+            ..ModelProviderConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("token"),
+            "no secret material in config: {json}"
+        );
+        assert!(!json.contains("credential_ref"));
+
+        let back: ModelProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.credential_ref, None);
     }
 }

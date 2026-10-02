@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 use argus_domain::{
     AppliedConfigurationState, CapabilityPublication, CloudCommand, CloudConnection,
-    CloudEnrollment, DomainEvent, EnvironmentId, ExecutionApproval, ExecutionDecision,
-    HealthStatus, ManagedConfiguration, Observation, ReportBuffer,
+    CloudEnrollment, DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision,
+    HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer,
 };
 use async_trait::async_trait;
 use rusqlite::Connection;
@@ -32,6 +32,18 @@ CREATE TABLE IF NOT EXISTS observations (
     data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_events (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reasoning_hypotheses (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reasoning_plans (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reasoning_executions (
     id   TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
@@ -195,6 +207,26 @@ impl SqliteRepository {
         })
     }
 
+    /// Like [`Self::list_json`], but returns `(rowid-key, data)` pairs ordered by
+    /// insertion, so reasoning history reads back in the order it was recorded.
+    fn list_json_ordered(&self, table: &str) -> Result<Vec<(Uuid, String)>, RepositoryError> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare(&format!("SELECT id, data FROM {table} ORDER BY rowid ASC"))?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, data) = row?;
+                let id = Uuid::parse_str(&id)
+                    .map_err(|e| RepositoryError::Corrupt(format!("invalid id: {e}")))?;
+                out.push((id, data));
+            }
+            Ok(out)
+        })
+    }
+
     fn delete_all(&self, table: &str) -> Result<(), RepositoryError> {
         self.with_conn(|conn| {
             conn.execute(&format!("DELETE FROM {table}"), [])?;
@@ -280,6 +312,46 @@ impl DomainRepository for SqliteRepository {
         self.list_json("audit_events")?
             .iter()
             .map(|data| Self::decode(data))
+            .collect()
+    }
+
+    async fn put_hypothesis(
+        &self,
+        id: Uuid,
+        hypothesis: &Hypothesis,
+    ) -> Result<(), RepositoryError> {
+        let data = Self::encode(hypothesis)?;
+        self.put_json("reasoning_hypotheses", &id.to_string(), &data)
+    }
+
+    async fn list_hypotheses(&self) -> Result<Vec<(Uuid, Hypothesis)>, RepositoryError> {
+        self.list_json_ordered("reasoning_hypotheses")?
+            .into_iter()
+            .map(|(id, data)| Self::decode(&data).map(|h| (id, h)))
+            .collect()
+    }
+
+    async fn put_plan(&self, id: Uuid, plan: &Plan) -> Result<(), RepositoryError> {
+        let data = Self::encode(plan)?;
+        self.put_json("reasoning_plans", &id.to_string(), &data)
+    }
+
+    async fn list_plans(&self) -> Result<Vec<(Uuid, Plan)>, RepositoryError> {
+        self.list_json_ordered("reasoning_plans")?
+            .into_iter()
+            .map(|(id, data)| Self::decode(&data).map(|p| (id, p)))
+            .collect()
+    }
+
+    async fn put_execution(&self, id: Uuid, execution: &Execution) -> Result<(), RepositoryError> {
+        let data = Self::encode(execution)?;
+        self.put_json("reasoning_executions", &id.to_string(), &data)
+    }
+
+    async fn list_executions(&self) -> Result<Vec<(Uuid, Execution)>, RepositoryError> {
+        self.list_json_ordered("reasoning_executions")?
+            .into_iter()
+            .map(|(id, data)| Self::decode(&data).map(|e| (id, e)))
             .collect()
     }
 
@@ -862,5 +934,84 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("cloud state"), "{text}");
         assert!(text.contains("get_cloud_enrollment"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn reasoning_artifacts_round_trip_in_insertion_order() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        assert!(repo.list_plans().await.unwrap().is_empty());
+        assert!(repo.list_hypotheses().await.unwrap().is_empty());
+        assert!(repo.list_executions().await.unwrap().is_empty());
+
+        let first_id = uuid::Uuid::new_v4();
+        repo.put_plan(first_id, &sample_plan("restore nginx", 0.9))
+            .await
+            .unwrap();
+        let second_id = uuid::Uuid::new_v4();
+        repo.put_plan(second_id, &sample_plan("restore postgres", 0.7))
+            .await
+            .unwrap();
+
+        let plans = repo.list_plans().await.unwrap();
+        assert_eq!(plans.len(), 2, "both plans are stored");
+        assert_eq!(plans[0].0, first_id);
+        assert_eq!(plans[0].1.objective, "restore nginx");
+        assert_eq!(plans[1].0, second_id);
+
+        let hypothesis = argus_domain::Hypothesis {
+            statement: "nginx stopped".into(),
+            confidence: 0.9,
+            supporting_evidence: vec![],
+            status: argus_domain::HypothesisStatus::Confirmed,
+        };
+        repo.put_hypothesis(first_id, &hypothesis).await.unwrap();
+        let hypotheses = repo.list_hypotheses().await.unwrap();
+        assert_eq!(hypotheses, vec![(first_id, hypothesis)]);
+
+        let execution = argus_domain::Execution {
+            action: plan_steps_action(),
+            status: argus_domain::ExecutionStatus::Completed,
+            evidence: serde_json::json!({ "unit": "nginx.service" }),
+        };
+        repo.put_execution(first_id, &execution).await.unwrap();
+        let executions = repo.list_executions().await.unwrap();
+        assert_eq!(executions, vec![(first_id, execution)]);
+    }
+
+    #[tokio::test]
+    async fn re_recording_a_correlation_id_replaces_its_reasoning_artifact() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        let id = uuid::Uuid::new_v4();
+        repo.put_plan(id, &sample_plan("first", 0.5)).await.unwrap();
+        repo.put_plan(id, &sample_plan("second", 0.8))
+            .await
+            .unwrap();
+
+        let plans = repo.list_plans().await.unwrap();
+        assert_eq!(plans.len(), 1, "one row per correlation id");
+        assert_eq!(plans[0].1.objective, "second");
+    }
+
+    fn sample_plan(objective: &str, confidence: f64) -> Plan {
+        Plan {
+            objective: objective.into(),
+            steps: vec![argus_domain::PlanStep {
+                action: plan_steps_action(),
+                rollback: None,
+            }],
+            preconditions: vec![],
+            expected_outcomes: vec![],
+            blast_radius: BlastRadius::Host,
+            confidence,
+            status: argus_domain::PlanStatus::Proposed,
+        }
+    }
+
+    fn plan_steps_action() -> argus_domain::Action {
+        argus_domain::Action {
+            capability: CapabilityId::new("host.service.restart").unwrap(),
+            resource: None,
+            arguments: serde_json::json!({ "unit": "nginx.service" }),
+        }
     }
 }

@@ -201,6 +201,16 @@ async fn run_plan(
     resume: Option<Vec<usize>>,
 ) -> PlanRun {
     let correlation = Uuid::new_v4();
+    // AC-006: every reasoning, decision, execution, and validation step carries
+    // the correlation id, so a plan run reads back as one trace.
+    tracing::info!(
+        correlation_id = %correlation,
+        objective = %plan.objective,
+        steps = plan.steps.len(),
+        resumed = resume.is_some(),
+        autonomy = ?autonomy,
+        "plan run started"
+    );
     let _ = events
         .publish(&event(
             types::PLAN_PROPOSED,
@@ -257,6 +267,12 @@ async fn run_plan(
 
         match policy.evaluate(&authz).outcome {
             PolicyOutcome::Deny => {
+                tracing::info!(
+                    correlation_id = %correlation,
+                    capability = action.capability.as_str(),
+                    step = index,
+                    "policy denied the step"
+                );
                 outcome.denied.push(action.capability.clone());
                 let _ = events
                     .publish(&event(
@@ -268,8 +284,18 @@ async fn run_plan(
                     .await;
             }
             PolicyOutcome::RequireApproval => {
+                tracing::info!(
+                    correlation_id = %correlation,
+                    capability = action.capability.as_str(),
+                    step = index,
+                    "policy requires approval for the step"
+                );
                 if !resumed {
                     // First run: pause, executing nothing further.
+                    tracing::info!(
+                        correlation_id = %correlation,
+                        "plan paused awaiting operator approval"
+                    );
                     let token = Uuid::new_v4();
                     let context_hash = plan_context_hash(plan);
                     let mut paused = plan.clone();
@@ -309,6 +335,13 @@ async fn run_plan(
     } else {
         PlanStatus::Completed
     };
+    tracing::info!(
+        correlation_id = %correlation,
+        status = ?outcome.status,
+        executed = outcome.executions.len(),
+        denied = outcome.denied.len(),
+        "plan run finished"
+    );
     PlanRun::Finished(outcome)
 }
 
@@ -356,6 +389,12 @@ async fn execute_allowed_step(
         }
         Ok(false) => match execute_action(action, env.service) {
             Ok(evidence) => {
+                tracing::info!(
+                    correlation_id = %env.correlation,
+                    capability = action.capability.as_str(),
+                    step = index,
+                    "step executed"
+                );
                 let _ = env
                     .events
                     .publish(&event(
@@ -377,6 +416,13 @@ async fn execute_allowed_step(
                 false
             }
             Err(err) => {
+                tracing::warn!(
+                    correlation_id = %env.correlation,
+                    capability = action.capability.as_str(),
+                    step = index,
+                    error = %err,
+                    "step failed; rolling back executed steps"
+                );
                 record_failure(outcome, action, err, env.events, env.correlation).await;
                 rollback_executed(
                     outcome,
@@ -393,6 +439,13 @@ async fn execute_allowed_step(
         Err(err) => {
             // A live-state read failure is fail-closed: acting on an unknown
             // desired state is refused.
+            tracing::warn!(
+                correlation_id = %env.correlation,
+                capability = action.capability.as_str(),
+                step = index,
+                error = %err,
+                "desired-state read failed; fail-closed"
+            );
             record_failure(outcome, action, err, env.events, env.correlation).await;
             rollback_executed(
                 outcome,
@@ -454,6 +507,11 @@ async fn rollback_executed(
     }
 
     outcome.status = PlanStatus::RollingBack;
+    tracing::warn!(
+        correlation_id = %correlation,
+        steps = executed.len(),
+        "rolling back executed steps"
+    );
     let _ = events
         .publish(&event(
             types::PLAN_ROLLING_BACK,
@@ -512,6 +570,10 @@ async fn rollback_executed(
     }
 
     outcome.status = PlanStatus::RolledBack;
+    tracing::info!(
+        correlation_id = %correlation,
+        "rollback completed; plan rolled back"
+    );
     let _ = events
         .publish(&event(
             types::PLAN_ROLLED_BACK,

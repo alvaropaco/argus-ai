@@ -251,11 +251,22 @@ fn parse_list(raw: &str) -> Vec<String> {
 }
 
 fn save(state: &SetupState) -> Result<()> {
-    let content = toml::to_string(&state.config).context("serialize config")?;
-    std::fs::write(OUTPUT_PATH, content).with_context(|| format!("write {OUTPUT_PATH}"))?;
+    let mut config = state.config.clone();
     if !state.api_token.is_empty() {
+        // The credential is written first and referenced by path: `argus.toml`
+        // records only where the credential lives, never its value (FR-010).
         write_secrets(&state.api_token)?;
+        // Verify the store round-trips before the config points at it: the
+        // read path enforces the 0600 mode, so this also proves the file was
+        // not written world-readable.
+        let stored = read_provider_secret(SECRETS_PATH)?;
+        if stored != state.api_token {
+            anyhow::bail!("the secret store did not retain the credential verbatim");
+        }
+        config.model.credential_ref = Some(SECRETS_PATH.to_string());
     }
+    let content = toml::to_string(&config).context("serialize config")?;
+    std::fs::write(OUTPUT_PATH, content).with_context(|| format!("write {OUTPUT_PATH}"))?;
     Ok(())
 }
 
@@ -272,6 +283,33 @@ fn write_secrets(api_token: &str) -> Result<()> {
             .with_context(|| format!("chmod 0600 {SECRETS_PATH}"))?;
     }
     Ok(())
+}
+
+/// Reads the provider credential back from the `0600` secret store written by
+/// the setup wizard. The read is the counterpart of [`write_secrets`] and
+/// shares its file layout, so the secret never travels inside `argus.toml`
+/// (FR-010).
+///
+/// Fails closed when the file's permissions are looser than `0600` on Unix: a
+/// readable-by-others secret file is refused rather than returned.
+pub fn read_provider_secret(path: &str) -> Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .with_context(|| format!("stat {path}"))?
+            .permissions()
+            .mode();
+        if mode & 0o777 != 0o600 {
+            anyhow::bail!(
+                "{path} must have 0600 permissions, found {:o}; refusing to read the credential",
+                mode & 0o777
+            );
+        }
+    }
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+    let secrets: SecretsFile = toml::from_str(&raw).context("parse secrets file")?;
+    Ok(secrets.api_token)
 }
 
 fn draw(f: &mut Frame, state: &SetupState) {
@@ -633,5 +671,57 @@ mod tests {
             parse_list("gpt-4.1-mini, llama3.1 , "),
             vec!["gpt-4.1-mini", "llama3.1"]
         );
+    }
+
+    #[test]
+    fn saved_config_references_the_secret_without_carries_it() {
+        // `save` must leave the credential out of argus.toml: the token lives
+        // in the 0600 secrets file and the config records only the pointer.
+        let dir = std::env::temp_dir().join(format!("argus-setup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        let state = SetupState {
+            config: SetupConfig::default(),
+            api_token: "sk-test-token".into(),
+            step: Step::Review,
+            field: 0,
+            provider_index: 0,
+            message: None,
+        };
+        let saved = save(&state);
+
+        std::env::set_current_dir(prev).unwrap();
+        saved.unwrap();
+
+        let config = std::fs::read_to_string(dir.join(OUTPUT_PATH)).unwrap();
+        assert!(config.contains("credential_ref"), "the pointer is recorded");
+        assert!(
+            !config.contains("sk-test-token"),
+            "the token never reaches argus.toml"
+        );
+
+        let secret = read_provider_secret(dir.join(SECRETS_PATH).to_str().unwrap()).unwrap();
+        assert_eq!(secret, "sk-test-token");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_file_without_0600_permissions_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("argus-setup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SECRETS_PATH);
+        std::fs::write(&path, "api_token = \"sk-x\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = read_provider_secret(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("0600"),
+            "the refusal names the required mode: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

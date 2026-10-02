@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// The protocol version spoken by this implementation.
 ///
 /// Adding an operation is a MINOR bump; removing or renaming one is MAJOR.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 4, 0);
+pub const PROTOCOL_VERSION: Version = Version::new(0, 5, 0);
 
 /// A typed IPC operation id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,6 +28,8 @@ pub enum Operation {
     ApprovalList,
     ApprovalGrant,
     ApprovalDeny,
+    PlanList,
+    AuditList,
 }
 
 impl Operation {
@@ -45,6 +47,8 @@ impl Operation {
             Operation::ApprovalList => "approval.list",
             Operation::ApprovalGrant => "approval.grant",
             Operation::ApprovalDeny => "approval.deny",
+            Operation::PlanList => "plan.list",
+            Operation::AuditList => "audit.list",
         }
     }
 }
@@ -78,6 +82,8 @@ impl FromStr for Operation {
             "approval.list" => Ok(Operation::ApprovalList),
             "approval.grant" => Ok(Operation::ApprovalGrant),
             "approval.deny" => Ok(Operation::ApprovalDeny),
+            "plan.list" => Ok(Operation::PlanList),
+            "audit.list" => Ok(Operation::AuditList),
             _ => Err(UnknownOperationError),
         }
     }
@@ -203,6 +209,8 @@ mod tests {
             Operation::ApprovalList,
             Operation::ApprovalGrant,
             Operation::ApprovalDeny,
+            Operation::PlanList,
+            Operation::AuditList,
         ] {
             assert_eq!(op.as_str().parse::<Operation>().ok(), Some(op));
         }

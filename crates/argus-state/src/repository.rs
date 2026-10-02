@@ -2,8 +2,8 @@
 
 use argus_domain::{
     AppliedConfigurationState, CapabilityPublication, CloudCommand, CloudConnection,
-    CloudEnrollment, DomainEvent, EnvironmentId, ExecutionApproval, ExecutionDecision,
-    HealthStatus, ManagedConfiguration, Observation, ReportBuffer,
+    CloudEnrollment, DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision,
+    HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -50,6 +50,46 @@ pub trait DomainRepository: Send + Sync {
         Err(RepositoryError::Failed(
             "list_audit_events is not supported by this repository".to_string(),
         ))
+    }
+
+    /// Persists one reasoning artifact — a hypothesis, a plan, or an execution —
+    /// keyed by the correlation id of the reasoning step that produced it
+    /// (FR-008). The audit trail stays the append-only narrative; these records
+    /// are the queryable reasoning history behind it.
+    ///
+    /// The reasoning entities (`Hypothesis`, `Plan`, `Execution`) carry no
+    /// identity of their own, so the correlation id is the key and the lists
+    /// return `(id, artifact)` pairs in insertion order.
+    async fn put_hypothesis(
+        &self,
+        _id: Uuid,
+        _hypothesis: &Hypothesis,
+    ) -> Result<(), RepositoryError> {
+        Err(reasoning_unsupported("put_hypothesis"))
+    }
+
+    async fn list_hypotheses(&self) -> Result<Vec<(Uuid, Hypothesis)>, RepositoryError> {
+        Err(reasoning_unsupported("list_hypotheses"))
+    }
+
+    async fn put_plan(&self, _id: Uuid, _plan: &Plan) -> Result<(), RepositoryError> {
+        Err(reasoning_unsupported("put_plan"))
+    }
+
+    async fn list_plans(&self) -> Result<Vec<(Uuid, Plan)>, RepositoryError> {
+        Err(reasoning_unsupported("list_plans"))
+    }
+
+    async fn put_execution(
+        &self,
+        _id: Uuid,
+        _execution: &Execution,
+    ) -> Result<(), RepositoryError> {
+        Err(reasoning_unsupported("put_execution"))
+    }
+
+    async fn list_executions(&self) -> Result<Vec<(Uuid, Execution)>, RepositoryError> {
+        Err(reasoning_unsupported("list_executions"))
     }
 
     async fn save_health(&self, health: &HealthStatus) -> Result<(), RepositoryError>;
@@ -204,5 +244,14 @@ const CLOUD_STATE: &str = "cloud state";
 fn cloud_state_unsupported(operation: &'static str) -> RepositoryError {
     RepositoryError::Unavailable(format!(
         "{CLOUD_STATE} is not supported by this backend (operation: {operation})"
+    ))
+}
+
+/// Reasoning persistence is optional per backend for the same reason: a backend
+/// that cannot store plans must say so rather than silently drop the reasoning
+/// history an operator is entitled to review (FR-008).
+fn reasoning_unsupported(operation: &'static str) -> RepositoryError {
+    RepositoryError::Unavailable(format!(
+        "reasoning state is not supported by this backend (operation: {operation})"
     ))
 }

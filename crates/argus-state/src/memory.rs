@@ -2,7 +2,9 @@
 
 use std::sync::Mutex;
 
-use argus_domain::{DomainEvent, EnvironmentId, HealthStatus, Observation};
+use argus_domain::{
+    DomainEvent, EnvironmentId, Execution, HealthStatus, Hypothesis, Observation, Plan,
+};
 use async_trait::async_trait;
 
 use crate::repository::{DomainRepository, RepositoryError};
@@ -13,6 +15,9 @@ struct Inner {
     observations: Vec<Observation>,
     audit_events: Vec<DomainEvent>,
     health: Option<HealthStatus>,
+    hypotheses: Vec<(uuid::Uuid, Hypothesis)>,
+    plans: Vec<(uuid::Uuid, Plan)>,
+    executions: Vec<(uuid::Uuid, Execution)>,
 }
 
 /// A [`DomainRepository`] backed by process memory. Deterministic and
@@ -86,6 +91,68 @@ impl DomainRepository for InMemoryRepository {
             .lock()
             .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
             .audit_events
+            .clone())
+    }
+
+    async fn put_hypothesis(
+        &self,
+        id: uuid::Uuid,
+        hypothesis: &Hypothesis,
+    ) -> Result<(), RepositoryError> {
+        self.inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .hypotheses
+            .push((id, hypothesis.clone()));
+        Ok(())
+    }
+
+    async fn list_hypotheses(&self) -> Result<Vec<(uuid::Uuid, Hypothesis)>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .hypotheses
+            .clone())
+    }
+
+    async fn put_plan(&self, id: uuid::Uuid, plan: &Plan) -> Result<(), RepositoryError> {
+        self.inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .plans
+            .push((id, plan.clone()));
+        Ok(())
+    }
+
+    async fn list_plans(&self) -> Result<Vec<(uuid::Uuid, Plan)>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .plans
+            .clone())
+    }
+
+    async fn put_execution(
+        &self,
+        id: uuid::Uuid,
+        execution: &Execution,
+    ) -> Result<(), RepositoryError> {
+        self.inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .executions
+            .push((id, execution.clone()));
+        Ok(())
+    }
+
+    async fn list_executions(&self) -> Result<Vec<(uuid::Uuid, Execution)>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .executions
             .clone())
     }
 
@@ -175,5 +242,57 @@ mod tests {
         // Appending twice is fine (append-only); the trait has no read for
         // events in the bootstrap, so this just verifies the write path.
         repo.put_audit_event(&event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reasoning_artifacts_round_trip_in_insertion_order() {
+        let repo = InMemoryRepository::new();
+        let plan = Plan {
+            objective: "restore nginx".into(),
+            steps: vec![],
+            preconditions: vec![],
+            expected_outcomes: vec![],
+            blast_radius: argus_domain::BlastRadius::Host,
+            confidence: 0.9,
+            status: argus_domain::PlanStatus::Proposed,
+        };
+        let first = uuid::Uuid::new_v4();
+        repo.put_plan(first, &plan).await.unwrap();
+        let second = uuid::Uuid::new_v4();
+        repo.put_plan(second, &plan).await.unwrap();
+
+        let plans = repo.list_plans().await.unwrap();
+        assert_eq!(
+            plans.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![first, second],
+            "insertion order is preserved"
+        );
+
+        let hypothesis = Hypothesis {
+            statement: "nginx stopped".into(),
+            confidence: 0.9,
+            supporting_evidence: vec![],
+            status: argus_domain::HypothesisStatus::Confirmed,
+        };
+        repo.put_hypothesis(first, &hypothesis).await.unwrap();
+        assert_eq!(
+            repo.list_hypotheses().await.unwrap(),
+            vec![(first, hypothesis)]
+        );
+
+        let execution = Execution {
+            action: argus_domain::Action {
+                capability: argus_domain::CapabilityId::new("host.service.restart").unwrap(),
+                resource: None,
+                arguments: serde_json::json!({ "unit": "nginx.service" }),
+            },
+            status: argus_domain::ExecutionStatus::Failed,
+            evidence: serde_json::json!({ "error": "boom" }),
+        };
+        repo.put_execution(first, &execution).await.unwrap();
+        assert_eq!(
+            repo.list_executions().await.unwrap(),
+            vec![(first, execution)]
+        );
     }
 }

@@ -13,10 +13,10 @@ use argus_ai_core::decision::provenance::DecisionProvenance;
 use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{
     Action, AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId,
-    CapabilityRegistry, CapabilityRequest, DomainEvent, EnvironmentId, EventType, HealthStatus,
-    Observation, ObservedValue, Plan, PluginManifest, PolicyOutcome, Principal,
-    PrivilegeDeclaration, Provenance, RequestContext, ResourceId, Reversibility, RiskClass,
-    Severity, plan_context_hash,
+    CapabilityRegistry, CapabilityRequest, DomainEvent, EnvironmentId, EventType, Execution,
+    ExecutionStatus, HealthStatus, Hypothesis, HypothesisStatus, Observation, ObservedValue, Plan,
+    PluginManifest, PolicyOutcome, Principal, PrivilegeDeclaration, Provenance, RequestContext,
+    ResourceId, Reversibility, RiskClass, Severity, plan_context_hash,
 };
 use argus_events::EventBus;
 use argus_executor::{
@@ -71,6 +71,9 @@ pub struct Daemon {
     /// Operator grants and denials for the local plan path, bound to a token and
     /// a context hash and consumed exactly once (ADR-0030 §4).
     approvals: ApprovalStore,
+    /// Decision-provider health (FR-009): flips to degraded when a reasoning
+    /// step fails, back to ready when one succeeds.
+    provider_health: Arc<std::sync::Mutex<ProviderHealth>>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -91,6 +94,55 @@ pub enum DispatchError {
 pub enum ApprovalError {
     #[error("no pending approval with token '{0}'")]
     UnknownToken(Uuid),
+}
+
+/// The availability of the decision provider (FR-009).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderStatus {
+    /// The last reasoning step completed.
+    Ready,
+    /// The last reasoning step failed; no plan was produced from it.
+    Degraded,
+}
+
+/// A snapshot of the decision provider's health (FR-009): reported through
+/// `status.get`, never used to fabricate a plan — a degraded provider simply
+/// yields no plan, and the condition is what the operator sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderHealth {
+    pub status: ProviderStatus,
+    /// Why the provider is degraded; cleared on recovery.
+    pub last_error: Option<String>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl ProviderHealth {
+    fn ready(now: chrono::DateTime<Utc>) -> Self {
+        Self {
+            status: ProviderStatus::Ready,
+            last_error: None,
+            updated_at: now,
+        }
+    }
+
+    fn degraded(error: String, now: chrono::DateTime<Utc>) -> Self {
+        Self {
+            status: ProviderStatus::Degraded,
+            last_error: Some(error),
+            updated_at: now,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "status": match self.status {
+                ProviderStatus::Ready => "ready",
+                ProviderStatus::Degraded => "degraded",
+            },
+            "last_error": self.last_error,
+            "updated_at": self.updated_at.to_rfc3339(),
+        })
+    }
 }
 
 struct DaemonProvider {
@@ -172,6 +224,7 @@ impl Daemon {
             cloud_wake: Arc::new(tokio::sync::Notify::new()),
             pending: PendingApprovals::new(),
             approvals: ApprovalStore::new(),
+            provider_health: Arc::new(std::sync::Mutex::new(ProviderHealth::ready(Utc::now()))),
         })
     }
 
@@ -211,6 +264,25 @@ impl Daemon {
         &self.repository
     }
 
+    /// The recorded reasoning history, keyed by correlation id (FR-008):
+    /// the hypotheses, plans, and executions behind the audit trail.
+    pub async fn list_hypotheses(&self) -> Result<Vec<(Uuid, Hypothesis)>, RepositoryError> {
+        self.repository.list_hypotheses().await
+    }
+
+    pub async fn list_plans(&self) -> Result<Vec<(Uuid, Plan)>, RepositoryError> {
+        self.repository.list_plans().await
+    }
+
+    pub async fn list_executions(&self) -> Result<Vec<(Uuid, Execution)>, RepositoryError> {
+        self.repository.list_executions().await
+    }
+
+    /// The audit events recorded so far (FR-008).
+    pub async fn list_audit_events(&self) -> Result<Vec<DomainEvent>, RepositoryError> {
+        self.repository.list_audit_events().await
+    }
+
     pub fn health(&self) -> HealthStatus {
         HealthStatus::ready(Utc::now())
     }
@@ -221,7 +293,59 @@ impl Daemon {
             "environment_id": self.environment_id.as_uuid().to_string(),
             "uptime_seconds": self.started_at.elapsed().as_secs(),
             "plugin_count": 0,
+            "provider": self.provider_health().to_json(),
         })
+    }
+
+    /// A snapshot of the decision provider's health (FR-009).
+    pub fn provider_health(&self) -> ProviderHealth {
+        self.provider_health
+            .lock()
+            .expect("provider health is not poisoned")
+            .clone()
+    }
+
+    /// Records that a reasoning step succeeded, ending any degraded condition.
+    fn mark_provider_ready(&self) {
+        let mut health = self
+            .provider_health
+            .lock()
+            .expect("provider health is not poisoned");
+        if health.status != ProviderStatus::Ready {
+            tracing::info!("decision provider recovered");
+        }
+        *health = ProviderHealth::ready(Utc::now());
+    }
+
+    /// Records that a reasoning step failed (FR-009): the provider is degraded
+    /// and the condition is reported; no plan was produced from the failed call.
+    /// Returns `true` when this is a `Ready → Degraded` transition, so the
+    /// caller can publish `provider.degraded` once, not per failure.
+    fn mark_provider_degraded(&self, error: &str) -> bool {
+        let mut health = self
+            .provider_health
+            .lock()
+            .expect("provider health is not poisoned");
+        let transitioned = health.status != ProviderStatus::Degraded;
+        *health = ProviderHealth::degraded(error.to_string(), Utc::now());
+        tracing::warn!(error = %error, "decision provider degraded");
+        transitioned
+    }
+
+    /// The `provider.degraded` event for a transition, published by the caller.
+    fn degraded_transition_event(error: &str) -> DomainEvent {
+        DomainEvent::new(
+            Uuid::new_v4(),
+            EventType::new(argus_events::types::PROVIDER_DEGRADED)
+                .expect("provider.degraded is a valid event type"),
+            Utc::now(),
+            "argusd",
+            "argusd",
+            Severity::Warning,
+            None,
+            None,
+            serde_json::json!({ "error": error }),
+        )
     }
 
     pub fn plugins(&self) -> Value {
@@ -356,7 +480,7 @@ impl Daemon {
         confidence_threshold: f64,
         events: &dyn EventBus,
     ) -> Result<Option<Plan>, DecisionError> {
-        diagnose_with(
+        let result = diagnose_with(
             |request| self.authorize_and_execute(request),
             DiagnoseContext {
                 repository: self.repository.as_ref(),
@@ -368,7 +492,24 @@ impl Daemon {
             evidence,
             confidence_threshold,
         )
-        .await
+        .await;
+
+        // FR-009: the provider's availability is what the run just proved. A
+        // failure marks it degraded (publishing the condition once per
+        // transition); success marks it ready again. Either way the failed
+        // call itself fabricated nothing — the result is passed through.
+        match &result {
+            Ok(_) => self.mark_provider_ready(),
+            Err(error) => {
+                if self.mark_provider_degraded(&error.to_string()) {
+                    let _ = events
+                        .publish(&Self::degraded_transition_event(&error.to_string()))
+                        .await;
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -444,8 +585,14 @@ where
     F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
 {
     let correlation_id = Uuid::new_v4();
+    tracing::info!(
+        correlation_id = %correlation_id,
+        threshold = confidence_threshold,
+        "host-health reasoning step started"
+    );
     let actions = FnActionPort {
         dispatch,
+        repository: context.repository,
         correlation_id,
     };
     let recorder = RepoRecordPort {
@@ -458,7 +605,7 @@ where
         events: context.events,
         correlation_id,
     };
-    run_host_health(
+    let outcome = run_host_health(
         context.provider,
         evidence,
         confidence_threshold,
@@ -467,17 +614,40 @@ where
         context.dedup,
         &validator,
     )
-    .await
+    .await;
+    match &outcome {
+        Ok(Some(plan)) => tracing::info!(
+            correlation_id = %correlation_id,
+            objective = %plan.objective,
+            confidence = plan.confidence,
+            "reasoning step produced a plan"
+        ),
+        Ok(None) => tracing::info!(
+            correlation_id = %correlation_id,
+            "reasoning step produced no plan"
+        ),
+        Err(error) => tracing::warn!(
+            correlation_id = %correlation_id,
+            error = %error,
+            "reasoning step failed; no plan was fabricated"
+        ),
+    }
+    outcome
 }
 
 /// An [`ActionPort`] over an injected dispatch function.
-struct FnActionPort<F> {
+///
+/// Every attempt — completed or failed — is persisted as an [`Execution`]
+/// behind the repository, keyed by the step's correlation id (FR-008). A
+/// persistence failure never masks the execution result itself.
+struct FnActionPort<'a, F> {
     dispatch: F,
+    repository: &'a dyn DomainRepository,
     correlation_id: Uuid,
 }
 
 #[async_trait::async_trait]
-impl<F> ActionPort for FnActionPort<F>
+impl<'a, F> ActionPort for FnActionPort<'a, F>
 where
     F: Fn(CapabilityRequest) -> Result<Value, DispatchError> + Send + Sync,
 {
@@ -496,17 +666,60 @@ where
             action.arguments.clone(),
             context,
         );
-        (self.dispatch)(request).map_err(|e| match e {
-            DispatchError::Denied(outcome) => {
-                DecisionError::Validation(format!("capability denied by policy: {outcome:?}"))
+        match (self.dispatch)(request) {
+            Ok(evidence) => {
+                self.persist_execution(action, ExecutionStatus::Completed, evidence.clone())
+                    .await;
+                Ok(evidence)
             }
-            DispatchError::InvalidInput(id) => DecisionError::Validation(format!(
-                "capability input violates its declared schema: {id}"
-            )),
-            DispatchError::Execution(error) => {
-                DecisionError::Unavailable(format!("execution failed: {error}"))
+            Err(e) => {
+                let (message, kind) = match &e {
+                    DispatchError::Denied(outcome) => (
+                        format!("capability denied by policy: {outcome:?}"),
+                        "denied",
+                    ),
+                    DispatchError::InvalidInput(id) => (
+                        format!("capability input violates its declared schema: {id}"),
+                        "invalid_input",
+                    ),
+                    DispatchError::Execution(error) => {
+                        (format!("execution failed: {error}"), "execution")
+                    }
+                };
+                self.persist_execution(
+                    action,
+                    ExecutionStatus::Failed,
+                    serde_json::json!({ "error": message, "kind": kind }),
+                )
+                .await;
+                Err(match e {
+                    DispatchError::Denied(_) => DecisionError::Validation(message),
+                    DispatchError::InvalidInput(_) => DecisionError::Validation(message),
+                    DispatchError::Execution(_) => DecisionError::Unavailable(message),
+                })
             }
-        })
+        }
+    }
+}
+
+impl<F> FnActionPort<'_, F> {
+    async fn persist_execution(&self, action: &Action, status: ExecutionStatus, evidence: Value) {
+        let execution = Execution {
+            action: action.clone(),
+            status,
+            evidence,
+        };
+        if let Err(error) = self
+            .repository
+            .put_execution(self.correlation_id, &execution)
+            .await
+        {
+            tracing::warn!(
+                correlation_id = %self.correlation_id,
+                error = %error,
+                "could not persist the execution record"
+            );
+        }
     }
 }
 
@@ -525,6 +738,28 @@ impl RecordPort for RepoRecordPort<'_> {
         provenance: &DecisionProvenance,
     ) -> Result<(), DecisionError> {
         let now = Utc::now();
+
+        // The accepted hypothesis that produced this plan, keyed by the same
+        // correlation id: for the bootstrap host-health loop the plan carries
+        // the hypothesis verbatim (objective, confidence), so persisting the
+        // derivation keeps the reasoning history queryable. The evidence ids
+        // are not carried into `record`, so the field stays empty rather than
+        // invented (FR-008).
+        let hypothesis = Hypothesis {
+            statement: plan.objective.clone(),
+            confidence: plan.confidence,
+            supporting_evidence: Vec::new(),
+            status: HypothesisStatus::Confirmed,
+        };
+        self.repository
+            .put_hypothesis(self.correlation_id, &hypothesis)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
+        self.repository
+            .put_plan(self.correlation_id, plan)
+            .await
+            .map_err(|e| DecisionError::Unavailable(e.to_string()))?;
+
         let subject =
             ResourceId::new("host", "local").map_err(|e| DecisionError::Invalid(e.to_string()))?;
         let observation = Observation::new(
@@ -920,6 +1155,61 @@ fn service_guardrails(daemon_unit: &str) -> argus_executor::GuardrailRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_health_starts_ready_and_tracks_transitions() {
+        let daemon = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { Daemon::init(test_config()).await.unwrap() });
+
+        let health = daemon.provider_health();
+        assert_eq!(health.status, ProviderStatus::Ready);
+        assert!(health.last_error.is_none());
+
+        // A failed reasoning step degrades the provider and is reported.
+        assert!(daemon.mark_provider_degraded("provider unreachable"));
+        let health = daemon.provider_health();
+        assert_eq!(health.status, ProviderStatus::Degraded);
+        assert_eq!(health.last_error.as_deref(), Some("provider unreachable"));
+
+        // The transition flag fires once: a repeat failure is not a new event.
+        assert!(!daemon.mark_provider_degraded("still unreachable"));
+
+        // Recovery clears the error and reports ready again.
+        daemon.mark_provider_ready();
+        let health = daemon.provider_health();
+        assert_eq!(health.status, ProviderStatus::Ready);
+        assert!(health.last_error.is_none());
+    }
+
+    #[test]
+    fn provider_health_is_reported_in_status_output() {
+        let daemon = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { Daemon::init(test_config()).await.unwrap() });
+
+        assert_eq!(daemon.status()["provider"]["status"], "ready");
+
+        daemon.mark_provider_degraded("provider unreachable");
+        let status = daemon.status();
+        assert_eq!(status["provider"]["status"], "degraded");
+        assert_eq!(status["provider"]["last_error"], "provider unreachable");
+        assert!(
+            status["provider"]["updated_at"].is_string(),
+            "the condition carries a timestamp"
+        );
+    }
+
+    /// A daemon against throwaway paths; no sockets are bound.
+    fn test_config() -> DaemonConfig {
+        DaemonConfig {
+            state_path: std::env::temp_dir()
+                .join(format!("argus-test-{}.db", Uuid::new_v4()))
+                .display()
+                .to_string(),
+            ..DaemonConfig::default()
+        }
+    }
 
     #[test]
     fn service_guardrails_refuse_the_configured_unit_and_malformed_names() {
