@@ -12,6 +12,7 @@ use argus_domain::{
     CloudEnrollment, DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision,
     HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer,
 };
+use argus_memory::{Episode, Fact, ProcedureRecord};
 use async_trait::async_trait;
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -44,6 +45,18 @@ CREATE TABLE IF NOT EXISTS reasoning_plans (
     data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reasoning_executions (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_episodes (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_facts (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_procedures (
     id   TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
@@ -209,6 +222,23 @@ impl SqliteRepository {
 
     /// Like [`Self::list_json`], but returns `(rowid-key, data)` pairs ordered by
     /// insertion, so reasoning history reads back in the order it was recorded.
+    /// Like [`Self::list_json_ordered`] but for non-Uuid keys (e.g. the
+    /// memory facts' composite "subject#attribute" key).
+    fn list_json_ordered_raw(&self, table: &str) -> Result<Vec<(String, String)>, RepositoryError> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare(&format!("SELECT id, data FROM {table} ORDER BY rowid ASC"))?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
     fn list_json_ordered(&self, table: &str) -> Result<Vec<(Uuid, String)>, RepositoryError> {
         self.with_conn(|conn| {
             let mut stmt =
@@ -338,6 +368,52 @@ impl DomainRepository for SqliteRepository {
 
     async fn list_plans(&self) -> Result<Vec<(Uuid, Plan)>, RepositoryError> {
         self.list_json_ordered("reasoning_plans")?
+            .into_iter()
+            .map(|(id, data)| Self::decode(&data).map(|p| (id, p)))
+            .collect()
+    }
+
+    async fn put_episode(&self, id: Uuid, episode: &Episode) -> Result<(), RepositoryError> {
+        let data = Self::encode(episode)?;
+        self.put_json("memory_episodes", &id.to_string(), &data)
+    }
+
+    async fn list_episodes(&self) -> Result<Vec<(Uuid, Episode)>, RepositoryError> {
+        self.list_json_ordered("memory_episodes")?
+            .into_iter()
+            .map(|(id, data)| Self::decode(&data).map(|e| (id, e)))
+            .collect()
+    }
+
+    async fn put_fact(&self, fact: &Fact) -> Result<(), RepositoryError> {
+        // The composite key mirrors SemanticMemory's supersede semantics:
+        // re-recording a (subject, attribute) replaces the prior value.
+        let key = format!("{}#{}", fact.subject.as_str(), fact.attribute);
+        let data = Self::encode(fact)?;
+        self.put_json("memory_facts", &key, &data)
+    }
+
+    async fn list_facts(&self) -> Result<Vec<Fact>, RepositoryError> {
+        // Facts key on "subject#attribute", not a Uuid, so they list through
+        // the raw-key variant.
+        Ok(self
+            .list_json_ordered_raw("memory_facts")?
+            .into_iter()
+            .map(|(_, data)| Self::decode(&data))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    async fn put_procedure(
+        &self,
+        id: Uuid,
+        procedure: &ProcedureRecord,
+    ) -> Result<(), RepositoryError> {
+        let data = Self::encode(procedure)?;
+        self.put_json("memory_procedures", &id.to_string(), &data)
+    }
+
+    async fn list_procedures(&self) -> Result<Vec<(Uuid, ProcedureRecord)>, RepositoryError> {
+        self.list_json_ordered("memory_procedures")?
             .into_iter()
             .map(|(id, data)| Self::decode(&data).map(|p| (id, p)))
             .collect()

@@ -17,6 +17,7 @@ pub struct Data {
     pub plans: Value,
     pub approvals: Value,
     pub audit: Value,
+    pub sentinel: Value,
 }
 
 impl Data {
@@ -30,7 +31,8 @@ impl Data {
             config: v.clone(),
             plans: v.clone(),
             approvals: v.clone(),
-            audit: v,
+            audit: v.clone(),
+            sentinel: v,
         }
     }
 }
@@ -49,6 +51,7 @@ pub async fn fetch(socket_path: &Path) -> anyhow::Result<Data> {
         plans: request(&mut client, Operation::PlanList).await?,
         approvals: request(&mut client, Operation::ApprovalList).await?,
         audit: request(&mut client, Operation::AuditList).await?,
+        sentinel: request(&mut client, Operation::SentinelGet).await?,
     })
 }
 
@@ -77,5 +80,6 @@ mod tests {
         assert_eq!(data.plans["error"], "daemon unreachable");
         assert_eq!(data.approvals["error"], "daemon unreachable");
         assert_eq!(data.audit["error"], "daemon unreachable");
+        assert_eq!(data.sentinel["error"], "daemon unreachable");
     }
 }

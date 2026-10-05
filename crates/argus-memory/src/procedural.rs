@@ -37,6 +37,27 @@ pub struct ProcedureRecord {
 }
 
 impl ProcedureRecord {
+    /// Register a procedure with zero recorded attempts; history accrues
+    /// through `record_outcome`. The first-seen timestamp is `at`.
+    pub fn new(
+        id: Uuid,
+        trigger: impl Into<String>,
+        name: impl Into<String>,
+        status: ProcedureStatus,
+        at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            trigger: trigger.into(),
+            name: name.into(),
+            status,
+            attempts: 0,
+            successes: 0,
+            first_seen: at,
+            last_seen: at,
+        }
+    }
+
     /// The recorded success rate, or `None` before the first attempt — an
     /// unknown rate is never invented as 0 or 1.
     pub fn success_rate(&self) -> Option<f32> {
@@ -61,6 +82,17 @@ impl ProcedureRecord {
 
     pub fn last_seen(&self) -> DateTime<Utc> {
         self.last_seen
+    }
+
+    /// Record one attempt outcome on this record directly. Returns `Some(())`
+    /// for API symmetry with the memory-layer method.
+    pub fn record_outcome(&mut self, success: bool, at: DateTime<Utc>) -> Option<()> {
+        self.attempts += 1;
+        if success {
+            self.successes += 1;
+        }
+        self.last_seen = at;
+        Some(())
     }
 }
 

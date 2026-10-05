@@ -5,6 +5,7 @@ use argus_domain::{
     CloudEnrollment, DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision,
     HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer,
 };
+use argus_memory::{Episode, Fact, ProcedureRecord};
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -90,6 +91,41 @@ pub trait DomainRepository: Send + Sync {
 
     async fn list_executions(&self) -> Result<Vec<(Uuid, Execution)>, RepositoryError> {
         Err(reasoning_unsupported("list_executions"))
+    }
+
+    /// Persists one episodic-memory record (ADR-0038 §3: every layer
+    /// persists through this abstraction). Re-putting an id replaces the
+    /// episode, mirroring `EpisodicMemory::record`'s idempotence.
+    async fn put_episode(&self, _id: Uuid, _episode: &Episode) -> Result<(), RepositoryError> {
+        Err(memory_unsupported("put_episode"))
+    }
+
+    async fn list_episodes(&self) -> Result<Vec<(Uuid, Episode)>, RepositoryError> {
+        Err(memory_unsupported("list_episodes"))
+    }
+
+    /// Persists one semantic-memory fact. Facts key on
+    /// `(subject, attribute)` — re-putting the same pair supersedes, the
+    /// same supersede semantics as `SemanticMemory::add_fact`.
+    async fn put_fact(&self, _fact: &Fact) -> Result<(), RepositoryError> {
+        Err(memory_unsupported("put_fact"))
+    }
+
+    async fn list_facts(&self) -> Result<Vec<Fact>, RepositoryError> {
+        Err(memory_unsupported("list_facts"))
+    }
+
+    /// Persists one procedural-memory record (attempt history included).
+    async fn put_procedure(
+        &self,
+        _id: Uuid,
+        _procedure: &ProcedureRecord,
+    ) -> Result<(), RepositoryError> {
+        Err(memory_unsupported("put_procedure"))
+    }
+
+    async fn list_procedures(&self) -> Result<Vec<(Uuid, ProcedureRecord)>, RepositoryError> {
+        Err(memory_unsupported("list_procedures"))
     }
 
     async fn save_health(&self, health: &HealthStatus) -> Result<(), RepositoryError>;
@@ -253,5 +289,14 @@ fn cloud_state_unsupported(operation: &'static str) -> RepositoryError {
 fn reasoning_unsupported(operation: &'static str) -> RepositoryError {
     RepositoryError::Unavailable(format!(
         "reasoning state is not supported by this backend (operation: {operation})"
+    ))
+}
+
+/// Memory persistence (spec 004 FR-001) follows the same rule: a backend
+/// that cannot store the memory layers fails loudly instead of letting the
+/// runtime silently forget (ADR-0038 §3).
+fn memory_unsupported(operation: &'static str) -> RepositoryError {
+    RepositoryError::Unavailable(format!(
+        "memory state is not supported by this backend (operation: {operation})"
     ))
 }

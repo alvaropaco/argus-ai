@@ -222,3 +222,57 @@ async fn unsupported_version_is_rejected() {
     assert_eq!(resp["error"]["code"], json!("UNSUPPORTED_VERSION"));
     cleanup(&path);
 }
+
+#[tokio::test]
+async fn sentinel_get_returns_the_live_view() {
+    let config = test_config("sentinel");
+    let path = spawn_server(config).await;
+    let mut client = Client::connect(&path).await.expect("connect");
+
+    let response = client
+        .request(Operation::SentinelGet, Uuid::new_v4(), json!({}))
+        .await
+        .expect("round trip");
+    assert!(response.ok, "{:?}", response.error);
+    let view = response.result.expect("view present");
+    assert_eq!(view["environment_health"], "healthy");
+    assert_eq!(view["safe_mode"], "none");
+    assert!(view["provider_ready"].as_bool().unwrap());
+    assert_eq!(view["pending_approvals"], 0);
+    assert_eq!(view["recent_actions"], 0);
+    assert!(view["predictions"].as_array().unwrap().is_empty());
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn report_generate_renders_known_kinds_and_rejects_unknown_ones() {
+    let config = test_config("report");
+    let path = spawn_server(config).await;
+    let mut client = Client::connect(&path).await.expect("connect");
+
+    let response = client
+        .request(
+            Operation::ReportGenerate,
+            Uuid::new_v4(),
+            json!({ "kind": "daily" }),
+        )
+        .await
+        .expect("round trip");
+    assert!(response.ok, "{:?}", response.error);
+    let report = response.result.expect("report present");
+    assert_eq!(report["kind"], "daily");
+    let text = report["sections"].to_string();
+    assert!(text.contains("open incidents: 0"));
+
+    let bad = client
+        .request(
+            Operation::ReportGenerate,
+            Uuid::new_v4(),
+            json!({ "kind": "hallucinated" }),
+        )
+        .await
+        .expect("round trip");
+    assert!(!bad.ok);
+    assert_eq!(bad.error.expect("error").code, ErrorCode::Malformed);
+    cleanup(&path);
+}

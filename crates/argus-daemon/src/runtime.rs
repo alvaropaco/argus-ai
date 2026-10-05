@@ -15,8 +15,8 @@ use argus_domain::{
     Action, AuthorizationRequest, AutonomyMode, BlastRadius, CapabilityDescriptor, CapabilityId,
     CapabilityRegistry, CapabilityRequest, DomainEvent, EnvironmentId, EventType, Execution,
     ExecutionStatus, HealthStatus, Hypothesis, HypothesisStatus, Observation, ObservedValue, Plan,
-    PluginManifest, PolicyOutcome, Principal, PrivilegeDeclaration, Provenance, RequestContext,
-    ResourceId, Reversibility, RiskClass, Severity, plan_context_hash,
+    PlanStatus, PluginManifest, PolicyOutcome, Principal, PrivilegeDeclaration, Provenance,
+    RequestContext, ResourceId, Reversibility, RiskClass, Severity, plan_context_hash,
 };
 use argus_events::EventBus;
 use argus_executor::{
@@ -24,6 +24,7 @@ use argus_executor::{
     ContainerController, DockerContainerController, ExecutionError, Executor, ProcessController,
     RemediationExecutor, ServiceController, UnixProcessController, remediation_guardrails,
 };
+use argus_observability::SelfObservability;
 use argus_policy::{ApprovalStore, AutopilotGovernor, BootstrapPolicyEvaluator, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
 use argus_validate::{desired_state, read_failure_event, validation_event};
@@ -37,7 +38,7 @@ use argus_cloud::state::ConnectivityTracker;
 
 use crate::cloud::{CloudSecretStore, ManagedSettingsStore as CloudSettingsStore};
 use crate::config::DaemonConfig;
-use crate::control::{LoopPorts, PendingPlan, ResumeOutcome, RunOutcome};
+use crate::control::{ExecutionOutcome, LoopPorts, PendingPlan, ResumeOutcome, RunOutcome};
 
 /// The running daemon and its bootstrap state.
 pub struct Daemon {
@@ -85,6 +86,9 @@ pub struct Daemon {
     /// The resource-autopilot governor: the policy-layer gate every governed
     /// adjustment passes before policy (FR-017).
     governor: Arc<AutopilotGovernor>,
+    /// Self-observability counters (CAP-24, FR-025), recorded at the daemon
+    /// boundary — one hop coarse: run outcomes, not control-loop internals.
+    selfobs: Arc<SelfObservability>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -257,6 +261,7 @@ impl Daemon {
             cgroups: cgroups.clone(),
             remediation: remediation_executor.clone(),
             governor: governor.clone(),
+            selfobs: Arc::new(SelfObservability::new()),
         })
     }
 
@@ -539,7 +544,42 @@ impl Daemon {
         if let RunOutcome::Pending(pending) = &outcome {
             self.pending.store(pending.clone());
         }
+        if let RunOutcome::Finished(report) = &outcome {
+            self.record_run_outcome(report);
+        }
         outcome
+    }
+
+    /// Record one finished run into the self-observability counters
+    /// (CAP-24). Deliberately coarse — one hop, at the daemon boundary:
+    /// policy denials and per-step executor failures come from the report,
+    /// and a plan that failed with no failed step failed *after* execution,
+    /// which is the validation/rollback path.
+    fn record_run_outcome(&self, report: &ExecutionOutcome) {
+        self.selfobs.record_decision_completed();
+        self.selfobs.record_event_processed();
+        for _ in &report.denied {
+            self.selfobs.record_policy_denial();
+        }
+        for execution in &report.executions {
+            if execution.status == ExecutionStatus::Failed {
+                self.selfobs.record_executor_error();
+            }
+        }
+        let succeeded = report.status == PlanStatus::Completed;
+        if !succeeded
+            && report.status == PlanStatus::Failed
+            && report
+                .executions
+                .iter()
+                .all(|e| e.status != ExecutionStatus::Failed)
+        {
+            // Failed with every step executed: the failure was detected
+            // after execution — a failed validation.
+            self.selfobs.record_failed_validation();
+        }
+        self.selfobs.record_remediation(succeeded);
+        self.selfobs.record_autonomous_action(succeeded);
     }
 
     /// Resumes a paused remediation plan with a previously granted approval.
@@ -550,7 +590,7 @@ impl Daemon {
     ) -> ResumeOutcome {
         let policy = BootstrapPolicyEvaluator::with_local_remediation();
         let ports = self.remediation_ports();
-        crate::control::resume_and_run_with_ports(
+        let outcome = crate::control::resume_and_run_with_ports(
             pending,
             &self.approvals,
             &self.registry,
@@ -562,7 +602,36 @@ impl Daemon {
             AutonomyMode::L3Assisted,
             &ports,
         )
-        .await
+        .await;
+        if let ResumeOutcome::Finished(report) = &outcome {
+            self.record_run_outcome(report);
+        }
+        outcome
+    }
+
+    /// The live sentinel view (spec-004 FR-003): built from real daemon state
+    /// only. Risks, predictions, and incidents have no live source wired into
+    /// the daemon yet and render empty — never invented.
+    pub async fn sentinel_snapshot(&self) -> crate::sentinel::SentinelView {
+        let executions = self.list_executions().await.unwrap_or_default();
+        let inputs = crate::sentinel::SentinelInputs {
+            autonomy: AutonomyMode::default(),
+            environment: crate::sentinel::Environment::Production,
+            provider_ready: self.provider_health().status == ProviderStatus::Ready,
+            open_incidents: 0,
+            risks: Vec::new(),
+            predictions: Vec::new(),
+            pending_approvals: self.list_pending_approvals().len() as u32,
+            recent_actions: executions.len() as u32,
+            self_health: self.selfobs.snapshot(),
+            situation: None,
+        };
+        crate::sentinel::sentinel_evaluate(&inputs, Utc::now()).view
+    }
+
+    /// The self-observability counters, for status/telemetry surfaces.
+    pub fn self_observability(&self) -> &SelfObservability {
+        &self.selfobs
     }
 
     /// The remediation ports over the daemon's own controllers and executor.

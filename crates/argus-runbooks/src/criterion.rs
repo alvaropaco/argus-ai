@@ -3,8 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A comparison a criterion makes, over strings or numbers.
+/// A comparison a criterion makes, over strings or numbers. The wire forms
+/// are snake_case (`{ at_least = 90.0 }`, `{ equal = "failed" }`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Comparison {
     /// Numeric comparison: value < bound.
     LessThan(f64),

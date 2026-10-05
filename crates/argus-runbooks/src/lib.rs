@@ -15,10 +15,12 @@
 
 mod criterion;
 mod library;
+mod loader;
 mod promotion;
 mod runbook;
 
 pub use criterion::{Comparison, Criterion, Reading};
 pub use library::RunbookLibrary;
+pub use loader::{LoadResult, RunbookFile, load_runbooks};
 pub use promotion::{Gate, GateError, PromotionError};
 pub use runbook::{EvidenceKind, Runbook, RunbookStatus, RunbookTrigger, Step};

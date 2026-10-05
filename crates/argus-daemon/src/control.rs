@@ -14,7 +14,8 @@ use argus_executor::{
     KubernetesExecutor, RemediationExecutor, ServiceController,
 };
 use argus_policy::{
-    ApprovalStore, GovernanceDecision, PolicyEvaluator, ResourceAdjustment, ResourceGovernor,
+    ApprovalStore, Environment, Escalation, EscalationInput, EvidenceQuality, GovernanceDecision,
+    PolicyEvaluator, ResourceAdjustment, ResourceGovernor, decide_escalation,
 };
 use argus_validate::{desired_state, read_failure_event, validation_event};
 use chrono::Utc;
@@ -157,6 +158,55 @@ impl Default for ExecutionOutcome {
             status: PlanStatus::Proposed,
         }
     }
+}
+
+/// Whether the autonomy level is L4/L5, where the escalation decision
+/// applies (spec-004 FR-004). L0–L3 contracts are unchanged.
+fn escalation_bounded(autonomy: AutonomyMode) -> bool {
+    matches!(
+        autonomy,
+        AutonomyMode::L4Autonomous | AutonomyMode::L5Adaptive
+    )
+}
+
+/// Whether the escalation decision returns AUTO-FIX for this step at an
+/// L4/L5 level. Typed inputs only: the capability's declared risk, the
+/// step's rollback, the plan's blast radius and confidence. Evidence
+/// quality is Adequate (the plan reached execution), and no historical
+/// success is invented.
+fn escalation_permits(
+    plan: &Plan,
+    registry: &CapabilityRegistry,
+    index: usize,
+    capability: &str,
+    autonomy: AutonomyMode,
+    risk: RiskClass,
+) -> bool {
+    let reversible = plan.steps[index]
+        .rollback
+        .as_ref()
+        .is_some_and(|r| r.capability.as_str() != capability)
+        || matches!(risk, RiskClass::Read);
+    let declared = registry
+        .get(&CapabilityId::new(capability).expect("registered capability"))
+        .and_then(|d| d.blast_radius().map(|b| (d.risk_class(), b)));
+    let (risk, blast_radius) = match declared {
+        Some((risk, blast_radius)) => (risk, blast_radius),
+        None => (risk, plan.blast_radius),
+    };
+    let input = EscalationInput {
+        evidence_quality: EvidenceQuality::Adequate,
+        confidence: plan.confidence.clamp(0.0, 1.0) as f32,
+        reversible,
+        blast_radius,
+        risk,
+        criticality: argus_policy::Criticality::Standard,
+        environment: Environment::Production,
+        historical_success: None,
+        autonomy,
+        policy: PolicyOutcome::Allow,
+    };
+    decide_escalation(&input) == Escalation::AutoFix
 }
 
 /// Risk class for an executable capability. Service actions are low-risk and
@@ -456,7 +506,22 @@ enum PlanRun {
 /// like a policy denial and nothing executes (FR-017). A policy denial or an
 /// approval requirement always wins over a governor allowance — the governor
 /// can only refuse, never authorize (CAP-22).
-///
+/// Build the paused-plan record for an approval round-trip (ADR-0030 §5):
+/// a single-use token bound to the plan's context hash, with the steps
+/// already executed remembered so a resume continues rather than restarts.
+fn pause_plan(plan: &Plan, executed: &[usize]) -> PendingPlan {
+    let token = Uuid::new_v4();
+    let context_hash = plan_context_hash(plan);
+    let mut paused = plan.clone();
+    paused.status = PlanStatus::AwaitingApproval;
+    PendingPlan {
+        plan: paused,
+        token,
+        context_hash,
+        executed: executed.to_vec(),
+    }
+}
+
 /// The arity is the loop's injected surface; each parameter is a dependency
 /// the tests vary individually, so it is not collapsed into a bundle.
 #[allow(clippy::too_many_arguments)]
@@ -612,16 +677,7 @@ async fn run_plan(
                         correlation_id = %correlation,
                         "plan paused awaiting operator approval"
                     );
-                    let token = Uuid::new_v4();
-                    let context_hash = plan_context_hash(plan);
-                    let mut paused = plan.clone();
-                    paused.status = PlanStatus::AwaitingApproval;
-                    return PlanRun::Paused(PendingPlan {
-                        plan: paused,
-                        token,
-                        context_hash,
-                        executed: executed.clone(),
-                    });
+                    return PlanRun::Paused(pause_plan(plan, &executed));
                 }
                 // Resumed: the approval re-entered policy as input, never as
                 // authority; the consumed grant is what lets the step proceed.
@@ -650,6 +706,30 @@ async fn run_plan(
                 if !may_execute_without_approval(autonomy, risk) {
                     outcome.requires_approval.push(action.capability.clone());
                     continue;
+                }
+
+                // Spec-004 FR-004: at L4/L5 the escalation decision
+                // additionally gates execution — anything short of AUTO-FIX
+                // pauses for approval. L0–L3 keep their (stricter or equal)
+                // contracts untouched, and policy was already consulted
+                // above: this gate can only narrow, never bypass.
+                if escalation_bounded(autonomy)
+                    && !escalation_permits(
+                        plan,
+                        registry,
+                        index,
+                        action.capability.as_str(),
+                        autonomy,
+                        risk,
+                    )
+                {
+                    tracing::info!(
+                        correlation_id = %correlation,
+                        capability = action.capability.as_str(),
+                        "escalation decision routes the step to a human"
+                    );
+                    outcome.requires_approval.push(action.capability.clone());
+                    return PlanRun::Paused(pause_plan(plan, &executed));
                 }
 
                 if execute_allowed_step(

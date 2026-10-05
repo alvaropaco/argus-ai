@@ -18,6 +18,9 @@ struct Inner {
     hypotheses: Vec<(uuid::Uuid, Hypothesis)>,
     plans: Vec<(uuid::Uuid, Plan)>,
     executions: Vec<(uuid::Uuid, Execution)>,
+    episodes: Vec<(uuid::Uuid, argus_memory::Episode)>,
+    facts: Vec<argus_memory::Fact>,
+    procedures: Vec<(uuid::Uuid, argus_memory::ProcedureRecord)>,
 }
 
 /// A [`DomainRepository`] backed by process memory. Deterministic and
@@ -153,6 +156,80 @@ impl DomainRepository for InMemoryRepository {
             .lock()
             .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
             .executions
+            .clone())
+    }
+
+    async fn put_episode(
+        &self,
+        id: uuid::Uuid,
+        episode: &argus_memory::Episode,
+    ) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        // Idempotent on id, mirroring EpisodicMemory::record.
+        inner.episodes.retain(|(existing, _)| *existing != id);
+        inner.episodes.push((id, episode.clone()));
+        Ok(())
+    }
+
+    async fn list_episodes(
+        &self,
+    ) -> Result<Vec<(uuid::Uuid, argus_memory::Episode)>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .episodes
+            .clone())
+    }
+
+    async fn put_fact(&self, fact: &argus_memory::Fact) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        // Supersede on (subject, attribute), mirroring add_fact; the
+        // superseding fact moves to the end of insertion order.
+        inner
+            .facts
+            .retain(|f| !(f.subject == fact.subject && f.attribute == fact.attribute));
+        inner.facts.push(fact.clone());
+        Ok(())
+    }
+
+    async fn list_facts(&self) -> Result<Vec<argus_memory::Fact>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .facts
+            .clone())
+    }
+
+    async fn put_procedure(
+        &self,
+        id: uuid::Uuid,
+        procedure: &argus_memory::ProcedureRecord,
+    ) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        inner.procedures.retain(|(existing, _)| *existing != id);
+        inner.procedures.push((id, procedure.clone()));
+        Ok(())
+    }
+
+    async fn list_procedures(
+        &self,
+    ) -> Result<Vec<(uuid::Uuid, argus_memory::ProcedureRecord)>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .procedures
             .clone())
     }
 

@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// The protocol version spoken by this implementation.
 ///
 /// Adding an operation is a MINOR bump; removing or renaming one is MAJOR.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 5, 0);
+pub const PROTOCOL_VERSION: Version = Version::new(0, 6, 0);
 
 /// A typed IPC operation id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +30,8 @@ pub enum Operation {
     ApprovalDeny,
     PlanList,
     AuditList,
+    SentinelGet,
+    ReportGenerate,
 }
 
 impl Operation {
@@ -49,6 +51,8 @@ impl Operation {
             Operation::ApprovalDeny => "approval.deny",
             Operation::PlanList => "plan.list",
             Operation::AuditList => "audit.list",
+            Operation::SentinelGet => "sentinel.get",
+            Operation::ReportGenerate => "report.generate",
         }
     }
 }
@@ -84,6 +88,8 @@ impl FromStr for Operation {
             "approval.deny" => Ok(Operation::ApprovalDeny),
             "plan.list" => Ok(Operation::PlanList),
             "audit.list" => Ok(Operation::AuditList),
+            "sentinel.get" => Ok(Operation::SentinelGet),
+            "report.generate" => Ok(Operation::ReportGenerate),
             _ => Err(UnknownOperationError),
         }
     }

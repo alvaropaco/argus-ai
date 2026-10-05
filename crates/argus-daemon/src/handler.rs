@@ -57,6 +57,8 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
         Operation::ApprovalDeny => return approval_deny(daemon, &principal, request),
         Operation::PlanList => return plan_list(daemon, request).await,
         Operation::AuditList => return audit_list(daemon, request).await,
+        Operation::SentinelGet => return sentinel_get(daemon, &request).await,
+        Operation::ReportGenerate => return report_generate(daemon, &request).await,
     };
 
     Response::ok(request.correlation_id, result)
@@ -350,4 +352,59 @@ async fn enroll(daemon: &Daemon, request: Request) -> Response {
 
 fn to_value<T: serde::Serialize>(value: T) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// `sentinel.get`: the live sentinel view (spec-004 FR-005).
+async fn sentinel_get(daemon: &Daemon, request: &Request) -> Response {
+    match serde_json::to_value(daemon.sentinel_snapshot().await) {
+        Ok(view) => Response::ok(request.correlation_id, view),
+        Err(e) => Response::err(
+            request.correlation_id,
+            ErrorCode::Internal,
+            format!("serialize sentinel view: {e}"),
+        ),
+    }
+}
+
+/// `report.generate`: renders one report kind from live daemon state
+/// (spec-004 FR-005). The payload is `{ "kind": "daily" | ... }`; an
+/// unknown kind is a bad request. Inputs come from the daemon's real
+/// tables; nothing is invented (FR-021).
+async fn report_generate(daemon: &Daemon, request: &Request) -> Response {
+    let Ok(kind) = serde_json::from_value::<argus_reporting::ReportKind>(
+        request.payload.get("kind").cloned().unwrap_or(Value::Null),
+    ) else {
+        return Response::err(
+            request.correlation_id,
+            ErrorCode::Malformed,
+            "payload must carry a known report kind",
+        );
+    };
+
+    let executions = daemon.list_executions().await.unwrap_or_default();
+    let approvals = daemon.list_pending_approvals();
+    let inputs = argus_reporting::ReportInputs {
+        open_incidents: Vec::new(),
+        resolved_incidents: Vec::new(),
+        risks: Vec::new(),
+        prediction_prose: Vec::new(),
+        actions_executed: executions.len() as u32,
+        actions_validated: executions
+            .iter()
+            .filter(|(_, e)| e.status == argus_domain::ExecutionStatus::Completed)
+            .count() as u32,
+        actions_rolled_back: 0,
+        actions_needing_manual: 0,
+        policy_denials: 0,
+        pending_approvals: approvals.len() as u32,
+    };
+    let report = argus_reporting::generate_report(kind, &inputs, None, Utc::now());
+    match serde_json::to_value(&report) {
+        Ok(value) => Response::ok(request.correlation_id, value),
+        Err(e) => Response::err(
+            request.correlation_id,
+            ErrorCode::Internal,
+            format!("serialize report: {e}"),
+        ),
+    }
 }

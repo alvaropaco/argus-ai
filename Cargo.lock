@@ -432,7 +432,9 @@ dependencies = [
  "argus-domain",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "toml",
  "uuid",
 ]
 
@@ -448,6 +450,7 @@ name = "argus-state"
 version = "0.1.10"
 dependencies = [
  "argus-domain",
+ "argus-memory",
  "async-trait",
  "chrono",
  "futures",
@@ -456,6 +459,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

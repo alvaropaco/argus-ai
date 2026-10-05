@@ -24,9 +24,10 @@ enum View {
     Config,
     Plans,
     Audit,
+    Sentinel,
 }
 
-const VIEWS: [(&str, &str); 7] = [
+const VIEWS: [(&str, &str); 8] = [
     ("1", "Overview"),
     ("2", "Health"),
     ("3", "Capabilities"),
@@ -34,6 +35,7 @@ const VIEWS: [(&str, &str); 7] = [
     ("5", "Config"),
     ("6", "Plans"),
     ("7", "Audit"),
+    ("8", "Sentinel"),
 ];
 
 pub fn run(data: Data) -> Result<()> {
@@ -58,6 +60,7 @@ pub fn run(data: Data) -> Result<()> {
                 KeyCode::Char('5') => view = View::Config,
                 KeyCode::Char('6') => view = View::Plans,
                 KeyCode::Char('7') => view = View::Audit,
+                KeyCode::Char('8') => view = View::Sentinel,
                 KeyCode::Tab | KeyCode::Right => view = next_view(view),
                 KeyCode::Left => view = previous_view(view),
                 _ => {}
@@ -78,19 +81,21 @@ fn next_view(view: View) -> View {
         View::Plugins => View::Config,
         View::Config => View::Plans,
         View::Plans => View::Audit,
-        View::Audit => View::Overview,
+        View::Audit => View::Sentinel,
+        View::Sentinel => View::Overview,
     }
 }
 
 fn previous_view(view: View) -> View {
     match view {
-        View::Overview => View::Audit,
+        View::Overview => View::Sentinel,
         View::Health => View::Overview,
         View::Capabilities => View::Health,
         View::Plugins => View::Capabilities,
         View::Config => View::Plugins,
         View::Plans => View::Config,
         View::Audit => View::Plans,
+        View::Sentinel => View::Audit,
     }
 }
 
@@ -175,6 +180,7 @@ fn label_for(view: View) -> &'static str {
         View::Config => "Config",
         View::Plans => "Plans",
         View::Audit => "Audit",
+        View::Sentinel => "Sentinel",
     }
 }
 
@@ -187,7 +193,62 @@ fn draw_content(f: &mut Frame, area: Rect, data: &Data, view: View) {
         View::Config => draw_json_card(f, area, "Configuration", &data.config),
         View::Plans => draw_plans(f, area, data),
         View::Audit => draw_json_card(f, area, "Audit trail", &data.audit),
+        View::Sentinel => draw_sentinel(f, area, data),
     }
+}
+
+/// The sentinel view (spec-004 FR-006): the live watch rendered from
+/// `sentinel.get` — health, safe mode, provider, counts, and pressure, each
+/// labeled so an unknown figure reads as unknown rather than blank.
+fn draw_sentinel(f: &mut Frame, area: Rect, data: &Data) {
+    let view = &data.sentinel;
+    let field = |key: &str| -> String {
+        view.get(key)
+            .map(|v| v.to_string().trim_matches('"').to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let count = |key: &str| -> String {
+        view.get(key)
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let text = format!(
+        "environment health : {}\nsafe mode         : {}\nprovider          : {}\nopen incidents    : {}\n\
+         active risks      : {}\npending approvals : {}\nrecent actions    : {}\npredictions       : {}\n\
+         pressure signals  : {}",
+        field("environment_health"),
+        field("safe_mode"),
+        if view
+            .get("provider_ready")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            "ready"
+        } else {
+            "degraded"
+        },
+        count("open_incidents"),
+        count("active_risks"),
+        count("pending_approvals"),
+        count("recent_actions"),
+        view.get("predictions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        view.get("pressure")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Sentinel — the 24/7 watch ")
+        .border_style(Style::default().fg(Color::DarkGray));
+    f.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_overview(f: &mut Frame, area: Rect, data: &Data) {
