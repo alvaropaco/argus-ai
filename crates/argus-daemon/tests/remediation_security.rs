@@ -289,7 +289,7 @@ async fn an_unclassified_subject_is_refused_and_nothing_executes() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -351,7 +351,7 @@ async fn the_memory_pressure_scenario_protects_the_service_and_adjusts_the_consu
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -395,7 +395,7 @@ async fn a_signal_plan_pauses_and_executes_only_after_a_single_use_grant() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -417,7 +417,7 @@ async fn a_signal_plan_pauses_and_executes_only_after_a_single_use_grant() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -433,7 +433,7 @@ async fn a_signal_plan_pauses_and_executes_only_after_a_single_use_grant() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -446,7 +446,7 @@ async fn a_signal_plan_pauses_and_executes_only_after_a_single_use_grant() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await
@@ -467,7 +467,7 @@ async fn a_signal_plan_pauses_and_executes_only_after_a_single_use_grant() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -502,7 +502,7 @@ async fn a_capability_the_cloud_policy_denies_never_reaches_the_boundary() {
         &cloud_policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -534,7 +534,7 @@ async fn a_proposed_but_not_permuted_step_cannot_reach_the_executor() {
         &policy,
         &service,
         &events,
-        AutonomyMode::ObserveOnly,
+        AutonomyMode::L0Observe,
         &p,
     )
     .await;
@@ -631,7 +631,7 @@ async fn a_failed_freeze_rolls_back_the_earlier_freeze() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -676,7 +676,7 @@ async fn an_unfreezable_target_without_rollback_leaves_the_plan_needs_manual() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -706,7 +706,7 @@ async fn the_daemon_refuses_unclassified_governed_adjustments_end_to_end() {
     let outcome = daemon
         .run_remediation(
             &plan(vec![(freeze_action("workload.batch/app"), None)]),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
             &events,
         )
         .await;

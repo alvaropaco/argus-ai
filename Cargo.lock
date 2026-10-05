@@ -232,10 +232,13 @@ dependencies = [
  "argus-incidents",
  "argus-investigate",
  "argus-ipc",
+ "argus-memory",
  "argus-observability",
  "argus-observe",
  "argus-policy",
+ "argus-reporting",
  "argus-risk",
+ "argus-runbooks",
  "argus-sensors",
  "argus-state",
  "argus-systemd",
@@ -351,6 +354,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-memory"
+version = "0.1.10"
+dependencies = [
+ "argus-domain",
+ "chrono",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "argus-observability"
 version = "0.1.10"
 dependencies = [
@@ -388,6 +401,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-reporting"
+version = "0.1.10"
+dependencies = [
+ "argus-domain",
+ "argus-incidents",
+ "argus-risk",
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "argus-risk"
 version = "0.1.10"
 dependencies = [
@@ -396,6 +422,17 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "argus-runbooks"
+version = "0.1.10"
+dependencies = [
+ "argus-domain",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "uuid",
 ]
 

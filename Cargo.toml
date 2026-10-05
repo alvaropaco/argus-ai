@@ -25,6 +25,9 @@ members = [
     "crates/argus-incidents",
     "crates/argus-investigate",
     "crates/argus-kubernetes",
+    "crates/argus-memory",
+    "crates/argus-runbooks",
+    "crates/argus-reporting",
 ]
 
 [workspace.package]
@@ -74,6 +77,9 @@ argus-risk = { version = "0.1.10", path = "crates/argus-risk" }
 argus-incidents = { version = "0.1.10", path = "crates/argus-incidents" }
 argus-investigate = { version = "0.1.10", path = "crates/argus-investigate" }
 argus-kubernetes = { version = "0.1.10", path = "crates/argus-kubernetes" }
+argus-memory = { version = "0.1.10", path = "crates/argus-memory" }
+argus-runbooks = { version = "0.1.10", path = "crates/argus-runbooks" }
+argus-reporting = { version = "0.1.10", path = "crates/argus-reporting" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

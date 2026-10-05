@@ -8,6 +8,7 @@
 mod approval;
 mod autopilot;
 mod bootstrap;
+mod escalation;
 
 pub use approval::ApprovalStore;
 pub use autopilot::{
@@ -15,6 +16,9 @@ pub use autopilot::{
     ResourceAdjustment, ResourceGovernor,
 };
 pub use bootstrap::BootstrapPolicyEvaluator;
+pub use escalation::{
+    Environment, Escalation, EscalationInput, EvidenceQuality, decide_escalation,
+};
 
 use argus_domain::{AuthorizationRequest, PolicyDecision};
 

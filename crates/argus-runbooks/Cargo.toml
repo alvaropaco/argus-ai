@@ -1,0 +1,17 @@
+[package]
+name = "argus-runbooks"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS declarative runbooks with gated promotion (ADR-0036): candidate procedures whose allowed actions are policy candidates, never grants"
+
+[dependencies]
+argus-domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

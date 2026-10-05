@@ -8,17 +8,96 @@ use serde_json::Value;
 
 use crate::{BlastRadius, CapabilityId, ResourceId};
 
-/// The configured level of autonomous authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The configured level of autonomous authority (ADR-0035): L0 Observe
+/// through L5 Adaptive. A higher level grants more *autonomy* — what may run
+/// automatically — never more privilege: the security boundary, policy engine,
+/// executor, validation, and audit are identical at every level.
+///
+/// Serde compatibility: the spec-002 three-mode values persist
+/// (`observe_only` → L0, `propose` → L2, `assisted` → L3) so previously
+/// written configurations still parse; serialization emits the canonical
+/// `l0_observe`…`l5_adaptive` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AutonomyMode {
-    /// Reason, but never propose execution.
-    ObserveOnly,
-    /// Produce plans that require operator approval.
+    /// L0 — reason, but never propose execution. The default until an
+    /// operator explicitly raises it.
     #[default]
-    Propose,
-    /// Execute only explicitly permitted low-risk actions; the rest require approval.
-    Assisted,
+    L0Observe,
+    /// L1 — explain what is happening; no proposed actions surface.
+    L1Explain,
+    /// L2 — produce plans that require operator approval.
+    L2Recommend,
+    /// L3 — execute only explicitly permitted low-risk actions; the rest
+    /// require approval.
+    L3Assisted,
+    /// L4 — bounded autonomous execution of policy-allowed controlled-risk
+    /// actions; high-risk and irreversible stay approval-gated.
+    L4Autonomous,
+    /// L5 — L4 plus gated learning (candidate runbooks proposed for the
+    /// promotion ladder); the action boundary is identical to L4.
+    L5Adaptive,
+}
+
+impl AutonomyMode {
+    /// The spec-002 three-mode names, for compatibility with written state.
+    pub fn from_legacy_name(name: &str) -> Option<Self> {
+        match name {
+            "observe_only" => Some(Self::L0Observe),
+            "propose" => Some(Self::L2Recommend),
+            "assisted" => Some(Self::L3Assisted),
+            _ => None,
+        }
+    }
+
+    /// The canonical snake_case name (`l0_observe` … `l5_adaptive`).
+    pub fn canonical_name(&self) -> &'static str {
+        match self {
+            Self::L0Observe => "l0_observe",
+            Self::L1Explain => "l1_explain",
+            Self::L2Recommend => "l2_recommend",
+            Self::L3Assisted => "l3_assisted",
+            Self::L4Autonomous => "l4_autonomous",
+            Self::L5Adaptive => "l5_adaptive",
+        }
+    }
+}
+
+impl Serialize for AutonomyMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.canonical_name())
+    }
+}
+
+impl<'de> Deserialize<'de> for AutonomyMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        // Accept both the canonical names and the spec-002 legacy names.
+        if let Some(mode) = Self::from_legacy_name(&name) {
+            return Ok(mode);
+        }
+        match name.as_str() {
+            "l0_observe" => Ok(Self::L0Observe),
+            "l1_explain" => Ok(Self::L1Explain),
+            "l2_recommend" => Ok(Self::L2Recommend),
+            "l3_assisted" => Ok(Self::L3Assisted),
+            "l4_autonomous" => Ok(Self::L4Autonomous),
+            "l5_adaptive" => Ok(Self::L5Adaptive),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &[
+                    "l0_observe",
+                    "l1_explain",
+                    "l2_recommend",
+                    "l3_assisted",
+                    "l4_autonomous",
+                    "l5_adaptive",
+                    "observe_only",
+                    "propose",
+                    "assisted",
+                ],
+            )),
+        }
+    }
 }
 
 /// A desired condition over a resource (e.g. "service nginx is running").
@@ -202,16 +281,28 @@ mod tests {
     use crate::BlastRadius;
 
     #[test]
-    fn autonomy_mode_defaults_to_conservative_propose() {
-        assert_eq!(AutonomyMode::default(), AutonomyMode::Propose);
+    fn autonomy_mode_defaults_to_the_most_conservative_level() {
+        assert_eq!(AutonomyMode::default(), AutonomyMode::L0Observe);
     }
 
     #[test]
-    fn autonomy_mode_serde_round_trip() {
-        let json = serde_json::to_string(&AutonomyMode::Assisted).unwrap();
-        assert_eq!(json, "\"assisted\"");
+    fn autonomy_mode_serde_round_trip_and_legacy_compat() {
+        // Canonical serialization.
+        let json = serde_json::to_string(&AutonomyMode::L3Assisted).unwrap();
+        assert_eq!(json, "\"l3_assisted\"");
         let back: AutonomyMode = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, AutonomyMode::Assisted);
+        assert_eq!(back, AutonomyMode::L3Assisted);
+        // Spec-002 legacy values still parse (ADR-0035 persisted-value map).
+        for (legacy, expected) in [
+            ("\"observe_only\"", AutonomyMode::L0Observe),
+            ("\"propose\"", AutonomyMode::L2Recommend),
+            ("\"assisted\"", AutonomyMode::L3Assisted),
+        ] {
+            let parsed: AutonomyMode = serde_json::from_str(legacy).unwrap();
+            assert_eq!(parsed, expected);
+        }
+        // Unknown values still fail closed.
+        assert!(serde_json::from_str::<AutonomyMode>("\"autonomous\"").is_err());
     }
 
     #[test]

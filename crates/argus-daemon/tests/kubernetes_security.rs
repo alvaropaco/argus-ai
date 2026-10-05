@@ -360,7 +360,7 @@ async fn the_deferred_drain_and_reschedule_are_denied_by_default_everywhere() {
             &policy,
             &service,
             &events,
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
             &p,
         )
         .await;
@@ -400,7 +400,7 @@ async fn pod_delete_is_denied_until_a_policy_explicitly_permits_it() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -439,7 +439,7 @@ async fn the_policy_permitted_rollback_executes_after_approval_and_is_validated(
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -464,7 +464,7 @@ async fn the_policy_permitted_rollback_executes_after_approval_and_is_validated(
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -516,7 +516,7 @@ async fn a_pod_restart_validates_against_live_pod_state() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -537,7 +537,7 @@ async fn a_pod_restart_validates_against_live_pod_state() {
         &policy,
         &service,
         &events,
-        AutonomyMode::Assisted,
+        AutonomyMode::L3Assisted,
         &p,
     )
     .await;
@@ -573,7 +573,7 @@ async fn a_granted_resume_without_a_configured_cluster_fails_closed() {
                 CapabilityId::K8S_DEPLOYMENT_ROLLBACK,
                 json!({ "namespace": "prod", "name": "api", "revision": 12 }),
             )]),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
             &events,
         )
         .await;

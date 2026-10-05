@@ -559,7 +559,7 @@ impl Daemon {
             events,
             // A resumed plan is authorized; Propose would block the
             // already-approved step again.
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
             &ports,
         )
         .await

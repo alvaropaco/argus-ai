@@ -52,8 +52,24 @@
 > sources and the `what_changed_before` query ranking recency ×
 > workload-proximity into a `HYPOTHESIS` (never a finding). `prediction.issued`
 > / `change.detected` event constants added.
-> Milestone 6 (T029–T035) remains not started: `argus-memory`,
-> `argus-runbooks`, and `argus-reporting` still do not exist.
+> Milestone 6 (T029–T035) was implemented on 2026-10-05, completing spec 003:
+> `crates/argus-memory` (five deterministic layers per ADR-0038 — working,
+> operational with freshness gates, episodic, semantic typed facts/dependency
+> edges, procedural with success history — plus incident similarity over
+> typed fields, never embeddings), `crates/argus-runbooks` (declarative
+> runbooks whose allowed actions are policy candidates, the six-gate
+> promotion ladder evaluation → simulation → validation → policy → approval
+> → promotion per ADR-0036), impact simulation (blast radius, dependencies,
+> recovery, rollback feasibility, safer alternative; unknown figures stay
+> unknown), `crates/argus-reporting` (seven report kinds, no invented
+> metrics), the L0–L5 autonomy migration with legacy serde compatibility
+> (ADR-0035), `argus-policy::escalation` (OBSERVE/EXPLAIN/RECOMMEND/
+> ASK-HUMAN/AUTO-FIX, policy final), the daemon sentinel (`SentinelView`,
+> safe-mode degradation, `autofix_plan` that refuses what the decision
+> refused), self-observability counters + `SafeMode` in `argus-observability`
+> (CAP-24), and `tests/adaptive_e2e.rs` covering AC-014..AC-020 plus the
+> full success-signal scenario and a determinism suite. **987 workspace
+> tests**, clippy/fmt clean, kube feature compile-checked.
 
 ## Tasks
 
@@ -102,13 +118,13 @@
 
 ### Phase 6 — Milestone 6: Adaptive ARGUS (CAP-16..24)
 
-- [ ] T029 [P1] Create `crates/argus-memory` (working/operational/episodic/semantic/procedural layers, deterministic)
-- [ ] T030 [P1] Create `crates/argus-runbooks` (declarative runbooks + gated promotion)
-- [ ] T031 [P1] Implement incident similarity (typed fields) + impact simulation (blast radius, recovery time, alternative)
-- [ ] T032 [P1] Create `crates/argus-reporting` (real-time/daily/weekly/security/capacity/root-cause/postmortem, no invented metrics)
-- [ ] T033 [P1] Implement sentinel mode + escalation decision (OBSERVE/EXPLAIN/RECOMMEND/ASK-HUMAN/AUTO-FIX) + autonomy L0–L5 gating in `argus-daemon`
-- [ ] T034 [P1] Implement self-observability (CAP-24) in `argus-observability`/`argus-daemon`
-- [ ] T035 [P0] End-to-end success-signal scenario + full failure/security/deterministic-AI test suites
+- [X] T029 [P1] Create `crates/argus-memory` (working/operational/episodic/semantic/procedural layers, deterministic)
+- [X] T030 [P1] Create `crates/argus-runbooks` (declarative runbooks + gated promotion)
+- [X] T031 [P1] Implement incident similarity (typed fields) + impact simulation (blast radius, recovery time, alternative)
+- [X] T032 [P1] Create `crates/argus-reporting` (real-time/daily/weekly/security/capacity/root-cause/postmortem, no invented metrics)
+- [X] T033 [P1] Implement sentinel mode + escalation decision (OBSERVE/EXPLAIN/RECOMMEND/ASK-HUMAN/AUTO-FIX) + autonomy L0–L5 gating in `argus-daemon`
+- [X] T034 [P1] Implement self-observability (CAP-24) in `argus-observability`/`argus-daemon`
+- [X] T035 [P0] End-to-end success-signal scenario + full failure/security/deterministic-AI test suites
 
 ## Dependencies
 
@@ -146,10 +162,10 @@ M1 (sensors → observe → baselines)
 
 ## Verification Checklist
 
-- [ ] Constitution satisfied (all 18 principles; see plan.md §13)
-- [ ] New ADRs 0032–0038 satisfied
-- [ ] No unauthorized privilege expansion
-- [ ] Domain model remains infrastructure-agnostic (no store/k8s types in `argus-domain`)
-- [ ] Tests pass (`cargo test --workspace`)
-- [ ] Telemetry present (logs/traces/metrics/audit)
-- [ ] Rollback/failure behavior documented and tested
+- [X] Constitution satisfied (all 18 principles; see plan.md §13)
+- [X] New ADRs 0032–0038 satisfied
+- [X] No unauthorized privilege expansion
+- [X] Domain model remains infrastructure-agnostic (no store/k8s types in `argus-domain`)
+- [X] Tests pass (`cargo test --workspace`)
+- [X] Telemetry present (logs/traces/metrics/audit)
+- [X] Rollback/failure behavior documented and tested

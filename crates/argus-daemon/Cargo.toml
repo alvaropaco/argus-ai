@@ -28,6 +28,9 @@ argus-ipc = { workspace = true }
 argus-observability = { workspace = true }
 argus-state = { workspace = true }
 argus-policy = { workspace = true }
+argus-reporting = { workspace = true }
+argus-runbooks = { workspace = true }
+argus-memory = { workspace = true }
 argus-executor = { workspace = true }
 argus-events = { workspace = true }
 argus-validate = { workspace = true }
@@ -37,10 +40,10 @@ argus-observe = { workspace = true }
 argus-anomaly = { workspace = true }
 argus-systemd = { workspace = true }
 argus-container = { workspace = true }
+argus-risk = { workspace = true }
 
 [dev-dependencies]
 argus-correlate = { workspace = true }
-argus-risk = { workspace = true }
 argus-incidents = { workspace = true }
 argus-investigate = { workspace = true }
 

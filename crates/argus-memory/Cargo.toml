@@ -1,0 +1,16 @@
+[package]
+name = "argus-memory"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS operational memory: working/operational/episodic/semantic/procedural layers over deterministic keyed records (ADR-0038)"
+
+[dependencies]
+argus-domain = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

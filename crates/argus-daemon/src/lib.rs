@@ -10,6 +10,7 @@ pub mod handler;
 pub mod observe;
 pub mod privileged;
 pub mod runtime;
+pub mod sentinel;
 
 pub use cloud::{
     CloudSecretStore, EnrollmentError, EnrollmentReport, EnrollmentRequest, SecretError,

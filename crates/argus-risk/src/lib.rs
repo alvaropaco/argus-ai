@@ -5,11 +5,15 @@
 //! authority). The risk model stays advisory by construction — including the
 //! labeled predictions (CAP-11) this crate issues and classifies.
 
+mod impact;
 mod prediction;
 
 use argus_domain::{ResourceId, Severity};
 use serde::{Deserialize, Serialize};
 
+pub use impact::{
+    ImpactEstimate, RollbackFeasibility, SimulationInput, impact_summary, simulate_impact,
+};
 pub use prediction::{
     MIN_TREND_SAMPLES, labeled_prose, predict_capacity, predict_recurring_failures,
     prediction_breach_risk, recurring_failure_risk,

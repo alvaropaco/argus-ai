@@ -8,6 +8,10 @@ use opentelemetry_otlp::WithExportConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+mod selfobs;
+
+pub use selfobs::{DegradationThresholds, SafeMode, SelfHealth, SelfObservability};
+
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 

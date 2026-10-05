@@ -1207,7 +1207,7 @@ mod tests {
             &policy,
             service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await
         {
@@ -1231,7 +1231,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1266,7 +1266,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await
         {
@@ -1290,7 +1290,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1338,7 +1338,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1363,7 +1363,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await
         {
@@ -1387,7 +1387,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
         assert!(matches!(first, ResumeOutcome::Finished(_)));
@@ -1399,7 +1399,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
         assert_eq!(outcome_refusal(&second), ResumeRefusal::NoGrant);
@@ -1432,7 +1432,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1464,7 +1464,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1488,7 +1488,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1522,7 +1522,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await
         {
@@ -1574,7 +1574,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Propose,
+            AutonomyMode::L2Recommend,
         )
         .await
         {
@@ -1605,7 +1605,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1632,7 +1632,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1726,7 +1726,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1756,7 +1756,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1784,7 +1784,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1934,7 +1934,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -1952,7 +1952,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -2002,7 +2002,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
 
@@ -2033,7 +2033,7 @@ mod tests {
             &policy,
             &service,
             events.as_ref(),
-            AutonomyMode::Assisted,
+            AutonomyMode::L3Assisted,
         )
         .await;
         assert_eq!(outcome.status, PlanStatus::Completed);
