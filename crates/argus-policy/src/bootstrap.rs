@@ -48,6 +48,22 @@ impl BootstrapPolicyEvaluator {
             CapabilityId::CONTAINER_RESTART,
             CapabilityId::HOST_CGROUP_FREEZE,
             CapabilityId::HOST_CGROUP_THAW,
+            // Spec 003 M4 Kubernetes surface: the read-only intelligence and
+            // the controlled self-healing effects. Deliberately absent:
+            // `k8s.pod.delete` (high risk) and the deferred
+            // `k8s.node.drain`/`k8s.workload.reschedule` — no policy permits
+            // them in this milestone (ADR-0037 §4).
+            CapabilityId::K8S_CLUSTER_READ,
+            CapabilityId::K8S_NODE_READ,
+            CapabilityId::K8S_POD_READ,
+            CapabilityId::K8S_DEPLOYMENT_READ,
+            CapabilityId::K8S_POD_RESTART,
+            CapabilityId::K8S_DEPLOYMENT_RESTART,
+            CapabilityId::K8S_DEPLOYMENT_ROLLBACK,
+            CapabilityId::K8S_WORKLOAD_SCALE,
+            CapabilityId::K8S_NODE_CORDON,
+            CapabilityId::K8S_NODE_UNCORDON,
+            CapabilityId::K8S_JOB_CLEANUP,
         ] {
             evaluator
                 .allowed

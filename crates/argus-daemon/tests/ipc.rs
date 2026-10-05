@@ -135,6 +135,22 @@ async fn capabilities_lists_bootstrap_set() {
             "host.service.start".to_string(),
             "host.service.stop".to_string(),
             "host.status.read".to_string(),
+            // Spec 003 M4 Kubernetes surface. `k8s.node.drain` and
+            // `k8s.workload.reschedule` are deliberately absent: deferred and
+            // deny-by-default (ADR-0037 §4) — unregistered, so no executor
+            // and no policy path exists for them.
+            "k8s.cluster.read".to_string(),
+            "k8s.deployment.read".to_string(),
+            "k8s.deployment.restart".to_string(),
+            "k8s.deployment.rollback".to_string(),
+            "k8s.job.cleanup".to_string(),
+            "k8s.node.cordon".to_string(),
+            "k8s.node.read".to_string(),
+            "k8s.node.uncordon".to_string(),
+            "k8s.pod.delete".to_string(),
+            "k8s.pod.read".to_string(),
+            "k8s.pod.restart".to_string(),
+            "k8s.workload.scale".to_string(),
         ]
     );
     cleanup(&path);

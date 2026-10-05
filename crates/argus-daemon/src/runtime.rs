@@ -523,7 +523,7 @@ impl Daemon {
     ) -> RunOutcome {
         let policy = BootstrapPolicyEvaluator::with_local_remediation();
         let ports = self.remediation_ports();
-        crate::control::authorize_and_run_with_ports(
+        let outcome = crate::control::authorize_and_run_with_ports(
             plan,
             &self.registry,
             &policy,
@@ -532,7 +532,14 @@ impl Daemon {
             autonomy,
             &ports,
         )
-        .await
+        .await;
+        // A paused plan is stored, so the operator approval surface
+        // (`approval.grant`/`deny`) can act on its token — a plan the daemon
+        // forgot would be unapprovable and stuck forever.
+        if let RunOutcome::Pending(pending) = &outcome {
+            self.pending.store(pending.clone());
+        }
+        outcome
     }
 
     /// Resumes a paused remediation plan with a previously granted approval.
@@ -559,12 +566,21 @@ impl Daemon {
     }
 
     /// The remediation ports over the daemon's own controllers and executor.
+    ///
+    /// The Kubernetes port ships degraded (no cluster configured) until the
+    /// `kube` feature's cluster configuration lands; effects then fail with a
+    /// clear `Unavailable` rather than silently succeeding (ADR-0037 §2).
     fn remediation_ports(&self) -> LoopPorts<'_> {
+        static UNAVAILABLE_CLUSTER: argus_executor::UnavailableClusterController =
+            argus_executor::UnavailableClusterController;
+        static NO_KUBERNETES: NoKubernetesExecutor = NoKubernetesExecutor;
         LoopPorts {
             governor: self.governor.as_ref(),
             containers: self.containers.as_ref(),
             cgroups: self.cgroups.as_ref(),
+            cluster: &UNAVAILABLE_CLUSTER,
             remediation: self.remediation.as_ref(),
+            kubernetes: &NO_KUBERNETES,
         }
     }
 
@@ -1073,6 +1089,21 @@ fn bootstrap_capabilities() -> Vec<CapabilityId> {
         CapabilityId::CONTAINER_RESTART,
         CapabilityId::HOST_CGROUP_FREEZE,
         CapabilityId::HOST_CGROUP_THAW,
+        // Spec 003 M4 Kubernetes surface (ADR-0037 §4). Registration
+        // publishes and gates them; the deferred drain/reschedule stay
+        // unregistered — they have no executor and no policy path.
+        CapabilityId::K8S_CLUSTER_READ,
+        CapabilityId::K8S_NODE_READ,
+        CapabilityId::K8S_POD_READ,
+        CapabilityId::K8S_DEPLOYMENT_READ,
+        CapabilityId::K8S_POD_RESTART,
+        CapabilityId::K8S_POD_DELETE,
+        CapabilityId::K8S_DEPLOYMENT_RESTART,
+        CapabilityId::K8S_DEPLOYMENT_ROLLBACK,
+        CapabilityId::K8S_WORKLOAD_SCALE,
+        CapabilityId::K8S_NODE_CORDON,
+        CapabilityId::K8S_NODE_UNCORDON,
+        CapabilityId::K8S_JOB_CLEANUP,
     ]
     .into_iter()
     .map(|c| CapabilityId::new(c).expect("bootstrap capability ids are valid"))
@@ -1085,6 +1116,7 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
         .map(|id| {
             let service = is_service_capability(&id);
             let remediation = is_remediation_capability(&id);
+            let kubernetes = is_kubernetes_capability(&id);
             let input_schema = if service {
                 serde_json::json!({
                     "type": "object",
@@ -1116,6 +1148,39 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
                     "properties": { "path": { "type": "string" } },
                     "additionalProperties": false,
                 })
+            } else if kubernetes {
+                if id.as_str().ends_with(".read") {
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "namespace": { "type": "string" },
+                            "name": { "type": "string" },
+                        },
+                        "additionalProperties": false,
+                    })
+                } else if id.as_str() == CapabilityId::K8S_WORKLOAD_SCALE {
+                    serde_json::json!({
+                        "type": "object",
+                        "required": ["name", "replicas"],
+                        "properties": {
+                            "namespace": { "type": "string" },
+                            "name": { "type": "string" },
+                            "replicas": { "type": "integer", "minimum": 0 },
+                        },
+                        "additionalProperties": false,
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "namespace": { "type": "string" },
+                            "name": { "type": "string" },
+                            "revision": { "type": "integer" },
+                        },
+                        "additionalProperties": false,
+                    })
+                }
             } else {
                 serde_json::json!({ "type": "object", "additionalProperties": false })
             };
@@ -1153,6 +1218,33 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
                     BlastRadius::Host,
                     false,
                 )
+            } else if kubernetes {
+                // Per contracts/capabilities.md: reads are READ with no
+                // approval, the self-healing effects are CONTROLLED with a
+                // per-invocation approval, and `k8s.pod.delete` is HIGH_RISK.
+                // Blast radius is the cluster environment.
+                if id.as_str() == CapabilityId::K8S_POD_DELETE {
+                    (
+                        RiskClass::HighRisk,
+                        Reversibility::None,
+                        BlastRadius::Environment,
+                        true,
+                    )
+                } else if id.as_str().ends_with(".read") {
+                    (
+                        RiskClass::Read,
+                        Reversibility::None,
+                        BlastRadius::None,
+                        false,
+                    )
+                } else {
+                    (
+                        RiskClass::Controlled,
+                        Reversibility::Reversible,
+                        BlastRadius::Environment,
+                        true,
+                    )
+                }
             } else {
                 (
                     RiskClass::Read,
@@ -1179,6 +1271,20 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
         .collect()
 }
 
+/// A refusing stand-in for the k8s executor slot until a cluster is wired;
+/// every k8s effect reports Unsupported rather than reaching any API.
+#[derive(Debug, Default)]
+struct NoKubernetesExecutor;
+
+impl argus_executor::Executor for NoKubernetesExecutor {
+    fn execute(
+        &self,
+        action: &argus_executor::AuthorizedAction,
+    ) -> Result<argus_executor::ExecutionResult, ExecutionError> {
+        Err(ExecutionError::Unsupported(action.capability().clone()))
+    }
+}
+
 fn is_service_capability(id: &CapabilityId) -> bool {
     matches!(
         id.as_str(),
@@ -1197,6 +1303,11 @@ fn is_remediation_capability(id: &CapabilityId) -> bool {
             | CapabilityId::HOST_CGROUP_FREEZE
             | CapabilityId::HOST_CGROUP_THAW
     )
+}
+
+/// Whether the capability belongs to the spec-003 M4 Kubernetes surface.
+fn is_kubernetes_capability(id: &CapabilityId) -> bool {
+    id.as_str().starts_with("k8s.")
 }
 
 /// In-memory pending-approval store: plans paused at an approval-requiring step,

@@ -120,6 +120,41 @@ impl CapabilityId {
     /// subtree; the declared rollback of a freeze.
     pub const HOST_CGROUP_THAW: &'static str = "host.cgroup.thaw";
 
+    /// Read-only Kubernetes intelligence (spec 003 M4, FR-014): cluster summary.
+    pub const K8S_CLUSTER_READ: &'static str = "k8s.cluster.read";
+    /// Read-only Kubernetes intelligence: nodes.
+    pub const K8S_NODE_READ: &'static str = "k8s.node.read";
+    /// Read-only Kubernetes intelligence: pods.
+    pub const K8S_POD_READ: &'static str = "k8s.pod.read";
+    /// Read-only Kubernetes intelligence: deployments.
+    pub const K8S_DEPLOYMENT_READ: &'static str = "k8s.deployment.read";
+
+    /// Self-healing capability (spec 003 M4, FR-016): delete a pod so its
+    /// controller reschedules it.
+    pub const K8S_POD_RESTART: &'static str = "k8s.pod.restart";
+    /// Self-healing capability: delete a pod outright (high risk; denied
+    /// outright until a policy explicitly permits it).
+    pub const K8S_POD_DELETE: &'static str = "k8s.pod.delete";
+    /// Self-healing capability: rollout-restart a deployment.
+    pub const K8S_DEPLOYMENT_RESTART: &'static str = "k8s.deployment.restart";
+    /// Self-healing capability: roll a deployment back to a prior revision.
+    pub const K8S_DEPLOYMENT_ROLLBACK: &'static str = "k8s.deployment.rollback";
+    /// Self-healing capability: scale a workload, bounded by quota.
+    pub const K8S_WORKLOAD_SCALE: &'static str = "k8s.workload.scale";
+    /// Self-healing capability: cordon a node.
+    pub const K8S_NODE_CORDON: &'static str = "k8s.node.cordon";
+    /// Self-healing capability: uncordon a node.
+    pub const K8S_NODE_UNCORDON: &'static str = "k8s.node.uncordon";
+    /// Self-healing capability: clean up completed/failed jobs.
+    pub const K8S_JOB_CLEANUP: &'static str = "k8s.job.cleanup";
+
+    /// Higher-risk Kubernetes actions that remain **deny-by-default and
+    /// deferred** (ADR-0037 §4): no policy permits them and no executor
+    /// performs them in this milestone.
+    pub const K8S_NODE_DRAIN: &'static str = "k8s.node.drain";
+    /// See [`CapabilityId::K8S_NODE_DRAIN`].
+    pub const K8S_WORKLOAD_RESCHEDULE: &'static str = "k8s.workload.reschedule";
+
     /// Constructs a capability id, validating the dotted-path grammar.
     pub fn new(path: &str) -> Result<Self, DomainError> {
         if !is_dotted_path(path) {

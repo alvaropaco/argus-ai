@@ -10,8 +10,8 @@ use argus_domain::{
 };
 use argus_events::{EventBus, types};
 use argus_executor::{
-    AuthorizedAction, CgroupController, ContainerController, Executor, RemediationExecutor,
-    ServiceController,
+    AuthorizedAction, CgroupController, ClusterController, ContainerController, Executor,
+    KubernetesExecutor, RemediationExecutor, ServiceController,
 };
 use argus_policy::{
     ApprovalStore, GovernanceDecision, PolicyEvaluator, ResourceAdjustment, ResourceGovernor,
@@ -30,7 +30,9 @@ pub struct LoopPorts<'a> {
     pub governor: &'a dyn ResourceGovernor,
     pub containers: &'a dyn ContainerController,
     pub cgroups: &'a dyn CgroupController,
+    pub cluster: &'a dyn ClusterController,
     pub remediation: &'a dyn Executor,
+    pub kubernetes: &'a dyn Executor,
 }
 
 impl LoopPorts<'_> {
@@ -82,12 +84,17 @@ impl LoopPorts<'_> {
 
         static NO_CONTAINERS: NoController = NoController;
         static NO_CGROUPS: NoController = NoController;
+        static NO_CLUSTER: argus_executor::UnavailableClusterController =
+            argus_executor::UnavailableClusterController;
         static NO_EXECUTOR: NoExecutor = NoExecutor;
+        static NO_KUBERNETES: NoExecutor = NoExecutor;
         Self {
             governor: &NO_GOVERNOR,
             containers: &NO_CONTAINERS,
             cgroups: &NO_CGROUPS,
+            cluster: &NO_CLUSTER,
             remediation: &NO_EXECUTOR,
+            kubernetes: &NO_KUBERNETES,
         }
     }
 }
@@ -162,10 +169,23 @@ fn risk_for(capability: &CapabilityId) -> RiskClass {
         | CapabilityId::HOST_SERVICE_START
         | CapabilityId::HOST_CGROUP_FREEZE
         | CapabilityId::HOST_CGROUP_THAW => RiskClass::LowRisk,
-        CapabilityId::HOST_PROCESS_SIGNAL => RiskClass::HighRisk,
-        CapabilityId::CONTAINER_RESTART => RiskClass::Controlled,
+        CapabilityId::HOST_PROCESS_SIGNAL | CapabilityId::K8S_POD_DELETE => RiskClass::HighRisk,
+        CapabilityId::CONTAINER_RESTART
+        | CapabilityId::K8S_POD_RESTART
+        | CapabilityId::K8S_DEPLOYMENT_RESTART
+        | CapabilityId::K8S_DEPLOYMENT_ROLLBACK
+        | CapabilityId::K8S_WORKLOAD_SCALE
+        | CapabilityId::K8S_NODE_CORDON
+        | CapabilityId::K8S_NODE_UNCORDON
+        | CapabilityId::K8S_JOB_CLEANUP => RiskClass::Controlled,
+        CapabilityId::K8S_NODE_DRAIN | CapabilityId::K8S_WORKLOAD_RESCHEDULE => RiskClass::HighRisk,
         _ => RiskClass::Controlled,
     }
+}
+
+/// Whether the action names one of the Kubernetes self-healing capabilities.
+fn is_kubernetes_action(capability: &CapabilityId) -> bool {
+    KubernetesExecutor::handles(capability)
 }
 
 /// Whether the action names one of the service capabilities the loop executes
@@ -181,10 +201,20 @@ fn is_service_action(capability: &CapabilityId) -> bool {
 
 /// The subject a governance decision and a live-state read name, per family:
 /// the cgroup path for resource-control, the container id, or the unit.
-fn action_target(action: &Action) -> Option<&str> {
+fn action_target(action: &Action) -> Option<String> {
+    if is_kubernetes_action(&action.capability) {
+        let name = action.arguments.get("name").and_then(Value::as_str)?;
+        let namespace = action
+            .arguments
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or("default");
+        return Some(format!("{namespace}/{name}"));
+    }
     ["path", "container", "unit"]
         .iter()
         .find_map(|key| action.arguments.get(*key).and_then(Value::as_str))
+        .map(str::to_owned)
 }
 
 /// Executes one action through its family's boundary.
@@ -220,6 +250,28 @@ fn execute_action(
 
         return result
             .map(|_| json!({ "unit": unit, "capability": capability.as_str() }))
+            .map_err(|e| e.to_string());
+    }
+
+    if is_kubernetes_action(capability) {
+        let request = CapabilityRequest::new(
+            capability.clone(),
+            Principal::new(None, None),
+            action.resource.clone(),
+            action.arguments.clone(),
+            RequestContext::new(
+                correlation,
+                Version::new(0, 1, 0),
+                Principal::new(None, None),
+                Utc::now(),
+            ),
+        );
+        let authorized = AuthorizedAction::new(request, decision.clone())
+            .map_err(|e| format!("action could not be authorized for execution: {e}"))?;
+        return ports
+            .kubernetes
+            .execute(&authorized)
+            .map(|result| result.evidence)
             .map_err(|e| e.to_string());
     }
 
@@ -466,7 +518,7 @@ async fn run_plan(
         // refusal is final for the step regardless of what policy would say.
         if governed(&action.capability, ports.governor) {
             let adjustment = ResourceAdjustment {
-                subject: action_target(action).unwrap_or_default().to_string(),
+                subject: action_target(action).unwrap_or_default(),
                 capability: action.capability.as_str().to_string(),
                 reason: format!("plan step {} of '{}'", index, plan.objective),
             };
@@ -920,8 +972,48 @@ fn observe_target(action: &Action, env: &RunEnv<'_>) -> Result<bool, String> {
                 .ok_or_else(|| "action missing 'path' argument".to_string())?;
             env.ports.cgroups.is_frozen(path).map_err(|e| e.to_string())
         }
+        CapabilityId::K8S_POD_RESTART | CapabilityId::K8S_POD_DELETE => {
+            let (namespace, name) = k8s_target(action)?;
+            env.ports
+                .cluster
+                .pod_running(&namespace, &name)
+                .map_err(|e| e.to_string())
+        }
+        CapabilityId::K8S_DEPLOYMENT_RESTART | CapabilityId::K8S_DEPLOYMENT_ROLLBACK => {
+            let (namespace, name) = k8s_target(action)?;
+            env.ports
+                .cluster
+                .deployment_available(&namespace, &name)
+                .map_err(|e| e.to_string())
+        }
+        CapabilityId::K8S_NODE_CORDON | CapabilityId::K8S_NODE_UNCORDON => {
+            let name = action
+                .arguments
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "action missing 'name' argument".to_string())?;
+            env.ports
+                .cluster
+                .node_schedulable(name)
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("no live-state read for capability '{other}'")),
     }
+}
+
+/// The `(namespace, name)` a k8s action targets.
+fn k8s_target(action: &Action) -> Result<(String, String), String> {
+    let namespace = action
+        .arguments
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let name = action
+        .arguments
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "action missing 'name' argument".to_string())?;
+    Ok((namespace.to_string(), name.to_string()))
 }
 
 /// Re-observes a just-executed step's target and publishes the validation
@@ -940,7 +1032,7 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
             // Fail closed: no pass is fabricated when the read fails; record it.
             let payload = read_failure_event(
                 &action.capability,
-                target,
+                &target,
                 &env.context_hash,
                 &error.to_string(),
             );
@@ -960,7 +1052,7 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
     // both daemon hooks, so they cannot drift (ADR-0031 §6).
     let Some((event_type, payload)) = validation_event(
         &action.capability,
-        target,
+        &target,
         expected,
         observed,
         &env.context_hash,

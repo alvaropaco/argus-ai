@@ -24,6 +24,7 @@ members = [
     "crates/argus-risk",
     "crates/argus-incidents",
     "crates/argus-investigate",
+    "crates/argus-kubernetes",
 ]
 
 [workspace.package]
@@ -72,6 +73,7 @@ argus-correlate = { version = "0.1.10", path = "crates/argus-correlate" }
 argus-risk = { version = "0.1.10", path = "crates/argus-risk" }
 argus-incidents = { version = "0.1.10", path = "crates/argus-incidents" }
 argus-investigate = { version = "0.1.10", path = "crates/argus-investigate" }
+argus-kubernetes = { version = "0.1.10", path = "crates/argus-kubernetes" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

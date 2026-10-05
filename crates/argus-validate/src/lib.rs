@@ -50,6 +50,14 @@ pub fn desired_state(capability: &CapabilityId) -> Option<bool> {
         CapabilityId::CONTAINER_RESTART => Some(true),
         CapabilityId::HOST_CGROUP_FREEZE => Some(true),
         CapabilityId::HOST_CGROUP_THAW => Some(false),
+        // Kubernetes (spec 003 M4): a restarted/deleted pod is desired gone
+        // from its current (unhealthy) incarnation — restart re-runs it, so
+        // the machine-checkable state is "running again"; delete is "gone".
+        CapabilityId::K8S_POD_RESTART => Some(true),
+        CapabilityId::K8S_POD_DELETE => Some(false),
+        CapabilityId::K8S_DEPLOYMENT_RESTART | CapabilityId::K8S_DEPLOYMENT_ROLLBACK => Some(true),
+        CapabilityId::K8S_NODE_CORDON => Some(false),
+        CapabilityId::K8S_NODE_UNCORDON => Some(true),
         _ => None,
     }
 }

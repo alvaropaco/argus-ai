@@ -250,11 +250,25 @@ fn ports<'a>(
     executor: &'a dyn Executor,
 ) -> control::LoopPorts<'a> {
     static CONTAINERS: MockContainers = MockContainers;
+    static CLUSTER: argus_executor::UnavailableClusterController =
+        argus_executor::UnavailableClusterController;
+    struct NoKubernetes;
+    impl Executor for NoKubernetes {
+        fn execute(
+            &self,
+            action: &argus_executor::AuthorizedAction,
+        ) -> Result<argus_executor::ExecutionResult, ExecutionError> {
+            Err(ExecutionError::Unsupported(action.capability().clone()))
+        }
+    }
+    static NO_KUBERNETES: NoKubernetes = NoKubernetes;
     control::LoopPorts {
         governor,
         containers: &CONTAINERS,
         cgroups,
+        cluster: &CLUSTER,
         remediation: executor,
+        kubernetes: &NO_KUBERNETES,
     }
 }
 

@@ -6,6 +6,7 @@
 
 mod action;
 mod bootstrap;
+mod cluster;
 mod executor;
 mod guardrail;
 mod privileged;
@@ -15,6 +16,10 @@ mod service;
 
 pub use action::{AuthorizedAction, ExecutionError, ExecutionResult, ReversalStatus};
 pub use bootstrap::BootstrapExecutor;
+pub use cluster::{
+    ClusterController, KubernetesExecutor, MaxReplicas, ProtectedNamespaces,
+    UnavailableClusterController, ValidK8sName, kubernetes_guardrails,
+};
 pub use executor::Executor;
 pub use guardrail::{
     AllowedTargets, Guardrail, GuardrailRegistry, GuardrailViolation, NeverTargetArgusd,

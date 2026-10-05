@@ -1,0 +1,39 @@
+[package]
+name = "argus-kubernetes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ARGUS optional Kubernetes provider: monitoring, correlation, evidence bundles"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+argus-domain = { workspace = true }
+argus-executor = { workspace = true }
+
+# The kube-rs backend is feature-gated so the single-host build stays lean
+# (ADR-0037, negative consequences). The API version is pinned through
+# k8s-openapi's build script.
+kube = { version = "2", optional = true, default-features = false, features = [
+    "client",
+    "rustls-tls",
+] }
+k8s-openapi = { version = "0.26", optional = true, default-features = false, features = [
+    "v1_33",
+] }
+http = { version = "1", optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid = { workspace = true }
+
+[features]
+default = []
+kube = ["dep:kube", "dep:k8s-openapi", "dep:http", "dep:tokio"]
+
+[lints]
+workspace = true

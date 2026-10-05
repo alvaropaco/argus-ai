@@ -31,9 +31,18 @@
 > and cgroup-v2 freeze/thaw), resource-autopilot governance in `argus-policy`
 > (`AutopilotGovernor`: criticality, budget, cooldown), the remediation loop
 > wired into the daemon with rollback and validation, and a dedicated security
-> suite (`tests/remediation_security.rs`). Milestones 4–6 (T023–T035) remain
-> not started: `argus-kubernetes`, `argus-memory`, `argus-runbooks`, and
-> `argus-reporting` still do not exist.
+> suite (`tests/remediation_security.rs`).
+>
+> Milestone 4 (T023–T026) was implemented on 2026-10-05 per ADR-0037:
+> `crates/argus-kubernetes` (typed projections + deterministic parsers,
+> CrashLoop/OOM/ImagePull/Pending evidence bundles, pod→container→cgroup→PID
+> correlation, `KubernetesProvider` seam with graceful degradation, and a
+> feature-gated `kube` backend), the `ClusterController` port +
+> `KubernetesExecutor` with namespace protection and quota guardrails, k8s.*
+> descriptors in the daemon registry (drain/reschedule deliberately
+> unregistered — deny-by-default), and `tests/kubernetes_security.rs`.
+> Milestones 5–6 (T027–T035) remain not started: `argus-memory`,
+> `argus-runbooks`, and `argus-reporting` still do not exist.
 
 ## Tasks
 
@@ -70,10 +79,10 @@
 
 ### Phase 4 — Milestone 4: Kubernetes Brain (CAP-12..14)
 
-- [ ] T023 [P1] Create `crates/argus-kubernetes` (kube-rs, optional provider, graceful degradation)
-- [ ] T024 [P1] Implement k8s resource monitoring + pod→container→cgroup→PID correlation
-- [ ] T025 [P1] Implement deterministic troubleshooting evidence bundles (CrashLoop/OOM/ImagePull/Pending)
-- [ ] T026 [P0] Register typed self-healing capabilities (`k8s.*`) + security tests (no kubectl, deny-by-default for drain/reschedule)
+- [X T023 [P1] Create `crates/argus-kubernetes` (kube-rs, optional provider, graceful degradation)
+- [X T024 [P1] Implement k8s resource monitoring + pod→container→cgroup→PID correlation
+- [X T025 [P1] Implement deterministic troubleshooting evidence bundles (CrashLoop/OOM/ImagePull/Pending)
+- [X T026 [P0] Register typed self-healing capabilities (`k8s.*`) + security tests (no kubectl, deny-by-default for drain/reschedule)
 
 ### Phase 5 — Milestone 5: Predictive Operations (CAP-11, CAP-18)
 

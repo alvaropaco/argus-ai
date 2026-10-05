@@ -162,6 +162,7 @@ pub struct CompositeExecutor {
     read_only: Arc<dyn Executor>,
     environment_changing: Arc<dyn Executor>,
     remediation: Option<Arc<dyn Executor>>,
+    kubernetes: Option<Arc<dyn Executor>>,
 }
 
 impl CompositeExecutor {
@@ -170,6 +171,7 @@ impl CompositeExecutor {
             read_only,
             environment_changing,
             remediation: None,
+            kubernetes: None,
         }
     }
 
@@ -180,6 +182,13 @@ impl CompositeExecutor {
         self.remediation = Some(remediation);
         self
     }
+
+    /// Adds the Kubernetes executor (spec 003 M4 capabilities). Omitted
+    /// kubernetes keeps `k8s.*` unrouted — the fail-closed single-host shape.
+    pub fn with_kubernetes(mut self, kubernetes: Arc<dyn Executor>) -> Self {
+        self.kubernetes = Some(kubernetes);
+        self
+    }
 }
 
 impl Executor for CompositeExecutor {
@@ -187,12 +196,24 @@ impl Executor for CompositeExecutor {
         if PrivilegedExecutor::handles(action.capability()) {
             self.environment_changing.execute(action)
         } else if RemediationExecutor::handles(action.capability()) {
-            match &self.remediation {
-                Some(remediation) => remediation.execute(action),
-                None => Err(ExecutionError::Unsupported(action.capability().clone())),
-            }
+            self.dispatch_optional(self.remediation.as_ref(), action)
+        } else if crate::cluster::KubernetesExecutor::handles(action.capability()) {
+            self.dispatch_optional(self.kubernetes.as_ref(), action)
         } else {
             self.read_only.execute(action)
+        }
+    }
+}
+
+impl CompositeExecutor {
+    fn dispatch_optional(
+        &self,
+        executor: Option<&Arc<dyn Executor>>,
+        action: &AuthorizedAction,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        match executor {
+            Some(executor) => executor.execute(action),
+            None => Err(ExecutionError::Unsupported(action.capability().clone())),
         }
     }
 }
