@@ -26,6 +26,16 @@ pub enum DomainError {
     #[error("confidence {0} out of range: expected 0.0..=1.0")]
     ConfidenceOutOfRange(f32),
 
+    /// A [`Prediction`](crate::Prediction) violated a structural invariant
+    /// (non-positive horizon, empty method, or an uncertainty band that does
+    /// not contain the projected value).
+    #[error("invalid prediction: {0}")]
+    InvalidPrediction(String),
+
+    /// A [`Change`](crate::Change) carried an empty `before`/`after`/`actor`.
+    #[error("invalid change: {0}")]
+    InvalidChange(String),
+
     /// A plugin manifest was malformed or failed validation.
     #[error("invalid plugin manifest: {0}")]
     InvalidPluginManifest(String),

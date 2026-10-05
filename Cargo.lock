@@ -168,6 +168,9 @@ dependencies = [
 [[package]]
 name = "argus-anomaly"
 version = "0.1.10"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "argus-cloud"
@@ -390,8 +393,10 @@ version = "0.1.10"
 dependencies = [
  "argus-anomaly",
  "argus-domain",
+ "chrono",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

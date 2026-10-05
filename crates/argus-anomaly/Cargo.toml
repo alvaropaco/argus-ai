@@ -6,5 +6,8 @@ repository.workspace = true
 license.workspace = true
 description = "ARGUS anomaly detection: operational baselines, deviation detection, and restart-loop detection"
 
+[dependencies]
+chrono = { workspace = true }
+
 [lints]
 workspace = true

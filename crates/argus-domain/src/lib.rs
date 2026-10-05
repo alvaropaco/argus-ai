@@ -9,6 +9,7 @@
 
 mod authorization;
 mod capability;
+mod change;
 mod cloud;
 mod context;
 mod error;
@@ -19,6 +20,7 @@ mod id;
 mod mcp;
 mod observation;
 mod plugin;
+mod prediction;
 mod reasoning;
 mod registry;
 mod validate;
@@ -30,6 +32,7 @@ pub use capability::{
     CapabilityDescriptor, OsPrivilege, PrivilegeDeclaration, Reversibility, RiskClass,
     input_matches,
 };
+pub use change::{Change, ChangeSource};
 pub use cloud::{
     AppliedConfigurationState, ApplyStatus, ApprovalState, CapabilityPublication, CloudCommand,
     CloudCommandStatus, CloudConnection, CloudConnectivityState, CloudEnrollment, DecisionOutcome,
@@ -45,6 +48,7 @@ pub use id::{CapabilityId, EnvironmentId, ResourceId};
 pub use mcp::McpRuntime;
 pub use observation::{Observation, ObservedValue, Provenance};
 pub use plugin::{Compatibility, PluginManifest, PluginType};
+pub use prediction::{ObservationRef, Prediction, SignalKey, UncertaintyBand};
 pub use reasoning::{
     Action, AutonomyMode, Execution, ExecutionStatus, Hypothesis, HypothesisStatus, Intent, Plan,
     PlanStatus, PlanStep, plan_context_hash,

@@ -2,10 +2,18 @@
 //!
 //! A [`Risk`] is evidence-backed but is **never** an authorization mechanism:
 //! nothing reaches execution through a risk signal (it is data, never
-//! authority). The risk model stays advisory by construction.
+//! authority). The risk model stays advisory by construction — including the
+//! labeled predictions (CAP-11) this crate issues and classifies.
+
+mod prediction;
 
 use argus_domain::{ResourceId, Severity};
 use serde::{Deserialize, Serialize};
+
+pub use prediction::{
+    MIN_TREND_SAMPLES, labeled_prose, predict_capacity, predict_recurring_failures,
+    prediction_breach_risk, recurring_failure_risk,
+};
 
 /// The category of a risk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

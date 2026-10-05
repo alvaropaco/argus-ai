@@ -41,7 +41,18 @@
 > `KubernetesExecutor` with namespace protection and quota guardrails, k8s.*
 > descriptors in the daemon registry (drain/reschedule deliberately
 > unregistered — deny-by-default), and `tests/kubernetes_security.rs`.
-> Milestones 5–6 (T027–T035) remain not started: `argus-memory`,
+> Milestone 5 (T027–T028) was implemented on 2026-10-05: least-squares trend
+> fits with honest prediction intervals (`argus-anomaly::trend`), labeled
+> `Prediction`s per data-model §4 (`argus-domain::prediction`) issued by
+> `argus-risk::prediction` (capacity breach tiers Error/Warning/Info on the
+> uncertainty band, recurring-failure prediction from cumulative restart
+> series; every rendering is prefixed `PREDICTED` with confidence + band),
+> and change intelligence per data-model §5 (`argus-domain::change` +
+> `argus-correlate::change`): a `ChangeLedger` covering all ten change
+> sources and the `what_changed_before` query ranking recency ×
+> workload-proximity into a `HYPOTHESIS` (never a finding). `prediction.issued`
+> / `change.detected` event constants added.
+> Milestone 6 (T029–T035) remains not started: `argus-memory`,
 > `argus-runbooks`, and `argus-reporting` still do not exist.
 
 ## Tasks
@@ -86,8 +97,8 @@
 
 ### Phase 5 — Milestone 5: Predictive Operations (CAP-11, CAP-18)
 
-- [ ] T027 [P1] Implement trend analysis + capacity/failure prediction (labeled, with uncertainty) in `argus-anomaly`/`argus-risk`
-- [ ] T028 [P1] Implement change intelligence (git/deploy/image/config/k8s/terraform/cloud/package/kernel/service-config) in `argus-correlate`
+- [X] T027 [P1] Implement trend analysis + capacity/failure prediction (labeled, with uncertainty) in `argus-anomaly`/`argus-risk`
+- [X] T028 [P1] Implement change intelligence (git/deploy/image/config/k8s/terraform/cloud/package/kernel/service-config) in `argus-correlate`
 
 ### Phase 6 — Milestone 6: Adaptive ARGUS (CAP-16..24)
 

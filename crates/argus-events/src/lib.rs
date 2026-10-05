@@ -46,4 +46,10 @@ pub mod types {
 
     // Restart loop (CAP-3)
     pub const UNIT_RESTART_LOOP: &str = "unit.restart.loop";
+
+    // Prediction (CAP-11)
+    pub const PREDICTION_ISSUED: &str = "prediction.issued";
+
+    // Change intelligence (CAP-18)
+    pub const CHANGE_DETECTED: &str = "change.detected";
 }
