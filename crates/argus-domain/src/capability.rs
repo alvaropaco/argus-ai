@@ -164,6 +164,13 @@ impl CapabilityDescriptor {
         self
     }
 
+    /// Conditional form of [`Self::requiring_approval`], so descriptor tables
+    /// can compute the flag instead of branching around the builder.
+    pub fn requiring_approval_if(mut self, required: bool) -> Self {
+        self.requires_approval = required;
+        self
+    }
+
     /// Overrides the effective request timeout for this capability.
     pub fn with_timeout_seconds(mut self, seconds: u64) -> Self {
         self.timeout_seconds = Some(seconds);

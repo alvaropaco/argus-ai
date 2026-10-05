@@ -12,7 +12,7 @@ use argus_ai_core::decision::host_health::{
 use argus_ai_core::decision::provenance::DecisionProvenance;
 use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{
-    Action, AuthorizationRequest, BlastRadius, CapabilityDescriptor, CapabilityId,
+    Action, AuthorizationRequest, AutonomyMode, BlastRadius, CapabilityDescriptor, CapabilityId,
     CapabilityRegistry, CapabilityRequest, DomainEvent, EnvironmentId, EventType, Execution,
     ExecutionStatus, HealthStatus, Hypothesis, HypothesisStatus, Observation, ObservedValue, Plan,
     PluginManifest, PolicyOutcome, Principal, PrivilegeDeclaration, Provenance, RequestContext,
@@ -20,9 +20,11 @@ use argus_domain::{
 };
 use argus_events::EventBus;
 use argus_executor::{
-    BootstrapExecutor, CapabilityProvider, ExecutionError, Executor, ServiceController,
+    BootstrapExecutor, CapabilityProvider, CgroupController, CgroupV2Controller,
+    ContainerController, DockerContainerController, ExecutionError, Executor, ProcessController,
+    RemediationExecutor, ServiceController, UnixProcessController, remediation_guardrails,
 };
-use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator, PolicyEvaluator};
+use argus_policy::{ApprovalStore, AutopilotGovernor, BootstrapPolicyEvaluator, PolicyEvaluator};
 use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
 use argus_validate::{desired_state, read_failure_event, validation_event};
 use chrono::Utc;
@@ -35,7 +37,7 @@ use argus_cloud::state::ConnectivityTracker;
 
 use crate::cloud::{CloudSecretStore, ManagedSettingsStore as CloudSettingsStore};
 use crate::config::DaemonConfig;
-use crate::control::PendingPlan;
+use crate::control::{LoopPorts, PendingPlan, ResumeOutcome, RunOutcome};
 
 /// The running daemon and its bootstrap state.
 pub struct Daemon {
@@ -74,6 +76,15 @@ pub struct Daemon {
     /// Decision-provider health (FR-009): flips to degraded when a reasoning
     /// step fails, back to ready when one succeeds.
     provider_health: Arc<std::sync::Mutex<ProviderHealth>>,
+    /// Remediation controllers and the executor boundary for the spec-003 M3
+    /// capabilities (FR-016/FR-017). Guardrails are wired into the executor.
+    processes: Arc<dyn ProcessController>,
+    containers: Arc<dyn ContainerController>,
+    cgroups: Arc<dyn CgroupController>,
+    remediation: Arc<RemediationExecutor>,
+    /// The resource-autopilot governor: the policy-layer gate every governed
+    /// adjustment passes before policy (FR-017).
+    governor: Arc<AutopilotGovernor>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -201,6 +212,22 @@ impl Daemon {
                 .expect("bootstrap descriptors are unique");
         }
 
+        // The remediation surface (spec 003 M3, FR-016/FR-017): typed
+        // controllers behind their ports, guardrails wired at the executor
+        // boundary, and the autopilot governor that gates every governed
+        // adjustment. The default classification set is empty — a subject the
+        // operator has not classified is refused (deny-by-default).
+        let processes: Arc<dyn ProcessController> = Arc::new(UnixProcessController::new());
+        let containers: Arc<dyn ContainerController> = Arc::new(DockerContainerController::new());
+        let cgroups: Arc<dyn CgroupController> = Arc::new(CgroupV2Controller::default());
+        let remediation_executor = Arc::new(RemediationExecutor::new(
+            processes.clone(),
+            containers.clone(),
+            cgroups.clone(),
+            remediation_guardrails(&[], &[]),
+        ));
+        let governor = Arc::new(AutopilotGovernor::default());
+
         let buffer_capacity = config.cloud.report_buffer_max_records;
         let privileged_execution =
             Arc::new(AtomicBool::new(config.cloud.allow_privileged_execution));
@@ -225,6 +252,11 @@ impl Daemon {
             pending: PendingApprovals::new(),
             approvals: ApprovalStore::new(),
             provider_health: Arc::new(std::sync::Mutex::new(ProviderHealth::ready(Utc::now()))),
+            processes: processes.clone(),
+            containers: containers.clone(),
+            cgroups: cgroups.clone(),
+            remediation: remediation_executor.clone(),
+            governor: governor.clone(),
         })
     }
 
@@ -465,6 +497,75 @@ impl Daemon {
         request: CapabilityRequest,
     ) -> Result<Value, DispatchError> {
         authorize_and_execute_with(&self.registry, &self.policy, &self.executor, request)
+    }
+
+    /// The autopilot governor gating governed adjustments (FR-017).
+    pub fn governor(&self) -> Arc<AutopilotGovernor> {
+        Arc::clone(&self.governor)
+    }
+
+    /// The process-signal controller behind the remediation executor, for
+    /// health checks and configuration surfaces (CAP-24, later milestones).
+    pub fn processes(&self) -> Arc<dyn ProcessController> {
+        Arc::clone(&self.processes)
+    }
+
+    /// Runs a proposed remediation plan through the full safety boundary
+    /// (spec 003 M3, T021): autopilot governor → policy → autonomy → executor
+    /// → validation, with fail-stop declarative rollback. The policy used here
+    /// permits the remediation capabilities; the cloud channel's does not, so
+    /// a cloud-issued plan cannot reach this loop's executors.
+    pub async fn run_remediation(
+        &self,
+        plan: &Plan,
+        autonomy: AutonomyMode,
+        events: &dyn EventBus,
+    ) -> RunOutcome {
+        let policy = BootstrapPolicyEvaluator::with_local_remediation();
+        let ports = self.remediation_ports();
+        crate::control::authorize_and_run_with_ports(
+            plan,
+            &self.registry,
+            &policy,
+            self.service.as_ref(),
+            events,
+            autonomy,
+            &ports,
+        )
+        .await
+    }
+
+    /// Resumes a paused remediation plan with a previously granted approval.
+    pub async fn resume_remediation(
+        &self,
+        pending: &PendingPlan,
+        events: &dyn EventBus,
+    ) -> ResumeOutcome {
+        let policy = BootstrapPolicyEvaluator::with_local_remediation();
+        let ports = self.remediation_ports();
+        crate::control::resume_and_run_with_ports(
+            pending,
+            &self.approvals,
+            &self.registry,
+            &policy,
+            self.service.as_ref(),
+            events,
+            // A resumed plan is authorized; Propose would block the
+            // already-approved step again.
+            AutonomyMode::Assisted,
+            &ports,
+        )
+        .await
+    }
+
+    /// The remediation ports over the daemon's own controllers and executor.
+    fn remediation_ports(&self) -> LoopPorts<'_> {
+        LoopPorts {
+            governor: self.governor.as_ref(),
+            containers: self.containers.as_ref(),
+            cgroups: self.cgroups.as_ref(),
+            remediation: self.remediation.as_ref(),
+        }
     }
 
     /// Runs one host-health reasoning step end to end: build the request from
@@ -966,6 +1067,12 @@ fn bootstrap_capabilities() -> Vec<CapabilityId> {
         CapabilityId::HOST_SERVICE_RESTART,
         CapabilityId::HOST_SERVICE_STOP,
         CapabilityId::HOST_SERVICE_START,
+        // Spec 003 M3 remediation capabilities (FR-016, FR-017). Registration
+        // publishes and gates them; the cloud policy does not permit them.
+        CapabilityId::HOST_PROCESS_SIGNAL,
+        CapabilityId::CONTAINER_RESTART,
+        CapabilityId::HOST_CGROUP_FREEZE,
+        CapabilityId::HOST_CGROUP_THAW,
     ]
     .into_iter()
     .map(|c| CapabilityId::new(c).expect("bootstrap capability ids are valid"))
@@ -977,6 +1084,7 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
         .into_iter()
         .map(|id| {
             let service = is_service_capability(&id);
+            let remediation = is_remediation_capability(&id);
             let input_schema = if service {
                 serde_json::json!({
                     "type": "object",
@@ -984,35 +1092,89 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
                     "properties": { "unit": { "type": "string" } },
                     "additionalProperties": false,
                 })
+            } else if id.as_str() == CapabilityId::HOST_PROCESS_SIGNAL {
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["pid", "signal"],
+                    "properties": {
+                        "pid": { "type": "integer" },
+                        "signal": { "type": "string", "enum": ["term", "kill", "stop", "cont"] },
+                    },
+                    "additionalProperties": false,
+                })
+            } else if id.as_str() == CapabilityId::CONTAINER_RESTART {
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["container"],
+                    "properties": { "container": { "type": "string" } },
+                    "additionalProperties": false,
+                })
+            } else if remediation {
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": { "path": { "type": "string" } },
+                    "additionalProperties": false,
+                })
             } else {
                 serde_json::json!({ "type": "object", "additionalProperties": false })
+            };
+
+            let (risk, reversibility, blast_radius, approval) = if service {
+                (
+                    RiskClass::LowRisk,
+                    Reversibility::Reversible,
+                    BlastRadius::Host,
+                    true,
+                )
+            } else if id.as_str() == CapabilityId::HOST_PROCESS_SIGNAL {
+                // Terminating a process is irreversible; an operator approves
+                // every signal (FR-016).
+                (
+                    RiskClass::HighRisk,
+                    Reversibility::None,
+                    BlastRadius::Host,
+                    true,
+                )
+            } else if id.as_str() == CapabilityId::CONTAINER_RESTART {
+                (
+                    RiskClass::Controlled,
+                    Reversibility::Reversible,
+                    BlastRadius::Host,
+                    true,
+                )
+            } else if remediation {
+                // The freezer is reversible (a thaw undoes it) and is the
+                // autopilot's policy-approved adjustment (FR-017); the governor
+                // is the gate, so no per-invocation operator approval.
+                (
+                    RiskClass::LowRisk,
+                    Reversibility::Reversible,
+                    BlastRadius::Host,
+                    false,
+                )
+            } else {
+                (
+                    RiskClass::Read,
+                    Reversibility::None,
+                    BlastRadius::None,
+                    false,
+                )
             };
 
             let base = CapabilityDescriptor::new(
                 id.clone(),
                 "argusd",
                 id.as_str(),
-                if service {
-                    RiskClass::LowRisk
-                } else {
-                    RiskClass::Read
-                },
+                risk,
                 Version::new(0, 1, 0),
                 input_schema,
                 serde_json::json!({}),
-                if service {
-                    Reversibility::Reversible
-                } else {
-                    Reversibility::None
-                },
+                reversibility,
             );
 
-            if service {
-                base.with_blast_radius(BlastRadius::Host)
-                    .requiring_approval()
-            } else {
-                base.with_blast_radius(BlastRadius::None)
-            }
+            base.with_blast_radius(blast_radius)
+                .requiring_approval_if(approval)
         })
         .collect()
 }
@@ -1023,6 +1185,17 @@ fn is_service_capability(id: &CapabilityId) -> bool {
         CapabilityId::HOST_SERVICE_RESTART
             | CapabilityId::HOST_SERVICE_STOP
             | CapabilityId::HOST_SERVICE_START
+    )
+}
+
+/// Whether the capability belongs to the spec-003 M3 remediation surface.
+fn is_remediation_capability(id: &CapabilityId) -> bool {
+    matches!(
+        id.as_str(),
+        CapabilityId::HOST_PROCESS_SIGNAL
+            | CapabilityId::CONTAINER_RESTART
+            | CapabilityId::HOST_CGROUP_FREEZE
+            | CapabilityId::HOST_CGROUP_THAW
     )
 }
 

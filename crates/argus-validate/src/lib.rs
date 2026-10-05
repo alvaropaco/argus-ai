@@ -36,12 +36,20 @@ pub enum ValidationOutcome {
 }
 
 /// The machine-checkable desired state a capability moves its target toward,
-/// when one exists: start/restart move toward active, stop toward inactive.
-/// Other capabilities have no desired-state check (ADR-0031 §2).
+/// when one exists: start/restart move toward active, stop toward inactive, a
+/// container restart toward running, a freeze toward frozen, a thaw toward
+/// thawed. Other capabilities have no desired-state check (ADR-0031 §2).
+///
+/// The boolean reads as "the target is in its desired operational state"; the
+/// family-specific live read (unit active, container running, cgroup frozen)
+/// is the daemon's, dispatched per family.
 pub fn desired_state(capability: &CapabilityId) -> Option<bool> {
     match capability.as_str() {
         CapabilityId::HOST_SERVICE_START | CapabilityId::HOST_SERVICE_RESTART => Some(true),
         CapabilityId::HOST_SERVICE_STOP => Some(false),
+        CapabilityId::CONTAINER_RESTART => Some(true),
+        CapabilityId::HOST_CGROUP_FREEZE => Some(true),
+        CapabilityId::HOST_CGROUP_THAW => Some(false),
         _ => None,
     }
 }
@@ -155,6 +163,30 @@ mod tests {
     #[test]
     fn desired_state_is_none_for_non_service_capabilities() {
         assert_eq!(desired_state(&cap(CapabilityId::HOST_STATUS_READ)), None);
+    }
+
+    #[test]
+    fn desired_state_maps_remediation_capabilities() {
+        assert_eq!(
+            desired_state(&cap(CapabilityId::CONTAINER_RESTART)),
+            Some(true),
+            "a restarted container is desired running"
+        );
+        assert_eq!(
+            desired_state(&cap(CapabilityId::HOST_CGROUP_FREEZE)),
+            Some(true),
+            "a frozen subtree is the freeze's desired state"
+        );
+        assert_eq!(
+            desired_state(&cap(CapabilityId::HOST_CGROUP_THAW)),
+            Some(false),
+            "a thawed subtree is the thaw's desired state"
+        );
+        assert_eq!(
+            desired_state(&cap(CapabilityId::HOST_PROCESS_SIGNAL)),
+            None,
+            "a signal has no machine-checkable desired state"
+        );
     }
 
     #[test]

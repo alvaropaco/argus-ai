@@ -25,11 +25,15 @@ fn context() -> RequestContext {
 }
 
 fn request(capability: &str) -> CapabilityRequest {
+    request_with_args(capability, json!({}))
+}
+
+fn request_with_args(capability: &str, arguments: serde_json::Value) -> CapabilityRequest {
     CapabilityRequest::new(
         CapabilityId::new(capability).unwrap(),
         Principal::new(Some(1000), Some(1000)),
         None,
-        json!({}),
+        arguments,
         context(),
     )
 }
@@ -136,8 +140,14 @@ async fn privileged_capability_is_denied_by_policy() {
     .await
     .unwrap();
 
+    // Schema-valid arguments: the refusal must come from policy (the daemon's
+    // default policy does not permit the remediation capabilities), not from
+    // the earlier input-schema gate.
     let err = daemon
-        .authorize_and_execute(request("host.process.signal"))
+        .authorize_and_execute(request_with_args(
+            "host.process.signal",
+            json!({ "pid": 4242, "signal": "term" }),
+        ))
         .unwrap_err();
     assert!(matches!(err, DispatchError::Denied(PolicyOutcome::Deny)));
 }

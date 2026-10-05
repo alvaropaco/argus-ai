@@ -108,6 +108,18 @@ impl CapabilityId {
     /// Executable capability: start a systemd service.
     pub const HOST_SERVICE_START: &'static str = "host.service.start";
 
+    /// Remediation capability (spec 003 M3): deliver a signal to a process.
+    pub const HOST_PROCESS_SIGNAL: &'static str = "host.process.signal";
+    /// Remediation capability (spec 003 M3): restart a container.
+    pub const CONTAINER_RESTART: &'static str = "container.restart";
+    /// Resource-control capability (spec 003 M3, FR-017): freeze a cgroup v2
+    /// subtree — the policy-approved throttle applied to a non-critical
+    /// consumer under pressure.
+    pub const HOST_CGROUP_FREEZE: &'static str = "host.cgroup.freeze";
+    /// Resource-control capability (spec 003 M3, FR-017): thaw a cgroup v2
+    /// subtree; the declared rollback of a freeze.
+    pub const HOST_CGROUP_THAW: &'static str = "host.cgroup.thaw";
+
     /// Constructs a capability id, validating the dotted-path grammar.
     pub fn new(path: &str) -> Result<Self, DomainError> {
         if !is_dotted_path(path) {

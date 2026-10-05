@@ -1,19 +1,96 @@
-//! Control loop: routes a proposed plan through policy, autonomy, and execution.
+//! Control loop: routes a proposed plan through governance, policy, autonomy,
+//! and execution.
 
 use argus_ai_core::decision::autonomy::may_execute_without_approval;
 use argus_domain::{
     Action, AuthorizationRequest, AutonomyMode, CapabilityId, CapabilityRegistry,
     CapabilityRequest, DomainEvent, EventType, Execution, ExecutionStatus, Plan, PlanStatus,
-    PolicyOutcome, Principal, RequestContext, RiskClass, Severity, plan_context_hash,
+    PolicyDecision, PolicyOutcome, Principal, RequestContext, RiskClass, Severity,
+    plan_context_hash,
 };
 use argus_events::{EventBus, types};
-use argus_executor::ServiceController;
-use argus_policy::{ApprovalStore, PolicyEvaluator};
+use argus_executor::{
+    AuthorizedAction, CgroupController, ContainerController, Executor, RemediationExecutor,
+    ServiceController,
+};
+use argus_policy::{
+    ApprovalStore, GovernanceDecision, PolicyEvaluator, ResourceAdjustment, ResourceGovernor,
+};
 use argus_validate::{desired_state, read_failure_event, validation_event};
 use chrono::Utc;
 use semver::Version;
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+/// The remediation ports the control loop executes through (spec 003 M3):
+/// the autopilot governor, the container/cgroup live-state readers, and the
+/// executor boundary for the remediation capabilities. Services keep their
+/// dedicated controller path; everything else routes through `remediation`.
+pub struct LoopPorts<'a> {
+    pub governor: &'a dyn ResourceGovernor,
+    pub containers: &'a dyn ContainerController,
+    pub cgroups: &'a dyn CgroupController,
+    pub remediation: &'a dyn Executor,
+}
+
+impl LoopPorts<'_> {
+    /// Ports that govern and execute nothing: the fail-closed stand-in for
+    /// callers (and the existing tests) that carry no remediation surface.
+    pub fn noop() -> Self {
+        static NO_GOVERNOR: argus_policy::NoGovernor = argus_policy::NoGovernor;
+        struct NoController;
+        impl ContainerController for NoController {
+            fn restart(&self, _id: &str) -> Result<(), argus_executor::RemediationError> {
+                Err(argus_executor::RemediationError::Unavailable(
+                    "no container controller is wired".to_string(),
+                ))
+            }
+            fn is_running(&self, _id: &str) -> Result<bool, argus_executor::RemediationError> {
+                Err(argus_executor::RemediationError::Unavailable(
+                    "no container controller is wired".to_string(),
+                ))
+            }
+        }
+        impl CgroupController for NoController {
+            fn set_freeze(
+                &self,
+                _path: &str,
+                _frozen: bool,
+            ) -> Result<(), argus_executor::RemediationError> {
+                Err(argus_executor::RemediationError::Unavailable(
+                    "no cgroup controller is wired".to_string(),
+                ))
+            }
+            fn is_frozen(&self, _path: &str) -> Result<bool, argus_executor::RemediationError> {
+                Err(argus_executor::RemediationError::Unavailable(
+                    "no cgroup controller is wired".to_string(),
+                ))
+            }
+        }
+        struct NoExecutor;
+        impl Executor for NoExecutor {
+            fn execute(
+                &self,
+                action: &AuthorizedAction,
+            ) -> Result<argus_executor::ExecutionResult, argus_executor::ExecutionError>
+            {
+                Err(argus_executor::ExecutionError::Unsupported(
+                    action.capability().clone(),
+                ))
+            }
+        }
+
+        static NO_CONTAINERS: NoController = NoController;
+        static NO_CGROUPS: NoController = NoController;
+        static NO_EXECUTOR: NoExecutor = NoExecutor;
+        Self {
+            governor: &NO_GOVERNOR,
+            containers: &NO_CONTAINERS,
+            cgroups: &NO_CGROUPS,
+            remediation: &NO_EXECUTOR,
+        }
+    }
+}
 
 /// A plan paused at an approval-requiring step, bound to a single-use token and
 /// its context hash (ADR-0030 §2, §3).
@@ -82,28 +159,96 @@ fn risk_for(capability: &CapabilityId) -> RiskClass {
     match capability.as_str() {
         CapabilityId::HOST_SERVICE_RESTART
         | CapabilityId::HOST_SERVICE_STOP
-        | CapabilityId::HOST_SERVICE_START => RiskClass::LowRisk,
+        | CapabilityId::HOST_SERVICE_START
+        | CapabilityId::HOST_CGROUP_FREEZE
+        | CapabilityId::HOST_CGROUP_THAW => RiskClass::LowRisk,
+        CapabilityId::HOST_PROCESS_SIGNAL => RiskClass::HighRisk,
+        CapabilityId::CONTAINER_RESTART => RiskClass::Controlled,
         _ => RiskClass::Controlled,
     }
 }
 
-fn execute_action(action: &Action, service: &dyn ServiceController) -> Result<Value, String> {
-    let unit = action
-        .arguments
-        .get("unit")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "action missing 'unit' argument".to_string())?;
+/// Whether the action names one of the service capabilities the loop executes
+/// through its dedicated service controller.
+fn is_service_action(capability: &CapabilityId) -> bool {
+    matches!(
+        capability.as_str(),
+        CapabilityId::HOST_SERVICE_RESTART
+            | CapabilityId::HOST_SERVICE_STOP
+            | CapabilityId::HOST_SERVICE_START
+    )
+}
 
-    let result = match action.capability.as_str() {
-        CapabilityId::HOST_SERVICE_RESTART => service.restart(unit),
-        CapabilityId::HOST_SERVICE_STOP => service.stop(unit),
-        CapabilityId::HOST_SERVICE_START => service.start(unit),
-        other => return Err(format!("unsupported executable capability '{other}'")),
-    };
+/// The subject a governance decision and a live-state read name, per family:
+/// the cgroup path for resource-control, the container id, or the unit.
+fn action_target(action: &Action) -> Option<&str> {
+    ["path", "container", "unit"]
+        .iter()
+        .find_map(|key| action.arguments.get(*key).and_then(Value::as_str))
+}
 
-    result
-        .map(|_| json!({ "unit": unit, "capability": action.capability.as_str() }))
-        .map_err(|e| e.to_string())
+/// Executes one action through its family's boundary.
+///
+/// Service actions keep their dedicated controller path. Remediation actions
+/// (`host.process.signal`, `container.restart`, `host.cgroup.*`) cross the
+/// [`Executor`] boundary as [`AuthorizedAction`]s — the guardrails wired into
+/// the remediation executor run there, at execution time (ADR-0028 §1).
+/// `decision` is the policy's verdict for this exact step; a rollback carries
+/// its own recorded allow (see `rollback_executed`).
+fn execute_action(
+    action: &Action,
+    service: &dyn ServiceController,
+    ports: &LoopPorts<'_>,
+    decision: &PolicyDecision,
+    correlation: Uuid,
+) -> Result<Value, String> {
+    let capability = &action.capability;
+
+    if is_service_action(capability) {
+        let unit = action
+            .arguments
+            .get("unit")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "action missing 'unit' argument".to_string())?;
+
+        let result = match capability.as_str() {
+            CapabilityId::HOST_SERVICE_RESTART => service.restart(unit),
+            CapabilityId::HOST_SERVICE_STOP => service.stop(unit),
+            CapabilityId::HOST_SERVICE_START => service.start(unit),
+            other => return Err(format!("unsupported executable capability '{other}'")),
+        };
+
+        return result
+            .map(|_| json!({ "unit": unit, "capability": capability.as_str() }))
+            .map_err(|e| e.to_string());
+    }
+
+    if RemediationExecutor::handles(capability) {
+        let request = CapabilityRequest::new(
+            capability.clone(),
+            Principal::new(None, None),
+            action.resource.clone(),
+            action.arguments.clone(),
+            RequestContext::new(
+                correlation,
+                Version::new(0, 1, 0),
+                Principal::new(None, None),
+                Utc::now(),
+            ),
+        );
+        let authorized = AuthorizedAction::new(request, decision.clone())
+            .map_err(|e| format!("action could not be authorized for execution: {e}"))?;
+        return ports
+            .remediation
+            .execute(&authorized)
+            .map(|result| result.evidence)
+            .map_err(|e| e.to_string());
+    }
+
+    Err(format!(
+        "unsupported executable capability '{}'",
+        capability.as_str()
+    ))
 }
 
 /// Routes every step in `plan` through policy, then autonomy, then execution.
@@ -115,6 +260,10 @@ fn execute_action(action: &Action, service: &dyn ServiceController) -> Result<Va
 /// already-executed steps' declarative rollbacks run in reverse order, and the
 /// plan ends `Failed`, `RolledBack`, or `NeedsManual` — never substituting
 /// actions (ADR-0028 §4).
+///
+/// Runs with no-op remediation ports: governed capabilities are refused and
+/// remediation effects unsupported. The remediation loop uses
+/// [`authorize_and_run_with_ports`].
 pub async fn authorize_and_run(
     plan: &Plan,
     registry: &CapabilityRegistry,
@@ -123,7 +272,35 @@ pub async fn authorize_and_run(
     events: &dyn EventBus,
     autonomy: AutonomyMode,
 ) -> RunOutcome {
-    match run_plan(plan, registry, policy, service, events, autonomy, None).await {
+    authorize_and_run_with_ports(
+        plan,
+        registry,
+        policy,
+        service,
+        events,
+        autonomy,
+        &LoopPorts::noop(),
+    )
+    .await
+}
+
+/// [`authorize_and_run`] with the remediation ports wired (spec 003 M3):
+/// governed capabilities pass the autopilot governor before policy, and
+/// remediation effects cross the executor boundary carried by `ports`.
+pub async fn authorize_and_run_with_ports(
+    plan: &Plan,
+    registry: &CapabilityRegistry,
+    policy: &dyn PolicyEvaluator,
+    service: &dyn ServiceController,
+    events: &dyn EventBus,
+    autonomy: AutonomyMode,
+    ports: &LoopPorts<'_>,
+) -> RunOutcome {
+    match run_plan(
+        plan, registry, policy, service, events, autonomy, None, ports,
+    )
+    .await
+    {
         PlanRun::Finished(outcome) => RunOutcome::Finished(outcome),
         PlanRun::Paused(pending) => RunOutcome::Pending(pending),
     }
@@ -142,6 +319,35 @@ pub async fn resume_and_run(
     service: &dyn ServiceController,
     events: &dyn EventBus,
     autonomy: AutonomyMode,
+) -> ResumeOutcome {
+    resume_and_run_with_ports(
+        pending,
+        approvals,
+        registry,
+        policy,
+        service,
+        events,
+        autonomy,
+        &LoopPorts::noop(),
+    )
+    .await
+}
+
+/// [`resume_and_run`] with the remediation ports wired (spec 003 M3).
+///
+/// The arity is the loop's injected surface: plan, grant store, and the
+/// safety boundary's dependencies — none of which collapse without hiding an
+/// injection the tests vary individually.
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_and_run_with_ports(
+    pending: &PendingPlan,
+    approvals: &ApprovalStore,
+    registry: &CapabilityRegistry,
+    policy: &dyn PolicyEvaluator,
+    service: &dyn ServiceController,
+    events: &dyn EventBus,
+    autonomy: AutonomyMode,
+    ports: &LoopPorts<'_>,
 ) -> ResumeOutcome {
     // Consume the grant exactly once: it is the operator's single-use
     // authorization for this plan, so a second resume finds nothing to consume.
@@ -168,11 +374,12 @@ pub async fn resume_and_run(
         events,
         autonomy,
         Some(pending.executed.clone()),
+        ports,
     )
     .await
     {
         PlanRun::Finished(outcome) => ResumeOutcome::Finished(outcome),
-        // A resumed plan is already authorized, so it can never pause again.
+        // A resumed plan is authorized, so it can never pause again.
         PlanRun::Paused(_) => unreachable!("a resumed plan is authorized and cannot pause"),
     }
 }
@@ -191,6 +398,16 @@ enum PlanRun {
 /// (ADR-0030 §5). The carried `executed` indices are the steps already run
 /// before the pause, so a post-resume failure still rolls back pre-pause
 /// effects.
+///
+/// Governed capabilities (the autopilot families, e.g. `host.cgroup.*`) are
+/// consulted with the governor *before* policy: a refusal is recorded exactly
+/// like a policy denial and nothing executes (FR-017). A policy denial or an
+/// approval requirement always wins over a governor allowance — the governor
+/// can only refuse, never authorize (CAP-22).
+///
+/// The arity is the loop's injected surface; each parameter is a dependency
+/// the tests vary individually, so it is not collapsed into a bundle.
+#[allow(clippy::too_many_arguments)]
 async fn run_plan(
     plan: &Plan,
     registry: &CapabilityRegistry,
@@ -199,6 +416,7 @@ async fn run_plan(
     events: &dyn EventBus,
     autonomy: AutonomyMode,
     resume: Option<Vec<usize>>,
+    ports: &LoopPorts<'_>,
 ) -> PlanRun {
     let correlation = Uuid::new_v4();
     // AC-006: every reasoning, decision, execution, and validation step carries
@@ -232,6 +450,7 @@ async fn run_plan(
         events,
         correlation,
         context_hash: plan_context_hash(plan),
+        ports,
     };
 
     for (index, step) in plan.steps.iter().enumerate() {
@@ -242,6 +461,50 @@ async fn run_plan(
         }
         let action = &step.action;
         let risk = risk_for(&action.capability);
+
+        // The autopilot gate: governed families pass the governor first, and a
+        // refusal is final for the step regardless of what policy would say.
+        if governed(&action.capability, ports.governor) {
+            let adjustment = ResourceAdjustment {
+                subject: action_target(action).unwrap_or_default().to_string(),
+                capability: action.capability.as_str().to_string(),
+                reason: format!("plan step {} of '{}'", index, plan.objective),
+            };
+            match ports.governor.evaluate(&adjustment) {
+                GovernanceDecision::Allowed { reason } => {
+                    tracing::info!(
+                        correlation_id = %correlation,
+                        capability = action.capability.as_str(),
+                        subject = %adjustment.subject,
+                        reason = %reason,
+                        "autopilot governor allowed the adjustment"
+                    );
+                }
+                GovernanceDecision::Refused { why } => {
+                    tracing::info!(
+                        correlation_id = %correlation,
+                        capability = action.capability.as_str(),
+                        subject = %adjustment.subject,
+                        refusal = ?why,
+                        "autopilot governor refused the adjustment"
+                    );
+                    outcome.denied.push(action.capability.clone());
+                    let _ = events
+                        .publish(&event(
+                            types::PLAN_DENIED,
+                            json!({
+                                "capability": action.capability.as_str(),
+                                "governance": why,
+                            }),
+                            correlation,
+                            None,
+                        ))
+                        .await;
+                    continue;
+                }
+            }
+        }
+
         let authz = AuthorizationRequest::new(
             CapabilityRequest::new(
                 action.capability.clone(),
@@ -265,7 +528,8 @@ async fn run_plan(
                 .unwrap_or(true),
         );
 
-        match policy.evaluate(&authz).outcome {
+        let decision = policy.evaluate(&authz);
+        match decision.outcome {
             PolicyOutcome::Deny => {
                 tracing::info!(
                     correlation_id = %correlation,
@@ -309,8 +573,23 @@ async fn run_plan(
                 }
                 // Resumed: the approval re-entered policy as input, never as
                 // authority; the consumed grant is what lets the step proceed.
-                if execute_allowed_step(&mut outcome, plan, index, action, &env, &mut executed)
-                    .await
+                // The execution boundary needs an Allow verdict, and the
+                // consumed grant is exactly that — recorded as such, so the
+                // audit shows why the step was allowed to run (ADR-0030 §5).
+                let granted = PolicyDecision::allow(
+                    "plan.approval",
+                    "resumed under a consumed single-use operator grant",
+                );
+                if execute_allowed_step(
+                    &mut outcome,
+                    plan,
+                    index,
+                    action,
+                    &env,
+                    &mut executed,
+                    &granted,
+                )
+                .await
                 {
                     return PlanRun::Finished(outcome);
                 }
@@ -321,8 +600,16 @@ async fn run_plan(
                     continue;
                 }
 
-                if execute_allowed_step(&mut outcome, plan, index, action, &env, &mut executed)
-                    .await
+                if execute_allowed_step(
+                    &mut outcome,
+                    plan,
+                    index,
+                    action,
+                    &env,
+                    &mut executed,
+                    &decision,
+                )
+                .await
                 {
                     return PlanRun::Finished(outcome);
                 }
@@ -351,6 +638,15 @@ struct RunEnv<'a> {
     events: &'a dyn EventBus,
     correlation: Uuid,
     context_hash: String,
+    ports: &'a LoopPorts<'a>,
+}
+
+/// Whether the capability belongs to a family the governor gates.
+fn governed(capability: &CapabilityId, governor: &dyn ResourceGovernor) -> bool {
+    governor
+        .governed_prefixes()
+        .iter()
+        .any(|prefix| capability.as_str().starts_with(prefix))
 }
 
 /// Executes one policy-approved step: the desired-state idempotency check, then
@@ -365,10 +661,11 @@ async fn execute_allowed_step(
     action: &Action,
     env: &RunEnv<'_>,
     executed: &mut Vec<usize>,
+    decision: &PolicyDecision,
 ) -> bool {
     // Idempotency: check the desired state before acting. "Already in the
     // desired state" is a recorded success no-op (ADR-0028 §5).
-    match desired_state_holds(action, env.service) {
+    match desired_state_holds(action, env) {
         Ok(true) => {
             let evidence = json!({ "already_desired": true });
             let _ = env
@@ -387,55 +684,49 @@ async fn execute_allowed_step(
             });
             false
         }
-        Ok(false) => match execute_action(action, env.service) {
-            Ok(evidence) => {
-                tracing::info!(
-                    correlation_id = %env.correlation,
-                    capability = action.capability.as_str(),
-                    step = index,
-                    "step executed"
-                );
-                let _ = env
-                    .events
-                    .publish(&event(
-                        types::ACTION_EXECUTED,
-                        evidence.clone(),
-                        env.correlation,
-                        None,
-                    ))
-                    .await;
-                outcome.executions.push(Execution {
-                    action: action.clone(),
-                    status: ExecutionStatus::Completed,
-                    evidence,
-                });
-                executed.push(index);
-                // Re-observe after the step executed and publish the validation
-                // outcome (ADR-0031 §6).
-                validate_step(action, env).await;
-                false
+        Ok(false) => {
+            match execute_action(action, env.service, env.ports, decision, env.correlation) {
+                Ok(evidence) => {
+                    tracing::info!(
+                        correlation_id = %env.correlation,
+                        capability = action.capability.as_str(),
+                        step = index,
+                        "step executed"
+                    );
+                    let _ = env
+                        .events
+                        .publish(&event(
+                            types::ACTION_EXECUTED,
+                            evidence.clone(),
+                            env.correlation,
+                            None,
+                        ))
+                        .await;
+                    outcome.executions.push(Execution {
+                        action: action.clone(),
+                        status: ExecutionStatus::Completed,
+                        evidence,
+                    });
+                    executed.push(index);
+                    // Re-observe after the step executed and publish the validation
+                    // outcome (ADR-0031 §6).
+                    validate_step(action, env).await;
+                    false
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        correlation_id = %env.correlation,
+                        capability = action.capability.as_str(),
+                        step = index,
+                        error = %err,
+                        "step failed; rolling back executed steps"
+                    );
+                    record_failure(outcome, action, err, env.events, env.correlation).await;
+                    rollback_executed(outcome, plan, executed, env).await;
+                    true
+                }
             }
-            Err(err) => {
-                tracing::warn!(
-                    correlation_id = %env.correlation,
-                    capability = action.capability.as_str(),
-                    step = index,
-                    error = %err,
-                    "step failed; rolling back executed steps"
-                );
-                record_failure(outcome, action, err, env.events, env.correlation).await;
-                rollback_executed(
-                    outcome,
-                    plan,
-                    executed,
-                    env.service,
-                    env.events,
-                    env.correlation,
-                )
-                .await;
-                true
-            }
-        },
+        }
         Err(err) => {
             // A live-state read failure is fail-closed: acting on an unknown
             // desired state is refused.
@@ -447,15 +738,7 @@ async fn execute_allowed_step(
                 "desired-state read failed; fail-closed"
             );
             record_failure(outcome, action, err, env.events, env.correlation).await;
-            rollback_executed(
-                outcome,
-                plan,
-                executed,
-                env.service,
-                env.events,
-                env.correlation,
-            )
-            .await;
+            rollback_executed(outcome, plan, executed, env).await;
             true
         }
     }
@@ -492,14 +775,14 @@ async fn record_failure(
 ///
 /// The plan status moves `Failed → RollingBack → RolledBack`, or `NeedsManual`
 /// when a rollback itself fails. The planner never substitutes actions
-/// mid-failure (ADR-0028 §4).
+/// mid-failure (ADR-0028 §4). Rollbacks are part of the original plan's
+/// authorization — they are never re-governed (recovery must not be blocked by
+/// the autopilot budget) and cross the same executor boundary as the steps.
 async fn rollback_executed(
     outcome: &mut ExecutionOutcome,
     plan: &Plan,
     executed: &[usize],
-    service: &dyn ServiceController,
-    events: &dyn EventBus,
-    correlation: Uuid,
+    env: &RunEnv<'_>,
 ) {
     // Nothing took effect, so there is nothing to undo: the plan stays `Failed`.
     if executed.is_empty() {
@@ -508,15 +791,16 @@ async fn rollback_executed(
 
     outcome.status = PlanStatus::RollingBack;
     tracing::warn!(
-        correlation_id = %correlation,
+        correlation_id = %env.correlation,
         steps = executed.len(),
         "rolling back executed steps"
     );
-    let _ = events
+    let _ = env
+        .events
         .publish(&event(
             types::PLAN_ROLLING_BACK,
             json!({}),
-            correlation,
+            env.correlation,
             None,
         ))
         .await;
@@ -525,42 +809,47 @@ async fn rollback_executed(
         let Some(rollback) = &plan.steps[index].rollback else {
             // An executed step with no declarative rollback cannot be undone.
             outcome.status = PlanStatus::NeedsManual;
-            let _ = events
+            let _ = env
+                .events
                 .publish(&event(
                     types::PLAN_NEEDS_MANUAL,
                     json!({}),
-                    correlation,
+                    env.correlation,
                     None,
                 ))
                 .await;
             return;
         };
-        match execute_action(rollback, service) {
+        let decision = PolicyDecision::allow("plan.rollback", "declarative plan rollback");
+        match execute_action(rollback, env.service, env.ports, &decision, env.correlation) {
             Ok(evidence) => {
-                let _ = events
+                let _ = env
+                    .events
                     .publish(&event(
                         types::ACTION_ROLLED_BACK,
                         evidence,
-                        correlation,
+                        env.correlation,
                         None,
                     ))
                     .await;
             }
             Err(err) => {
-                let _ = events
+                let _ = env
+                    .events
                     .publish(&event(
                         types::ACTION_ROLLBACK_FAILED,
                         json!({ "error": err }),
-                        correlation,
+                        env.correlation,
                         None,
                     ))
                     .await;
                 outcome.status = PlanStatus::NeedsManual;
-                let _ = events
+                let _ = env
+                    .events
                     .publish(&event(
                         types::PLAN_NEEDS_MANUAL,
                         json!({}),
-                        correlation,
+                        env.correlation,
                         None,
                     ))
                     .await;
@@ -571,14 +860,15 @@ async fn rollback_executed(
 
     outcome.status = PlanStatus::RolledBack;
     tracing::info!(
-        correlation_id = %correlation,
+        correlation_id = %env.correlation,
         "rollback completed; plan rolled back"
     );
-    let _ = events
+    let _ = env
+        .events
         .publish(&event(
             types::PLAN_ROLLED_BACK,
             json!({}),
-            correlation,
+            env.correlation,
             None,
         ))
         .await;
@@ -588,18 +878,50 @@ async fn rollback_executed(
 /// state at execution time. `Ok(false)` means the effect should run.
 ///
 /// The desired-state mapping itself is shared with the post-execution validator
-/// via `argus_validate::desired_state` (ADR-0031 §2).
-fn desired_state_holds(action: &Action, service: &dyn ServiceController) -> Result<bool, String> {
+/// via `argus_validate::desired_state` (ADR-0031 §2); the live read is
+/// family-dispatched: units through the service controller, containers through
+/// the container controller, cgroup subtrees through the cgroup controller.
+fn desired_state_holds(action: &Action, env: &RunEnv<'_>) -> Result<bool, String> {
     let Some(desired) = desired_state(&action.capability) else {
         return Ok(false);
     };
-    let unit = action
-        .arguments
-        .get("unit")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "action missing 'unit' argument".to_string())?;
-    let active = service.is_active(unit).map_err(|e| e.to_string())?;
-    Ok(active == desired)
+    let observed = observe_target(action, env)?;
+    Ok(observed == desired)
+}
+
+/// Reads the live state a desired-state check or a validation compares against.
+fn observe_target(action: &Action, env: &RunEnv<'_>) -> Result<bool, String> {
+    let capability = &action.capability;
+    if is_service_action(capability) {
+        let unit = action
+            .arguments
+            .get("unit")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "action missing 'unit' argument".to_string())?;
+        return env.service.is_active(unit).map_err(|e| e.to_string());
+    }
+    match capability.as_str() {
+        CapabilityId::CONTAINER_RESTART => {
+            let id = action
+                .arguments
+                .get("container")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "action missing 'container' argument".to_string())?;
+            env.ports
+                .containers
+                .is_running(id)
+                .map_err(|e| e.to_string())
+        }
+        CapabilityId::HOST_CGROUP_FREEZE | CapabilityId::HOST_CGROUP_THAW => {
+            let path = action
+                .arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "action missing 'path' argument".to_string())?;
+            env.ports.cgroups.is_frozen(path).map_err(|e| e.to_string())
+        }
+        other => Err(format!("no live-state read for capability '{other}'")),
+    }
 }
 
 /// Re-observes a just-executed step's target and publishes the validation
@@ -609,16 +931,16 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
     let Some(expected) = desired_state(&action.capability) else {
         return;
     };
-    let Some(unit) = action.arguments.get("unit").and_then(Value::as_str) else {
+    let Some(target) = action_target(action) else {
         return;
     };
-    let observed = match env.service.is_active(unit) {
+    let observed = match observe_target(action, env) {
         Ok(observed) => observed,
         Err(error) => {
             // Fail closed: no pass is fabricated when the read fails; record it.
             let payload = read_failure_event(
                 &action.capability,
-                unit,
+                target,
                 &env.context_hash,
                 &error.to_string(),
             );
@@ -638,7 +960,7 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
     // both daemon hooks, so they cannot drift (ADR-0031 §6).
     let Some((event_type, payload)) = validation_event(
         &action.capability,
-        unit,
+        target,
         expected,
         observed,
         &env.context_hash,

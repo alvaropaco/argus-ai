@@ -13,10 +13,12 @@
 mod client;
 mod convert;
 mod model;
+mod sync_client;
 
 pub use client::DockerClient;
 pub use convert::container_observations;
 pub use model::{Container, parse_containers};
+pub use sync_client::SyncDockerClient;
 
 /// Adapter error. `Unavailable` means the Docker socket is not reachable, which
 /// the daemon treats as graceful degradation rather than a failure.

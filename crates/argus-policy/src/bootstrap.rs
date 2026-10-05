@@ -33,6 +33,29 @@ impl BootstrapPolicyEvaluator {
         Self { allowed }
     }
 
+    /// A policy that also permits the spec-003 M3 remediation capabilities.
+    ///
+    /// Used only by the local remediation loop, where every request still
+    /// crosses the autopilot governor and, for the approval-gated capabilities,
+    /// an operator grant. The cloud channel keeps plain [`Self::new`], so a
+    /// cloud-issued remediation request is denied outright until its own
+    /// governance exists — cloud authority over resource adjustment is not
+    /// granted implicitly.
+    pub fn with_local_remediation() -> Self {
+        let mut evaluator = Self::new();
+        for id in [
+            CapabilityId::HOST_PROCESS_SIGNAL,
+            CapabilityId::CONTAINER_RESTART,
+            CapabilityId::HOST_CGROUP_FREEZE,
+            CapabilityId::HOST_CGROUP_THAW,
+        ] {
+            evaluator
+                .allowed
+                .insert(CapabilityId::new(id).expect("capability ids are valid"));
+        }
+        evaluator
+    }
+
     /// The capabilities the policy permits (read-only and low-risk service actions).
     pub fn allowed_capabilities(&self) -> impl Iterator<Item = &CapabilityId> {
         self.allowed.iter()

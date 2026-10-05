@@ -126,6 +126,11 @@ async fn capabilities_lists_bootstrap_set() {
             "argus.config.read".to_string(),
             "argus.health.read".to_string(),
             "argus.plugins.list".to_string(),
+            // Spec 003 M3 remediation capabilities are published and gated.
+            "container.restart".to_string(),
+            "host.cgroup.freeze".to_string(),
+            "host.cgroup.thaw".to_string(),
+            "host.process.signal".to_string(),
             "host.service.restart".to_string(),
             "host.service.start".to_string(),
             "host.service.stop".to_string(),

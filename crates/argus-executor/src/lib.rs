@@ -10,6 +10,7 @@ mod executor;
 mod guardrail;
 mod privileged;
 mod provider;
+mod remediation;
 mod service;
 
 pub use action::{AuthorizedAction, ExecutionError, ExecutionResult, ReversalStatus};
@@ -21,6 +22,12 @@ pub use guardrail::{
 };
 pub use privileged::{CompositeExecutor, PrivilegedExecutor};
 pub use provider::CapabilityProvider;
+pub use remediation::{
+    CgroupController, CgroupV2Controller, ContainerController, DockerContainerController,
+    NeverSignalSelf, NeverTarget, PidAboveOne, ProcessController, ProcessSignal, RemediationError,
+    RemediationExecutor, UnixProcessController, ValidCgroupPath, remediation_guardrails,
+    validate_cgroup_path,
+};
 pub use service::{
     MockServiceController, ServiceController, ServiceError, SystemdServiceController,
 };

@@ -25,10 +25,15 @@
 > **Status note (2026-10-02).** Checkbox state reconciled against git history:
 > Milestones 1–2 (T001–T018) were implemented and committed in `1bbb676`
 > ("feat(brain): autonomous operations brain") but left unchecked here; they
-> are now marked. Milestones 3–6 (T019–T035) are not started — verified in
-> code (`argus-kubernetes`, `argus-memory`, `argus-runbooks`, `argus-reporting`
-> do not exist; no autopilot governance in `argus-policy`; `host.process.signal`
-> remains a future capability in `argus-executor`).
+> are now marked. Milestone 3 (T019–T022) was implemented on 2026-10-02: typed remediation
+> capabilities with execution-time guardrails in `argus-executor`
+> (`RemediationExecutor`, controllers for process signals, container restarts,
+> and cgroup-v2 freeze/thaw), resource-autopilot governance in `argus-policy`
+> (`AutopilotGovernor`: criticality, budget, cooldown), the remediation loop
+> wired into the daemon with rollback and validation, and a dedicated security
+> suite (`tests/remediation_security.rs`). Milestones 4–6 (T023–T035) remain
+> not started: `argus-kubernetes`, `argus-memory`, `argus-runbooks`, and
+> `argus-reporting` still do not exist.
 
 ## Tasks
 
@@ -58,10 +63,10 @@
 
 ### Phase 3 — Milestone 3: Autonomous Remediation (CAP-14 host, CAP-15)
 
-- [ ] T019 [P0] Register typed remediation capabilities (`host.process.signal`, `container.restart`, resource-control) in `crates/argus-executor` with risk class + blast radius + guardrails
-- [ ] T020 [P0] Implement resource-autopilot governance (criticality, budgets, quotas, rollback, rate limiting) in `crates/argus-policy`
-- [ ] T021 [P0] Wire remediation loop + rollback + validation in `crates/argus-daemon`
-- [ ] T022 [P0] Security/policy tests: deny-by-default, approval gating, executor no-bypass, rollback
+- [X T019 [P0] Register typed remediation capabilities (`host.process.signal`, `container.restart`, resource-control) in `crates/argus-executor` with risk class + blast radius + guardrails
+- [X T020 [P0] Implement resource-autopilot governance (criticality, budgets, quotas, rollback, rate limiting) in `crates/argus-policy`
+- [X T021 [P0] Wire remediation loop + rollback + validation in `crates/argus-daemon`
+- [X T022 [P0] Security/policy tests: deny-by-default, approval gating, executor no-bypass, rollback
 
 ### Phase 4 — Milestone 4: Kubernetes Brain (CAP-12..14)
 

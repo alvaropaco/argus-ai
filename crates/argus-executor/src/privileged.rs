@@ -16,6 +16,7 @@ use serde_json::json;
 use crate::action::{AuthorizedAction, ExecutionError, ExecutionResult, ReversalStatus};
 use crate::executor::Executor;
 use crate::guardrail::GuardrailRegistry;
+use crate::remediation::RemediationExecutor;
 use crate::service::{ServiceController, ServiceError};
 
 /// A host-service operation, and its inverse.
@@ -160,6 +161,7 @@ impl PrivilegedExecutor {
 pub struct CompositeExecutor {
     read_only: Arc<dyn Executor>,
     environment_changing: Arc<dyn Executor>,
+    remediation: Option<Arc<dyn Executor>>,
 }
 
 impl CompositeExecutor {
@@ -167,7 +169,16 @@ impl CompositeExecutor {
         Self {
             read_only,
             environment_changing,
+            remediation: None,
         }
+    }
+
+    /// Adds the remediation executor (spec 003 M3 capabilities). Omitted
+    /// remediation keeps those capabilities unrouted: the composite refuses
+    /// them rather than silently falling through to the read-only executor.
+    pub fn with_remediation(mut self, remediation: Arc<dyn Executor>) -> Self {
+        self.remediation = Some(remediation);
+        self
     }
 }
 
@@ -175,6 +186,11 @@ impl Executor for CompositeExecutor {
     fn execute(&self, action: &AuthorizedAction) -> Result<ExecutionResult, ExecutionError> {
         if PrivilegedExecutor::handles(action.capability()) {
             self.environment_changing.execute(action)
+        } else if RemediationExecutor::handles(action.capability()) {
+            match &self.remediation {
+                Some(remediation) => remediation.execute(action),
+                None => Err(ExecutionError::Unsupported(action.capability().clone())),
+            }
         } else {
             self.read_only.execute(action)
         }

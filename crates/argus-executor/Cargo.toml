@@ -7,10 +7,12 @@ license.workspace = true
 description = "ARGUS typed, policy-authorized execution boundary"
 
 [dependencies]
+nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+argus-container = { workspace = true }
 argus-domain = { workspace = true }
 
 [dev-dependencies]

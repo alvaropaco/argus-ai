@@ -6,9 +6,14 @@
 //! to Cedar types (ADR-010).
 
 mod approval;
+mod autopilot;
 mod bootstrap;
 
 pub use approval::ApprovalStore;
+pub use autopilot::{
+    AutopilotGovernor, AutopilotLimits, Criticality, GovernanceDecision, NoGovernor, Refusal,
+    ResourceAdjustment, ResourceGovernor,
+};
 pub use bootstrap::BootstrapPolicyEvaluator;
 
 use argus_domain::{AuthorizationRequest, PolicyDecision};
