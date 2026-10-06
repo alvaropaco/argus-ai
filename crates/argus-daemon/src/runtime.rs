@@ -492,19 +492,27 @@ impl Daemon {
     ///
     /// The grant expires after a fixed window; a later grant replaces it, and a
     /// resume consumes it exactly once (ADR-0030 §4).
-    pub fn grant_approval(&self, token: Uuid, granted_by: &str) -> Result<(), ApprovalError> {
+    /// Grants the approval and hands back the paused plan it releases —
+    /// the caller resumes it (`resume_remediation`), completing the
+    /// round-trip. The grant is timed (15 minutes) and consumed exactly
+    /// once by the resume.
+    pub fn grant_approval(
+        &self,
+        token: Uuid,
+        granted_by: &str,
+    ) -> Result<PendingPlan, ApprovalError> {
         let pending = self
             .pending
             .remove(token)
             .ok_or(ApprovalError::UnknownToken(token))?;
         self.approvals.grant_for_a_while(
             token,
-            pending.context_hash,
+            pending.context_hash.clone(),
             granted_by,
             Utc::now(),
             chrono::Duration::minutes(15),
         );
-        Ok(())
+        Ok(pending)
     }
 
     /// Denies a pending plan's token; a denied approval never executes.

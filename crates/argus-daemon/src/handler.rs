@@ -151,19 +151,16 @@ async fn approval_grant(daemon: &Daemon, principal: &Principal, request: Request
     };
 
     match daemon.grant_approval(token, &granted_by(principal)) {
-        Ok(()) => {
+        Ok(pending) => {
             // The second half of the round-trip (ADR-0030 §5): the grant is
             // consumed exactly once and the paused plan continues — the
             // operator's decision takes effect, and the response shows what
             // happened.
             let events = argus_events::LocalEventBus::new(16);
-            let outcome = daemon.resume_pending(token, &events).await;
+            let outcome = daemon.resume_remediation(&pending, &events).await;
             let resumed = match outcome {
-                Some(crate::control::ResumeOutcome::Finished(report)) => {
-                    format!("{:?}", report.status)
-                }
-                Some(crate::control::ResumeOutcome::Refused(why)) => format!("refused: {why:?}"),
-                None => "no pending plan for the token".to_string(),
+                crate::control::ResumeOutcome::Finished(report) => format!("{:?}", report.status),
+                crate::control::ResumeOutcome::Refused(why) => format!("refused: {why:?}"),
             };
             Response::ok(
                 request.correlation_id,
