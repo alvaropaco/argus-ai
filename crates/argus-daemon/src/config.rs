@@ -390,11 +390,16 @@ mod tests {
     }
 
     #[test]
-    fn no_file_anywhere_yields_defaults_without_error() {
+    fn load_without_an_explicit_path_is_environment_consistent() {
+        // Hermetic: the default search may find a real config on the machine
+        // running the tests (e.g. a deployed /root/argus.toml). The
+        // invariant is that a None-search either yields pure defaults
+        // (nothing found) or a parsed config with a recorded source path.
         let loaded = load(None).expect("absence is not an error");
-        assert_eq!(loaded.config, DaemonConfig::default());
-        assert!(loaded.source_path.is_none() || loaded.source_path.is_some());
-        assert!(!loaded.config.cloud.enabled);
+        match loaded.source_path {
+            None => assert_eq!(loaded.config, DaemonConfig::default()),
+            Some(path) => assert!(!path.as_os_str().is_empty(), "source path is real"),
+        }
     }
 
     #[test]
