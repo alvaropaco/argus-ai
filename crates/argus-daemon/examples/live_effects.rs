@@ -153,7 +153,14 @@ async fn main() {
                     daemon
                         .grant_approval(pending.token, "live-harness")
                         .expect("grant");
-                    print_outcome(daemon.resume_remediation(&pending, &events).await);
+                    match daemon.resume_remediation(&pending, &events).await {
+                        argus_daemon::control::ResumeOutcome::Finished(report) => {
+                            print_outcome(argus_daemon::control::RunOutcome::Finished(report));
+                        }
+                        argus_daemon::control::ResumeOutcome::Refused(why) => {
+                            println!("resume refused: {why:?}");
+                        }
+                    }
                 }
                 outcome => print_outcome(outcome),
             }
