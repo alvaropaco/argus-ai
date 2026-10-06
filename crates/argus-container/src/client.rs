@@ -76,8 +76,6 @@ impl Default for DockerClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn splits_status_and_body() {
         let response =
