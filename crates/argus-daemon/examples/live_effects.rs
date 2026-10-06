@@ -130,17 +130,33 @@ async fn main() {
             }
         }
         "restart-container" => {
-            let id = args.get(2).expect("usage: restart-container <id>").clone();
+            let id = args
+                .get(2)
+                .expect("usage: restart-container <id> [approve]")
+                .clone();
+            let approve = args.get(3).is_some_and(|a| a == "approve");
             let plan = one_step_plan(
                 CapabilityId::CONTAINER_RESTART,
                 json!({ "container": id }),
                 None,
             );
-            print_outcome(
-                daemon
-                    .run_remediation(&plan, AutonomyMode::L4Autonomous, &LocalEventBus::new(64))
-                    .await,
-            );
+            let events = LocalEventBus::new(64);
+            match daemon
+                .run_remediation(&plan, AutonomyMode::L4Autonomous, &events)
+                .await
+            {
+                argus_daemon::control::RunOutcome::Pending(pending) if approve => {
+                    println!(
+                        "paused for approval; granting token {} and resuming",
+                        pending.token
+                    );
+                    daemon
+                        .grant_approval(pending.token, "live-harness")
+                        .expect("grant");
+                    print_outcome(daemon.resume_remediation(&pending, &events).await);
+                }
+                outcome => print_outcome(outcome),
+            }
         }
         "signal" => {
             let pid: i64 = args
