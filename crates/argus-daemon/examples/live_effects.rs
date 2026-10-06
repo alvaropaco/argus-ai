@@ -72,6 +72,7 @@ fn print_outcome(outcome: argus_daemon::control::RunOutcome) {
             println!("executions: {}", report.executions.len());
             for e in &report.executions {
                 println!("  - {:?} {}", e.status, e.action.capability.as_str());
+                println!("    evidence: {}", e.evidence);
             }
             println!("denied: {:?}", report.denied);
             println!("requires_approval: {:?}", report.requires_approval);
