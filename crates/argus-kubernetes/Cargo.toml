@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 argus-domain = { workspace = true }
 argus-executor = { workspace = true }
+chrono = { workspace = true, optional = true }
 
 # The kube-rs backend is feature-gated so the single-host build stays lean
 # (ADR-0037, negative consequences). The API version is pinned through
@@ -33,7 +34,7 @@ uuid = { workspace = true }
 
 [features]
 default = []
-kube = ["dep:kube", "dep:k8s-openapi", "dep:http", "dep:tokio"]
+kube = ["dep:kube", "dep:k8s-openapi", "dep:http", "dep:tokio", "dep:chrono"]
 
 [lints]
 workspace = true

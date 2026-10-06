@@ -30,6 +30,7 @@ argus-state = { workspace = true }
 argus-policy = { workspace = true }
 argus-reporting = { workspace = true }
 argus-runbooks = { workspace = true }
+argus-kubernetes = { workspace = true, optional = true }
 argus-memory = { workspace = true }
 argus-executor = { workspace = true }
 argus-events = { workspace = true }
@@ -46,6 +47,12 @@ argus-risk = { workspace = true }
 argus-correlate = { workspace = true }
 argus-incidents = { workspace = true }
 argus-investigate = { workspace = true }
+
+[features]
+# The live Kubernetes backend (kube-rs + the cluster bridge). Off by default
+# so the single-host build stays lean (ADR-0037); enable on hosts that run a
+# cluster and configure [kubernetes] in argus.toml.
+kubernetes = ["dep:argus-kubernetes", "argus-kubernetes/kube"]
 
 [lints]
 workspace = true

@@ -121,6 +121,29 @@ pub mod kube_backend {
             Ok(Self { client })
         }
 
+        /// Connect from an explicit kubeconfig path (e.g. a k3s
+        /// `/etc/rancher/k3s/k3s.yaml`), optionally selecting a context.
+        pub async fn from_kubeconfig(
+            path: &str,
+            context: Option<&str>,
+        ) -> Result<Self, KubernetesError> {
+            use kube::config::Kubeconfig;
+            let unavailable = |e: String| KubernetesError::Unavailable(e);
+            let kubeconfig = Kubeconfig::read_from(path)
+                .map_err(|e| unavailable(format!("read kubeconfig {path}: {e}")))?;
+            let options = kube::config::KubeConfigOptions {
+                context: context.map(str::to_string),
+                cluster: None,
+                user: None,
+            };
+            let config = kube::Config::from_custom_kubeconfig(kubeconfig, &options)
+                .await
+                .map_err(|e| unavailable(format!("load kubeconfig: {e}")))?;
+            let client =
+                kube::Client::try_from(config).map_err(|e| unavailable(format!("connect: {e}")))?;
+            Ok(Self { client })
+        }
+
         /// A bodyless GET against the API server's root-relative path.
         fn get(path: &str) -> http::Request<Vec<u8>> {
             http::Request::builder()

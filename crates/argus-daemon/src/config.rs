@@ -32,6 +32,10 @@ pub struct DaemonConfig {
     /// The brain loop settings (spec 005 FR-003/004).
     #[serde(default)]
     pub brain: BrainConfig,
+    /// The optional Kubernetes cluster (ADR-0037): absent means no cluster,
+    /// and the k8s capabilities degrade honestly.
+    #[serde(default)]
+    pub kubernetes: KubernetesConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -48,6 +52,7 @@ impl Default for DaemonConfig {
             cloud: CloudConfig::default(),
             model: argus_ai_core::model::ModelProviderConfig::default(),
             brain: BrainConfig::default(),
+            kubernetes: KubernetesConfig::default(),
         }
     }
 }
@@ -79,6 +84,8 @@ pub struct ConfigFile {
     pub model: Option<argus_ai_core::model::ModelProviderConfig>,
     #[serde(default)]
     pub brain: Option<BrainConfig>,
+    #[serde(default)]
+    pub kubernetes: Option<KubernetesConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +125,24 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
         .iter()
         .map(PathBuf::from)
         .find(|candidate| candidate.is_file())
+}
+
+/// The optional Kubernetes cluster settings (`[kubernetes]` in argus.toml).
+/// Plain strings on purpose: the daemon holds no kube-rs types unless the
+/// `kubernetes` feature is compiled in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct KubernetesConfig {
+    /// Path to a kubeconfig (e.g. `/etc/rancher/k3s/k3s.yaml`); absent with
+    /// `enabled = true` falls back to the ambient kubeconfig rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubeconfig: Option<String>,
+    /// Optional context name from that kubeconfig.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Explicitly off; `true` is only meaningful with the `kubernetes`
+    /// build feature and a reachable cluster.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Brain-loop settings (`[brain]` in argus.toml).
@@ -264,6 +289,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.brain {
         config.brain = value;
+    }
+    if let Some(value) = file.kubernetes {
+        config.kubernetes = value;
     }
 }
 

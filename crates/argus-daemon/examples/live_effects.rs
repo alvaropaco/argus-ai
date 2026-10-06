@@ -239,9 +239,106 @@ async fn main() {
                 outcome => print_outcome(outcome),
             }
         }
+        #[cfg(feature = "kubernetes")]
+        "k8s-read" => {
+            let resource = args.get(2).expect("usage: k8s-read <resource> [ns] [name]");
+            let namespace = args.get(3).cloned();
+            let name = args.get(4).cloned();
+            let Some(cluster) = daemon.cluster() else {
+                eprintln!("no kubernetes cluster connected");
+                std::process::exit(3);
+            };
+            match cluster.read(resource, namespace.as_deref(), name.as_deref()) {
+                Ok(value) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                ),
+                Err(e) => eprintln!("read failed: {e}"),
+            }
+        }
+        #[cfg(feature = "kubernetes")]
+        "k8s-evidence" => {
+            // AC-011 live: a deterministic evidence bundle for one pod.
+            let namespace = args.get(2).expect("usage: k8s-evidence <ns> <pod>");
+            let pod_name = args.get(3).expect("usage: k8s-evidence <ns> <pod>");
+            let kubeconfig = std::env::var("ARGUS_KUBECONFIG")
+                .unwrap_or_else(|_| "/etc/rancher/k3s/k3s.yaml".to_string());
+            let provider = argus_kubernetes::KubeRsProvider::from_kubeconfig(&kubeconfig, None)
+                .await
+                .expect("connect to the cluster");
+            use argus_kubernetes::KubernetesProvider;
+            let pods = provider.pods().await.expect("list pods");
+            let events = provider.events().await.unwrap_or_default();
+            let deployments = provider.deployments().await.unwrap_or_default();
+            let pod = pods
+                .iter()
+                .find(|p| p.namespace == *namespace && p.name == *pod_name)
+                .unwrap_or_else(|| panic!("pod {namespace}/{pod_name} not found"));
+            let deployment = deployments
+                .iter()
+                .find(|d| d.namespace == *namespace && pod.owner_name.as_deref() == Some(&d.name));
+            match argus_kubernetes::gather_evidence(pod, &events, deployment) {
+                Some(bundle) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&bundle).unwrap_or_default()
+                ),
+                None => println!("no recognized signature (a healthy pod needs no bundle)"),
+            }
+        }
+        #[cfg(feature = "kubernetes")]
+        "k8s-restart" | "k8s-scale" => {
+            // Typed k8s effects through the full daemon boundary.
+            let namespace = args.get(2).expect("usage: k8s-restart <ns> <name> [approve] | k8s-scale <ns> <name> <replicas> [approve]");
+            let name = args.get(3).expect("usage: k8s-restart <ns> <name> [approve] | k8s-scale <ns> <name> <replicas> [approve]");
+            let (capability, arguments, approve) = if cmd == "k8s-restart" {
+                (
+                    CapabilityId::K8S_DEPLOYMENT_RESTART,
+                    json!({ "namespace": namespace, "name": name }),
+                    args.get(4).is_some_and(|a| a == "approve"),
+                )
+            } else {
+                let replicas: i64 = args
+                    .get(4)
+                    .expect("k8s-scale needs <replicas>")
+                    .parse()
+                    .expect("replicas is a number");
+                (
+                    CapabilityId::K8S_WORKLOAD_SCALE,
+                    json!({ "namespace": namespace, "name": name, "replicas": replicas }),
+                    args.get(5).is_some_and(|a| a == "approve"),
+                )
+            };
+            let plan = one_step_plan(capability, arguments, None);
+            let events = LocalEventBus::new(64);
+            match daemon
+                .run_remediation(&plan, AutonomyMode::L4Autonomous, &events)
+                .await
+            {
+                argus_daemon::control::RunOutcome::Pending(pending) if approve => {
+                    println!("paused for approval; granting token {}", pending.token);
+                    let pending = daemon
+                        .grant_approval(pending.token, "live-harness")
+                        .expect("grant");
+                    match daemon.resume_remediation(&pending, &events).await {
+                        argus_daemon::control::ResumeOutcome::Finished(report) => {
+                            print_outcome(argus_daemon::control::RunOutcome::Finished(report));
+                        }
+                        argus_daemon::control::ResumeOutcome::Refused(why) => {
+                            println!("resume refused: {why:?}");
+                        }
+                    }
+                }
+                outcome => print_outcome(outcome),
+            }
+        }
+        #[cfg(not(feature = "kubernetes"))]
+        "k8s-read" | "k8s-evidence" | "k8s-restart" | "k8s-scale" => {
+            eprintln!("this build lacks the kubernetes feature");
+            std::process::exit(3);
+        }
         _ => {
             eprintln!(
-                "commands: sentinel | freeze <cgroup> [thaw-too] | restart-container <id> [approve] | signal <pid> <sig> [approve] | service-restart <unit> [approve]"
+                "commands: sentinel | freeze <cgroup> [thaw-too] | restart-container <id> [approve] | signal <pid> <sig> [approve] | service-restart <unit> [approve] | k8s-read <res> [ns] [name] | k8s-evidence <ns> <pod> | k8s-restart <ns> <name> [approve] | k8s-scale <ns> <name> <replicas> [approve]"
             );
             std::process::exit(2);
         }

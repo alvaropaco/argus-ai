@@ -97,6 +97,11 @@ pub struct Daemon {
     /// Runbooks loaded at startup from the configured directory (spec 005
     /// FR-005); empty when no directory is configured.
     runbooks: argus_runbooks::RunbookLibrary,
+    /// The live Kubernetes cluster bridge and its typed executor, when the
+    /// `kubernetes` feature is compiled in AND `[kubernetes] enabled = true`
+    /// AND the kubeconfig loads (ADR-0037: degrade, never require).
+    cluster: Option<Arc<dyn argus_executor::ClusterController>>,
+    kubernetes_executor: Option<Arc<argus_executor::KubernetesExecutor>>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -194,6 +199,61 @@ impl CapabilityProvider for DaemonProvider {
     }
 }
 
+/// Connect the live Kubernetes bridge when compiled in and configured
+/// (ADR-0037 §2). Without the feature or the configuration this returns
+/// `None` and every k8s capability degrades honestly.
+fn connect_cluster(
+    config: &DaemonConfig,
+) -> (
+    Option<Arc<dyn argus_executor::ClusterController>>,
+    Option<Arc<argus_executor::KubernetesExecutor>>,
+) {
+    #[cfg(feature = "kubernetes")]
+    {
+        if !config.kubernetes.enabled {
+            return (None, None);
+        }
+        let connected = argus_kubernetes::KubeClusterController::from_kubeconfig(
+            config.kubernetes.kubeconfig.as_deref(),
+            config.kubernetes.context.as_deref(),
+        );
+        match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(connected))
+        {
+            Ok(controller) => {
+                let cluster: Arc<dyn argus_executor::ClusterController> = Arc::new(controller);
+                tracing::info!("kubernetes cluster connected; typed k8s capabilities live");
+                // kube-system and kube-public are never autopilot targets;
+                // the replica quota bounds k8s.workload.scale at the executor.
+                let executor = argus_executor::KubernetesExecutor::new(
+                    cluster.clone(),
+                    argus_executor::kubernetes_guardrails(&[
+                        "kube-system".to_string(),
+                        "kube-public".to_string(),
+                    ]),
+                    10,
+                );
+                (Some(cluster), Some(Arc::new(executor)))
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    reason = %reason,
+                    "kubernetes enabled but unreachable; k8s capabilities degrade"
+                );
+                (None, None)
+            }
+        }
+    }
+    #[cfg(not(feature = "kubernetes"))]
+    {
+        if config.kubernetes.enabled {
+            tracing::warn!(
+                "[kubernetes] enabled but this build lacks the kubernetes feature;                  k8s capabilities degrade"
+            );
+        }
+        (None, None)
+    }
+}
+
 /// Load the runbook library from the configured directory (spec 005
 /// FR-005); no directory or an unreadable one yields an empty library with
 /// the reasons logged — runbooks are never load-bearing for startup.
@@ -259,6 +319,7 @@ impl Daemon {
             Arc::new(AtomicBool::new(config.cloud.allow_privileged_execution));
 
         let secret_store = CloudSecretStore::default_location();
+        let (cluster, kubernetes_executor) = connect_cluster(&config);
         let decision_provider = crate::brain::build_provider(&config, &secret_store);
         let runbooks = load_runbooks(&config);
         Ok(Self {
@@ -289,6 +350,8 @@ impl Daemon {
             selfobs: Arc::new(SelfObservability::new()),
             provider: std::sync::RwLock::new(decision_provider),
             runbooks,
+            cluster,
+            kubernetes_executor,
         })
     }
 
@@ -694,6 +757,12 @@ impl Daemon {
         &self.runbooks
     }
 
+    /// The live Kubernetes cluster bridge, when connected (ADR-0037);
+    /// `None` means every k8s capability degrades honestly.
+    pub fn cluster(&self) -> Option<Arc<dyn argus_executor::ClusterController>> {
+        self.cluster.clone()
+    }
+
     /// The remediation ports over the daemon's own controllers and executor.
     ///
     /// The Kubernetes port ships degraded (no cluster configured) until the
@@ -707,9 +776,13 @@ impl Daemon {
             governor: self.governor.as_ref(),
             containers: self.containers.as_ref(),
             cgroups: self.cgroups.as_ref(),
-            cluster: &UNAVAILABLE_CLUSTER,
+            cluster: self.cluster.as_deref().unwrap_or(&UNAVAILABLE_CLUSTER),
             remediation: self.remediation.as_ref(),
-            kubernetes: &NO_KUBERNETES,
+            kubernetes: self
+                .kubernetes_executor
+                .as_deref()
+                .map(|executor| executor as &dyn argus_executor::Executor)
+                .unwrap_or(&NO_KUBERNETES),
         }
     }
 
