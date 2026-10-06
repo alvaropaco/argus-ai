@@ -1,28 +1,28 @@
 Origin: ARGUS AI
 Label: ARGUS AI
 Codename: stable
-Date: Tue, 29 Sep 2026 13:56:51 UTC
+Date: Tue, 06 Oct 2026 14:42:43 UTC
 Architectures: amd64 arm64
 Components: main
 Description: Official ARGUS AI APT repository
 MD5Sum:
- 3407b95ed5a9de976e2b86a699a24274 1109 main/binary-amd64/Packages
- 2aeab679626bd464c1c14baffb382a25 557 main/binary-amd64/Packages.gz
+ b58a0ba48714e9eb21dfe450247fac3b 1110 main/binary-amd64/Packages
+ 4f3416bd257e649381585092a4d42363 559 main/binary-amd64/Packages.gz
  8a930c486a9b4e1018e19f85f21b1c4d 115 main/binary-amd64/Release
- 0120f2a946be07946cc94486fa2f142e 1121 main/binary-arm64/Packages
- 9d80e078d4dbfca9c5bdc7c02265bab8 562 main/binary-arm64/Packages.gz
+ e9214c88fdc9d1f169aae32ba5862e75 1122 main/binary-arm64/Packages
+ ef5946e0f5b9ca8b4d015a750bd7b641 562 main/binary-arm64/Packages.gz
  a829804015b1cc356982f0b8da55dd61 115 main/binary-arm64/Release
 SHA1:
- cc60af4457130a92d807ecb06e9414594d5ce7f0 1109 main/binary-amd64/Packages
- 9c0d183c9116003e1db494e12104da20bbbc9729 557 main/binary-amd64/Packages.gz
+ 71c8a9a2295a362f84f95135c0631aa483b4eeef 1110 main/binary-amd64/Packages
+ aee32d6d042a4ff9925f74bf6e0245b4154e7338 559 main/binary-amd64/Packages.gz
  bbf1f1414df391a9c916b726f84c7f537fa41ac1 115 main/binary-amd64/Release
- 69d722a1fd47371acbf41c90d9099727df5f799b 1121 main/binary-arm64/Packages
- bb59aa5237691eb8c6dd6094937d3f07d5ea0499 562 main/binary-arm64/Packages.gz
+ 652f872947c2d0d06da3e78eb4c1385e68e887ce 1122 main/binary-arm64/Packages
+ 676f589585eaeb404cec936c93335b59d4ea7e90 562 main/binary-arm64/Packages.gz
  d3f7e0ce686bb810b5116dab44e2738e830447b3 115 main/binary-arm64/Release
 SHA256:
- 6938eb21075d420316ff6f072bc9918c003f75c29dd6627ab96ee6e811ebe2c2 1109 main/binary-amd64/Packages
- 7e859314d2489175e5bc76eb7e84a2bf6cb35d6537ed7923121c5814c0efc6f3 557 main/binary-amd64/Packages.gz
+ 195eac724b8c554f71a0431c711a790916306d2464368e7038c868a31dc303d0 1110 main/binary-amd64/Packages
+ 69eb2d8c55def3a5b4c87f1245366eaaeb68351406ae73b4a7a7fee71b2d78bf 559 main/binary-amd64/Packages.gz
  0aa0b5aec7247d5231d59b65f10719c924620e6447735050814d2fed1f20b1e8 115 main/binary-amd64/Release
- d04679117d259583169d028fa835635853a3a35b6d8ff0170eea9834d726b15e 1121 main/binary-arm64/Packages
- 86254c3ab90bd60f1762300612e66146a30494ce51728b62ac578b53dd2e34dc 562 main/binary-arm64/Packages.gz
+ da50d13f877e741949649ca96afe2494373fc0a025d649604a9510305e435ba9 1122 main/binary-arm64/Packages
+ c04b8a1aab79b37415cbc205a99e83ece33a56196372e659e76d86c91fbfe372 562 main/binary-arm64/Packages.gz
  a5edbc59edc3f36e5a6124d83ae3c6fdddcf9b5ce2a60c2dec668af9f97b364f 115 main/binary-arm64/Release
