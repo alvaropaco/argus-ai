@@ -36,6 +36,13 @@ impl RunbookLibrary {
         self.runbooks.get(&id)
     }
 
+    /// All runbooks, ordered by name (deterministic).
+    pub fn list(&self) -> Vec<&Runbook> {
+        let mut out: Vec<&Runbook> = self.runbooks.values().collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     pub fn get_mut(&mut self, id: Uuid) -> Option<&mut Runbook> {
         self.runbooks.get_mut(&id)
     }

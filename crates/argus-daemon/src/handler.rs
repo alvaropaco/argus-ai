@@ -59,6 +59,8 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
         Operation::AuditList => return audit_list(daemon, request).await,
         Operation::SentinelGet => return sentinel_get(daemon, &request).await,
         Operation::ReportGenerate => return report_generate(daemon, &request).await,
+        Operation::BrainDiagnose => return brain_diagnose(daemon, &request).await,
+        Operation::RunbooksList => return runbooks_list(daemon, request.correlation_id),
     };
 
     Response::ok(request.correlation_id, result)
@@ -407,4 +409,51 @@ async fn report_generate(daemon: &Daemon, request: &Request) -> Response {
             format!("serialize report: {e}"),
         ),
     }
+}
+
+/// `brain.diagnose`: run one full brain cycle on demand (spec 005 FR-004).
+/// `NotReady` when no decision provider is configured — the daemon observes
+/// but never guesses (AC-003).
+async fn brain_diagnose(daemon: &Daemon, request: &Request) -> Response {
+    if daemon.provider().is_none() {
+        return Response::err(
+            request.correlation_id,
+            ErrorCode::NotReady,
+            "no decision provider configured; the brain runs observe-only",
+        );
+    }
+    let brain = daemon.config().brain.clone();
+    let record = crate::brain::cycle(daemon, &brain).await;
+    match serde_json::to_value(serde_json::json!({
+        "evidence": record.evidence,
+        "provider_available": record.provider_available,
+        "decision": record.decision,
+        "plan": record.plan_objective,
+        "outcome": record.outcome,
+    })) {
+        Ok(value) => Response::ok(request.correlation_id, value),
+        Err(e) => Response::err(
+            request.correlation_id,
+            ErrorCode::Internal,
+            format!("serialize brain cycle: {e}"),
+        ),
+    }
+}
+
+/// `runbooks.list`: the runbooks loaded at startup (spec 005 FR-005).
+fn runbooks_list(daemon: &Daemon, correlation_id: Uuid) -> Response {
+    let runbooks: Vec<serde_json::Value> = daemon
+        .runbooks()
+        .list()
+        .into_iter()
+        .map(|rb| {
+            serde_json::json!({
+                "name": rb.name,
+                "status": format!("{:?}", rb.status()),
+                "attempts": rb.attempts(),
+                "success_rate": rb.historical_success_rate(),
+            })
+        })
+        .collect();
+    Response::ok(correlation_id, serde_json::json!({ "runbooks": runbooks }))
 }

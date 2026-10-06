@@ -208,34 +208,15 @@ pub async fn run_host_health(
     dedup: &dyn DedupPort,
     validator: &dyn ValidationPort,
 ) -> Result<Option<Plan>, DecisionError> {
-    let key = observation_dedup_key(&evidence);
-    if !dedup.claim(&key).await? {
-        recorder.record_dedup(&key).await?;
-        return Ok(None);
-    }
-
-    let request = host_health_request(evidence);
-    let state = request.state.clone();
-    let response =
-        match crate::decision::gateway::decide_outcome_with(provider, request, threshold).await? {
-            DecisionOutcome::NoDecision(_) => {
-                dedup.release(&key).await?;
-                return Ok(None);
-            }
-            DecisionOutcome::Decided(response) => response,
-        };
-    let provenance = DecisionProvenance::from_response(&response, &state);
-
-    let Some(action) = remediation_action(&response, &state) else {
-        dedup.release(&key).await?;
-        return Ok(None);
-    };
-    let rollback = rollback_for(&action);
-    let step = PlanStep { action, rollback };
-    let Some(plan) = propose_plan(&response, threshold, "restore the host service", vec![step])
-    else {
-        dedup.release(&key).await?;
-        return Ok(None);
+    // The dedup key stays claimed after a full execute+record cycle:
+    // a repeated observation is a recorded no-op by design.
+    let (plan, provenance) = match plan_from_evidence(provider, evidence, threshold, dedup).await? {
+        EvidenceDecision::Plan(plan, provenance, _key) => (plan, provenance),
+        EvidenceDecision::Deduplicated(key) => {
+            recorder.record_dedup(&key).await?;
+            return Ok(None);
+        }
+        EvidenceDecision::Nothing => return Ok(None),
     };
 
     // Execute every step the plan carries, and always record the outcome —
@@ -253,7 +234,69 @@ pub async fn run_host_health(
     if let Err(error) = validator.validate(&plan).await {
         tracing::warn!(error = %error, "post-execution validation failed");
     }
-    Ok(Some(plan))
+    Ok(Some(*plan))
+}
+
+/// The decide-only phase of the host-health loop: dedup, pose the
+/// structured decisions, gate on confidence, and shape the typed plan —
+/// WITHOUT executing it (spec 005: the brain's action path is the modern
+/// run boundary, so proposals must come back unexecuted). Returns the
+/// plan, its provenance, and the dedup key (callers release the key when
+/// the situation persists so a retry is possible).
+///
+/// A repeated observation (same dedup key) yields no plan; a no-decision
+/// or an unactionable outcome releases the key (fail-closed, nothing
+/// executes).
+pub async fn plan_from_evidence(
+    provider: &dyn DecisionProvider,
+    evidence: ContextBuilder,
+    threshold: f64,
+    dedup: &dyn DedupPort,
+) -> Result<EvidenceDecision, DecisionError> {
+    let key = observation_dedup_key(&evidence);
+    if !dedup.claim(&key).await? {
+        return Ok(EvidenceDecision::Deduplicated(key));
+    }
+
+    let request = host_health_request(evidence);
+    let state = request.state.clone();
+    let response =
+        match crate::decision::gateway::decide_outcome_with(provider, request, threshold).await? {
+            DecisionOutcome::NoDecision(_) => {
+                dedup.release(&key).await?;
+                return Ok(EvidenceDecision::Nothing);
+            }
+            DecisionOutcome::Decided(response) => response,
+        };
+    let provenance = DecisionProvenance::from_response(&response, &state);
+
+    let Some(action) = remediation_action(&response, &state) else {
+        dedup.release(&key).await?;
+        return Ok(EvidenceDecision::Nothing);
+    };
+    let rollback = rollback_for(&action);
+    let step = PlanStep { action, rollback };
+    let Some(plan) = propose_plan(&response, threshold, "restore the host service", vec![step])
+    else {
+        dedup.release(&key).await?;
+        return Ok(EvidenceDecision::Nothing);
+    };
+    Ok(EvidenceDecision::Plan(Box::new(plan), provenance, key))
+}
+
+/// The decide-only outcome for one evidence set ([`plan_from_evidence`]).
+pub enum EvidenceDecision {
+    /// A plan cleared every gate, unexecuted, with its provenance and the
+    /// claimed dedup key (callers release the key when the situation
+    /// persists, so a retry stays possible). Boxed: the plan dominates the
+    /// enum's size.
+    Plan(Box<Plan>, DecisionProvenance, String),
+    /// The evidence was already reasoned about; the key is carried for the
+    /// audit record.
+    Deduplicated(String),
+    /// Nothing actionable this cycle (no decision, below the gate, or no
+    /// well-formed action).
+    Nothing,
 }
 
 #[cfg(test)]

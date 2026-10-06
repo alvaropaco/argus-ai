@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
 
     let _cloud_stop = spawn_cloud_supervisor(&daemon, &config, Arc::clone(&events));
     spawn_observation_loop(&daemon, &events);
+    argus_daemon::brain::spawn(Arc::clone(&daemon), config.brain.clone());
 
     let handler = {
         let daemon = Arc::clone(&daemon);

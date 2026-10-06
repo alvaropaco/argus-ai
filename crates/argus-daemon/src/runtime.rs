@@ -89,6 +89,14 @@ pub struct Daemon {
     /// Self-observability counters (CAP-24, FR-025), recorded at the daemon
     /// boundary — one hop coarse: run outcomes, not control-loop internals.
     selfobs: Arc<SelfObservability>,
+    /// The AI decision provider built from `[model]` + the secret store at
+    /// startup (spec 005 FR-002); `None` = observe-only. Swappable for tests
+    /// and future reconfiguration.
+    provider:
+        std::sync::RwLock<Option<Arc<dyn argus_ai_core::decision::provider::DecisionProvider>>>,
+    /// Runbooks loaded at startup from the configured directory (spec 005
+    /// FR-005); empty when no directory is configured.
+    runbooks: argus_runbooks::RunbookLibrary,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -186,6 +194,20 @@ impl CapabilityProvider for DaemonProvider {
     }
 }
 
+/// Load the runbook library from the configured directory (spec 005
+/// FR-005); no directory or an unreadable one yields an empty library with
+/// the reasons logged — runbooks are never load-bearing for startup.
+fn load_runbooks(config: &DaemonConfig) -> argus_runbooks::RunbookLibrary {
+    match &config.brain.runbooks_dir {
+        Some(dir) => {
+            let result = argus_runbooks::load_runbooks(std::path::Path::new(dir));
+            tracing::info!("{}", result.summary());
+            result.library
+        }
+        None => argus_runbooks::RunbookLibrary::default(),
+    }
+}
+
 impl Daemon {
     /// Initializes the daemon, opening the state store and persisting/loading
     /// environment identity and an initial health record.
@@ -236,12 +258,15 @@ impl Daemon {
         let privileged_execution =
             Arc::new(AtomicBool::new(config.cloud.allow_privileged_execution));
 
+        let secret_store = CloudSecretStore::default_location();
+        let decision_provider = crate::brain::build_provider(&config, &secret_store);
+        let runbooks = load_runbooks(&config);
         Ok(Self {
             started_at: Instant::now(),
             environment_id,
             config,
             repository,
-            secrets: CloudSecretStore::default_location(),
+            secrets: secret_store.clone(),
             tracker: Arc::new(tokio::sync::Mutex::new(ConnectivityTracker::new())),
             queue: Arc::new(tokio::sync::Mutex::new(ReportQueue::new(buffer_capacity))),
             managed_settings: CloudSettingsStore::default_location(),
@@ -262,6 +287,8 @@ impl Daemon {
             remediation: remediation_executor.clone(),
             governor: governor.clone(),
             selfobs: Arc::new(SelfObservability::new()),
+            provider: std::sync::RwLock::new(decision_provider),
+            runbooks,
         })
     }
 
@@ -634,6 +661,31 @@ impl Daemon {
         &self.selfobs
     }
 
+    /// The AI decision provider, when one is configured (spec 005 FR-002);
+    /// `None` means the brain runs observe-only.
+    pub fn provider(&self) -> Option<Arc<dyn argus_ai_core::decision::provider::DecisionProvider>> {
+        self.provider
+            .read()
+            .expect("provider lock is not poisoned")
+            .clone()
+    }
+
+    /// Replaces the decision provider (tests, future reconfiguration).
+    pub fn set_provider(
+        &self,
+        provider: Option<Arc<dyn argus_ai_core::decision::provider::DecisionProvider>>,
+    ) {
+        *self
+            .provider
+            .write()
+            .expect("provider lock is not poisoned") = provider;
+    }
+
+    /// The runbooks loaded at startup (spec 005 FR-005).
+    pub fn runbooks(&self) -> &argus_runbooks::RunbookLibrary {
+        &self.runbooks
+    }
+
     /// The remediation ports over the daemon's own controllers and executor.
     ///
     /// The Kubernetes port ships degraded (no cluster configured) until the
@@ -651,6 +703,43 @@ impl Daemon {
             remediation: self.remediation.as_ref(),
             kubernetes: &NO_KUBERNETES,
         }
+    }
+
+    /// The decide-only half of the reasoning loop (spec 005): dedup, pose
+    /// the structured decisions, gate on confidence, and return the typed
+    /// plan **unexecuted** with its dedup key — the brain executes through
+    /// `run_remediation`, the modern boundary, not through the dispatch
+    /// port. Provider health transitions mirror `diagnose_once`.
+    pub async fn propose_once(
+        &self,
+        provider: &dyn DecisionProvider,
+        evidence: ContextBuilder,
+        threshold: f64,
+        events: &dyn EventBus,
+    ) -> Result<Option<(Plan, String)>, DecisionError> {
+        use argus_ai_core::decision::host_health::{EvidenceDecision, plan_from_evidence};
+
+        let result = plan_from_evidence(provider, evidence, threshold, &self.dedup).await;
+        match &result {
+            Ok(_) => self.mark_provider_ready(),
+            Err(error) => {
+                if self.mark_provider_degraded(&error.to_string()) {
+                    let _ = events
+                        .publish(&Self::degraded_transition_event(&error.to_string()))
+                        .await;
+                }
+            }
+        }
+        match result? {
+            EvidenceDecision::Plan(plan, _provenance, key) => Ok(Some((*plan, key))),
+            EvidenceDecision::Deduplicated(_) | EvidenceDecision::Nothing => Ok(None),
+        }
+    }
+
+    /// Release a dedup key so the same evidence can be reasoned about again
+    /// (the brain releases when a remediation did not resolve the situation).
+    pub async fn release_dedup(&self, key: &str) {
+        let _: Result<(), _> = self.dedup.release(key).await;
     }
 
     /// Runs one host-health reasoning step end to end: build the request from

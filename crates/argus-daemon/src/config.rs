@@ -8,7 +8,7 @@ use argus_observability::LogFormat;
 use serde::{Deserialize, Serialize};
 
 /// Resolved configuration for a single `argusd` instance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonConfig {
     /// Path to the Unix-domain socket.
     pub socket_path: String,
@@ -25,6 +25,13 @@ pub struct DaemonConfig {
     pub otel_endpoint: Option<String>,
     /// Log output format.
     pub log_format: LogFormat,
+    /// The AI decision-provider settings (spec 005 FR-002). Absent means
+    /// no provider: the brain runs observe-only.
+    #[serde(default)]
+    pub model: argus_ai_core::model::ModelProviderConfig,
+    /// The brain loop settings (spec 005 FR-003/004).
+    #[serde(default)]
+    pub brain: BrainConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -39,6 +46,8 @@ impl Default for DaemonConfig {
             otel_endpoint: None,
             log_format: LogFormat::Text,
             cloud: CloudConfig::default(),
+            model: argus_ai_core::model::ModelProviderConfig::default(),
+            brain: BrainConfig::default(),
         }
     }
 }
@@ -105,6 +114,55 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
         .iter()
         .map(PathBuf::from)
         .find(|candidate| candidate.is_file())
+}
+
+/// Brain-loop settings (`[brain]` in argus.toml).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BrainConfig {
+    /// The autonomy level the loop runs at — default L0: the brain observes
+    /// and explains; execution requires the operator to raise this, and even
+    /// then every plan crosses policy/escalation/approvals as usual.
+    pub autonomy: argus_domain::AutonomyMode,
+    /// Seconds between brain ticks.
+    pub interval_seconds: u64,
+    /// The confidence gate for acting on a decision (`diagnose_once`).
+    pub confidence_threshold: f64,
+    /// Directory of runbook TOML files; absent means no runbooks load.
+    pub runbooks_dir: Option<String>,
+}
+
+impl Default for BrainConfig {
+    fn default() -> Self {
+        Self {
+            autonomy: argus_domain::AutonomyMode::L0Observe,
+            interval_seconds: 60,
+            confidence_threshold: 0.3,
+            runbooks_dir: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BrainConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct BrainWire {
+            #[serde(default)]
+            autonomy: Option<argus_domain::AutonomyMode>,
+            #[serde(default)]
+            interval_seconds: Option<u64>,
+            #[serde(default)]
+            confidence_threshold: Option<f64>,
+            #[serde(default)]
+            runbooks_dir: Option<String>,
+        }
+        let wire = BrainWire::deserialize(deserializer)?;
+        Ok(Self {
+            autonomy: wire.autonomy.unwrap_or_default(),
+            interval_seconds: wire.interval_seconds.unwrap_or(60).max(5),
+            confidence_threshold: wire.confidence_threshold.unwrap_or(0.3).clamp(0.0, 1.0),
+            runbooks_dir: wire.runbooks_dir,
+        })
+    }
 }
 
 /// Precedence is `defaults < file < flags`; flags are applied afterwards by the
