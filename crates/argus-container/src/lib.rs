@@ -12,6 +12,7 @@
 
 mod client;
 mod convert;
+mod http_parse;
 mod model;
 mod sync_client;
 

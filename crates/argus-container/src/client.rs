@@ -60,12 +60,11 @@ impl DockerClient {
             .await
             .map_err(|e| ContainerError::Other(e.to_string()))?;
 
-        let response = String::from_utf8_lossy(&buf);
-        let (status, body) = parse_http_response(&response)?;
+        let (status, body) = crate::http_parse::parse_response(&buf)?;
         if status != "200" {
             return Err(ContainerError::Other(format!("HTTP status {status}")));
         }
-        Ok(body.to_string())
+        Ok(body)
     }
 }
 
@@ -73,18 +72,6 @@ impl Default for DockerClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Split an HTTP/1.1 response into its status code and body.
-fn parse_http_response(response: &str) -> Result<(&str, &str), ContainerError> {
-    let (head, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
-        ContainerError::Parse("response has no header/body separator".to_string())
-    })?;
-    let status = head
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| ContainerError::Parse("response has no status line".to_string()))?;
-    Ok((status, body))
 }
 
 #[cfg(test)]
@@ -95,18 +82,18 @@ mod tests {
     fn splits_status_and_body() {
         let response =
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n[]\n";
-        let (status, body) = parse_http_response(response).unwrap();
+        let (status, body) = crate::http_parse::parse_response(response.as_bytes()).unwrap();
         assert_eq!(status, "200");
         assert_eq!(body, "[]\n");
     }
 
     #[test]
     fn rejects_missing_separator() {
-        assert!(parse_http_response("HTTP/1.1 200 OK").is_err());
+        assert!(crate::http_parse::parse_response(b"HTTP/1.1 200 OK").is_err());
     }
 
     #[test]
     fn rejects_missing_status() {
-        assert!(parse_http_response("HTTP/1.1\r\n\r\nbody").is_err());
+        assert!(crate::http_parse::parse_response(b"HTTP/1.1\r\n\r\nbody").is_err());
     }
 }

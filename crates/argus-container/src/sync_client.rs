@@ -71,9 +71,8 @@ impl SyncDockerClient {
         stream
             .read_to_end(&mut buf)
             .map_err(|e| ContainerError::Other(e.to_string()))?;
-        let response = String::from_utf8_lossy(&buf).into_owned();
-        let (status, body) = parse_response(&response)?;
-        Ok((status.to_string(), body.to_string()))
+        let (status, body) = crate::http_parse::parse_response(&buf)?;
+        Ok((status.to_string(), body))
     }
 }
 
@@ -98,19 +97,6 @@ fn container_resource_path(id: &str, resource: &str) -> Result<String, Container
     Ok(format!("/containers/{id}/{resource}"))
 }
 
-/// Split an HTTP/1.1 response into its status code and body (shared shape with
-/// the async client's parser).
-fn parse_response(response: &str) -> Result<(&str, &str), ContainerError> {
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| ContainerError::Parse("malformed HTTP response".into()))?;
-    let status = head
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| ContainerError::Parse("malformed HTTP status line".into()))?;
-    Ok((status, body))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,13 +111,5 @@ mod tests {
         assert!(container_resource_path("id?x=1", "restart").is_err());
     }
 
-    #[test]
-    fn http_response_parsing_splits_status_and_body() {
-        let (status, body) =
-            parse_response("HTTP/1.1 204 No Content\r\nHeader: x\r\n\r\n").unwrap();
-        assert_eq!(status, "204");
-        assert_eq!(body, "");
-        assert!(parse_response("HTTP/1.1 200 OK").is_err());
-        assert!(parse_response("HTTP/1.1\r\n\r\nbody").is_err());
-    }
+    // HTTP parsing (identity + chunked) is tested in `http_parse`.
 }
