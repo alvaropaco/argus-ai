@@ -34,7 +34,25 @@ fn config() -> DaemonConfig {
         // daemon's database. Effects happen on the host, not in this file.
         state_path: "/tmp/argus-live-effects.db".to_string(),
         socket_path: "/tmp/argus-live-effects.sock".to_string(),
+        // Mirror the host's cluster configuration when one exists, so the
+        // k8s verbs run against the same cluster the system daemon uses.
+        kubernetes: live_kubernetes_config(),
         ..DaemonConfig::default()
+    }
+}
+
+/// `[kubernetes]` from `ARGUS_KUBECONFIG` or the host's k3s default; absent
+/// means no cluster and the k8s verbs degrade honestly.
+fn live_kubernetes_config() -> argus_daemon::config::KubernetesConfig {
+    let kubeconfig = std::env::var("ARGUS_KUBECONFIG").ok().or_else(|| {
+        std::path::Path::new("/etc/rancher/k3s/k3s.yaml")
+            .is_file()
+            .then(|| "/etc/rancher/k3s/k3s.yaml".to_string())
+    });
+    argus_daemon::config::KubernetesConfig {
+        enabled: kubeconfig.is_some(),
+        kubeconfig,
+        context: None,
     }
 }
 
