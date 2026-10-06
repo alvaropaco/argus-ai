@@ -31,7 +31,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.10"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -55,31 +55,31 @@ base64 = "0.23.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 futures-util = "0.3.34"
-argus-domain = { version = "0.1.10", path = "crates/argus-domain" }
-argus-ai-core = { version = "0.1.10", path = "crates/argus-ai-core" }
-argus-ipc = { version = "0.1.10", path = "crates/argus-ipc" }
-argus-observability = { version = "0.1.10", path = "crates/argus-observability" }
-argus-policy = { version = "0.1.10", path = "crates/argus-policy" }
-argus-executor = { version = "0.1.10", path = "crates/argus-executor" }
-argus-state = { version = "0.1.10", path = "crates/argus-state" }
-argus-events = { version = "0.1.10", path = "crates/argus-events" }
-argus-ai-tui = { version = "0.1.10", path = "crates/argus-ai-tui" }
-argus-install = { version = "0.1.10", path = "crates/argus-install" }
-argus-cloud = { version = "0.1.10", path = "crates/argus-cloud" }
-argus-validate = { version = "0.1.10", path = "crates/argus-validate" }
-argus-sensors = { version = "0.1.10", path = "crates/argus-sensors" }
-argus-observe = { version = "0.1.10", path = "crates/argus-observe" }
-argus-anomaly = { version = "0.1.10", path = "crates/argus-anomaly" }
-argus-systemd = { version = "0.1.10", path = "crates/argus-systemd" }
-argus-container = { version = "0.1.10", path = "crates/argus-container" }
-argus-correlate = { version = "0.1.10", path = "crates/argus-correlate" }
-argus-risk = { version = "0.1.10", path = "crates/argus-risk" }
-argus-incidents = { version = "0.1.10", path = "crates/argus-incidents" }
-argus-investigate = { version = "0.1.10", path = "crates/argus-investigate" }
-argus-kubernetes = { version = "0.1.10", path = "crates/argus-kubernetes" }
-argus-memory = { version = "0.1.10", path = "crates/argus-memory" }
-argus-runbooks = { version = "0.1.10", path = "crates/argus-runbooks" }
-argus-reporting = { version = "0.1.10", path = "crates/argus-reporting" }
+argus-domain = { version = "0.2.0", path = "crates/argus-domain" }
+argus-ai-core = { version = "0.2.0", path = "crates/argus-ai-core" }
+argus-ipc = { version = "0.2.0", path = "crates/argus-ipc" }
+argus-observability = { version = "0.2.0", path = "crates/argus-observability" }
+argus-policy = { version = "0.2.0", path = "crates/argus-policy" }
+argus-executor = { version = "0.2.0", path = "crates/argus-executor" }
+argus-state = { version = "0.2.0", path = "crates/argus-state" }
+argus-events = { version = "0.2.0", path = "crates/argus-events" }
+argus-ai-tui = { version = "0.2.0", path = "crates/argus-ai-tui" }
+argus-install = { version = "0.2.0", path = "crates/argus-install" }
+argus-cloud = { version = "0.2.0", path = "crates/argus-cloud" }
+argus-validate = { version = "0.2.0", path = "crates/argus-validate" }
+argus-sensors = { version = "0.2.0", path = "crates/argus-sensors" }
+argus-observe = { version = "0.2.0", path = "crates/argus-observe" }
+argus-anomaly = { version = "0.2.0", path = "crates/argus-anomaly" }
+argus-systemd = { version = "0.2.0", path = "crates/argus-systemd" }
+argus-container = { version = "0.2.0", path = "crates/argus-container" }
+argus-correlate = { version = "0.2.0", path = "crates/argus-correlate" }
+argus-risk = { version = "0.2.0", path = "crates/argus-risk" }
+argus-incidents = { version = "0.2.0", path = "crates/argus-incidents" }
+argus-investigate = { version = "0.2.0", path = "crates/argus-investigate" }
+argus-kubernetes = { version = "0.2.0", path = "crates/argus-kubernetes" }
+argus-memory = { version = "0.2.0", path = "crates/argus-memory" }
+argus-runbooks = { version = "0.2.0", path = "crates/argus-runbooks" }
+argus-reporting = { version = "0.2.0", path = "crates/argus-reporting" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
