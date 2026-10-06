@@ -88,11 +88,7 @@ pub async fn enroll(
     };
     send_json(transport, MessageType::PairingRedeem, &redeem).await?;
 
-    let reply = transport
-        .recv()
-        .await?
-        .ok_or(TransportError::Closed)
-        .map_err(CloudError::from)?;
+    let reply = recv_heartbeat_aware(transport).await?;
 
     match reply.kind() {
         Some(MessageType::PairingGranted) => {
@@ -117,15 +113,37 @@ pub async fn enroll(
     }
 }
 
+/// Receives one protocol frame, answering the cloud's heartbeat on the way:
+/// a `ping` is acknowledged with a `pong` (carrying the ping's correlation
+/// id, mirroring the session convention) and skipped. The cloud interleaves
+/// heartbeats into any wait — including the pairing exchange — so a wait
+/// that demanded the *next* frame verbatim would abort a healthy pairing
+/// whenever a heartbeat happened to land first.
+async fn recv_heartbeat_aware(transport: &mut dyn Transport) -> Result<Envelope, CloudError> {
+    loop {
+        let frame = transport
+            .recv()
+            .await?
+            .ok_or(TransportError::Closed)
+            .map_err(CloudError::from)?;
+        if frame.kind() == Some(MessageType::Ping) {
+            let pong = Envelope::new(
+                MessageType::Pong,
+                serde_json::json!({}),
+                frame.correlation_id.or(Some(frame.message_id)),
+            );
+            transport.send(&pong).await.map_err(CloudError::from)?;
+            continue;
+        }
+        return Ok(frame);
+    }
+}
+
 async fn await_hello(
     transport: &mut dyn Transport,
     expected_cloud_id: &str,
 ) -> Result<HandshakeHelloPayload, CloudError> {
-    let frame = transport
-        .recv()
-        .await?
-        .ok_or(TransportError::Closed)
-        .map_err(CloudError::from)?;
+    let frame = recv_heartbeat_aware(transport).await?;
 
     if frame.kind() != Some(MessageType::HandshakeHello) {
         return Err(CloudError::Protocol(format!(
@@ -352,11 +370,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enrollment_fails_on_an_unexpected_reply() {
-        let ping = Envelope::new(MessageType::Ping, json!({}), None);
-        let err = enroll_with(vec![hello(), ping])
+    async fn a_heartbeat_during_pairing_is_answered_and_skipped() {
+        // The cloud interleaves heartbeats into any wait; the pairing
+        // exchange answers each ping and keeps waiting for the verdict.
+        let mut ping = Envelope::new(MessageType::Ping, json!({}), None);
+        let correlation = Uuid::new_v4();
+        ping.correlation_id = Some(correlation);
+
+        let mut transport = FakeTransport::with_inbound(vec![hello(), ping.clone(), granted()]);
+        let outcome = enroll(
+            &mut transport,
+            "ARGUS-7F3K-9Q2M-4XZ8",
+            "web-01",
+            "0.1.7",
+            CLOUD_ID,
+            &key(),
+        )
+        .await
+        .expect("heartbeats never abort a pairing");
+        assert!(matches!(outcome, EnrollmentOutcome::Granted(_)));
+
+        // The heartbeat was answered with a pong carrying its id.
+        let sent = transport.sent();
+        let pongs: Vec<&Envelope> = sent
+            .iter()
+            .filter(|e| e.kind() == Some(MessageType::Pong))
+            .collect();
+        assert_eq!(pongs.len(), 1);
+        assert_eq!(pongs[0].correlation_id, Some(correlation));
+
+        // Even a heartbeat before the handshake is survived.
+        let outcome = enroll_with(vec![ping, hello(), granted()])
             .await
-            .expect_err("ping is not a pairing reply");
+            .expect("a ping before hello is also survived");
+        assert!(matches!(outcome, EnrollmentOutcome::Granted(_)));
+    }
+
+    #[tokio::test]
+    async fn enrollment_fails_on_a_genuinely_unexpected_reply() {
+        // A denial is a legitimate outcome, not an error; a stray pong (or
+        // any non-ping non-verdict frame) still fails closed.
+        let err = enroll_with(vec![
+            hello(),
+            Envelope::new(MessageType::Pong, json!({}), None),
+        ])
+        .await
+        .expect_err("a pong is not a pairing reply");
         assert!(matches!(err, CloudError::Protocol(_)), "{err:?}");
     }
 
