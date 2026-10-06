@@ -63,7 +63,12 @@ async fn main() -> Result<()> {
 
     let _cloud_stop = spawn_cloud_supervisor(&daemon, &config, Arc::clone(&events));
     spawn_observation_loop(&daemon, &events);
-    argus_daemon::brain::spawn(Arc::clone(&daemon), config.brain.clone());
+    argus_daemon::brain::spawn(
+        Arc::clone(&daemon),
+        config.brain.clone(),
+        daemon.brain_control(),
+        daemon.brain_state(),
+    );
 
     let handler = {
         let daemon = Arc::clone(&daemon);
@@ -86,6 +91,10 @@ fn spawn_cloud_supervisor(
     config: &DaemonConfig,
     events: Arc<LocalEventBus>,
 ) -> watch::Sender<bool> {
+    let daemon_arc: Arc<Daemon> = Arc::clone(daemon);
+    let sentinel: Arc<dyn argus_daemon::cloud::SentinelSource> = daemon_arc;
+    let daemon_arc: Arc<Daemon> = Arc::clone(daemon);
+    let decisions: Arc<dyn argus_daemon::cloud::ApprovalSink> = daemon_arc;
     let (stop, stop_rx) = watch::channel(false);
     let deps = SupervisorDeps {
         config: config.cloud.clone(),
@@ -100,6 +109,9 @@ fn spawn_cloud_supervisor(
         metrics: Arc::new(RuntimeMetrics::new()),
         capabilities: Arc::new(daemon.registry().list().cloned().collect()),
         managed_settings: Arc::new(daemon.managed_settings().clone()),
+        sentinel,
+        decisions,
+        brain_control: daemon.brain_control(),
         environment_id: daemon.environment_id(),
         policy: daemon.cloud_policy(),
         executor: daemon.cloud_executor(),

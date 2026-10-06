@@ -353,6 +353,47 @@ pub struct CapabilitiesPublishPayload {
     pub capabilities: Vec<CapabilityDescriptorWire>,
 }
 
+/// `sentinel.report`: the live agent view plus the brain's recent work
+/// (spec 006 FR-001). Everything is read from real daemon state; absent
+/// state renders empty — never invented.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SentinelReportPayload {
+    /// The serialized SentinelView (health rollup, safe mode, provider,
+    /// counts, pressure) — already the daemon's typed, serde shape.
+    pub view: Map<String, Value>,
+    /// The last brain cycle, when one produced evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cycle: Option<Map<String, Value>>,
+    /// The most recent plans, newest first, capped at 10.
+    #[serde(default)]
+    pub plans: Vec<Map<String, Value>>,
+    /// Plans paused awaiting an operator decision.
+    #[serde(default)]
+    pub pending_approvals: Vec<Map<String, Value>>,
+    pub reported_at: DateTime<Utc>,
+}
+
+/// `approval.decision` (cloud → daemon): an operator's decision on a
+/// paused plan the daemon itself reported (spec 006 FR-003).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalDecisionPayload {
+    pub token: String,
+    /// `grant` or `deny`.
+    pub decision: String,
+    pub decided_by: String,
+}
+
+/// `approval.result` (daemon → cloud): what the decision did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalResultPayload {
+    pub token: String,
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Outcome of applying a managed configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

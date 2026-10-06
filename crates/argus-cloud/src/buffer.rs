@@ -27,12 +27,14 @@ pub enum ReportKind {
     Health,
     Events,
     Activities,
+    Sentinel,
 }
 
 impl ReportKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Telemetry => "telemetry",
+            Self::Sentinel => "sentinel",
             Self::Health => "health",
             Self::Events => "events",
             Self::Activities => "activities",

@@ -30,7 +30,7 @@ use argus_state::{DomainRepository, RepositoryError, SqliteRepository};
 use argus_validate::{desired_state, read_failure_event, validation_event};
 use chrono::Utc;
 use semver::Version;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use argus_cloud::buffer::ReportQueue;
@@ -102,6 +102,11 @@ pub struct Daemon {
     /// AND the kubeconfig loads (ADR-0037: degrade, never require).
     cluster: Option<Arc<dyn argus_executor::ClusterController>>,
     kubernetes_executor: Option<Arc<argus_executor::KubernetesExecutor>>,
+    /// The brain's shared state and live control levers (spec 006): the loop
+    /// writes cycles / reads levers; the cloud report and config channel use
+    /// the same handles.
+    brain_state: Arc<crate::brain_state::BrainState>,
+    brain_control: Arc<crate::brain_state::BrainControlHandle>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -322,6 +327,27 @@ impl Daemon {
         let (cluster, kubernetes_executor) = connect_cluster(&config);
         let decision_provider = crate::brain::build_provider(&config, &secret_store);
         let runbooks = load_runbooks(&config);
+        let (brain_state, brain_control) = {
+            use crate::brain_state::{BrainControl, BrainControlHandle, BrainState};
+            let control = BrainControlHandle::new(BrainControl {
+                autonomy: config.brain.autonomy,
+                confidence_threshold: config.brain.confidence_threshold,
+                interval_seconds: config.brain.interval_seconds,
+            });
+            // A deployed `brain` configuration outlives a restart: the
+            // persisted managed settings re-seed the levers (spec 006 FR-002).
+            if let Ok(Some(settings)) = CloudSettingsStore::default_location().read() {
+                for (key, value) in &settings {
+                    if key.starts_with("brain.")
+                        && let Err(reason) = control
+                            .apply_setting(key, &serde_json::to_value(value).unwrap_or_default())
+                    {
+                        tracing::warn!(key = %key, reason = %reason, "persisted brain setting ignored");
+                    }
+                }
+            }
+            (Arc::new(BrainState::default()), Arc::new(control))
+        };
         Ok(Self {
             started_at: Instant::now(),
             environment_id,
@@ -352,6 +378,8 @@ impl Daemon {
             runbooks,
             cluster,
             kubernetes_executor,
+            brain_state,
+            brain_control,
         })
     }
 
@@ -755,6 +783,16 @@ impl Daemon {
     /// The runbooks loaded at startup (spec 005 FR-005).
     pub fn runbooks(&self) -> &argus_runbooks::RunbookLibrary {
         &self.runbooks
+    }
+
+    /// The brain's shared cycle record (spec 006 FR-001).
+    pub fn brain_state(&self) -> Arc<crate::brain_state::BrainState> {
+        Arc::clone(&self.brain_state)
+    }
+
+    /// The brain's live control levers (spec 006 FR-002).
+    pub fn brain_control(&self) -> Arc<crate::brain_state::BrainControlHandle> {
+        Arc::clone(&self.brain_control)
     }
 
     /// The live Kubernetes cluster bridge, when connected (ADR-0037);
@@ -1612,6 +1650,112 @@ const DEFAULT_MAX_KEYS: usize = 1024;
 ///
 /// In-memory dedup is a per-process guard, not plan/execution persistence — the
 /// latter is out of scope for this milestone (ADR-0028 §6).
+impl crate::cloud::SentinelSource for Daemon {
+    fn snapshot<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<argus_cloud::protocol::messages::SentinelReportPayload, String>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let view = self.sentinel_snapshot().await;
+            let view = serde_json::to_value(&view)
+                .map_err(|e| format!("serialize the sentinel view: {e}"))?;
+
+            let plans: Vec<Map<String, Value>> = self
+                .list_plans()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .take(10)
+                .map(|(id, plan)| {
+                    serde_json::json!({
+                        "id": id.to_string(),
+                        "objective": plan.objective,
+                        "status": format!("{:?}", plan.status),
+                        "confidence": plan.confidence,
+                        "step_count": plan.steps.len(),
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                })
+                .collect();
+
+            let pending_approvals: Vec<Map<String, Value>> = self
+                .list_pending_approvals()
+                .into_iter()
+                .map(|pending| {
+                    serde_json::json!({
+                        "token": pending.token.to_string(),
+                        "objective": pending.plan.objective,
+                        "context_hash": pending.context_hash,
+                        "step_count": pending.plan.steps.len(),
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                })
+                .collect();
+
+            let last_cycle = self.brain_state.last_cycle().map(|record| {
+                serde_json::json!({
+                    "evidence": record.evidence,
+                    "provider_available": record.provider_available,
+                    "decision": record.decision,
+                    "plan": record.plan,
+                    "outcome": record.outcome,
+                    "at": record.at.to_rfc3339(),
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+            });
+
+            Ok(argus_cloud::protocol::messages::SentinelReportPayload {
+                view: view.as_object().cloned().unwrap_or_default(),
+                last_cycle,
+                plans,
+                pending_approvals,
+                reported_at: Utc::now(),
+            })
+        })
+    }
+}
+
+impl crate::cloud::ApprovalSink for Daemon {
+    fn decide<'a>(
+        &'a self,
+        token: uuid::Uuid,
+        grant: bool,
+        decided_by: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if grant {
+                let pending = self
+                    .grant_approval(token, decided_by)
+                    .map_err(|e| e.to_string())?;
+                let events = argus_events::LocalEventBus::new(16);
+                let outcome = self.resume_remediation(&pending, &events).await;
+                Ok(match outcome {
+                    ResumeOutcome::Finished(report) => format!("{:?}", report.status),
+                    ResumeOutcome::Refused(why) => format!("refused: {why:?}"),
+                })
+            } else {
+                self.deny_approval(token, decided_by)
+                    .map_err(|e| e.to_string())?;
+                Ok("denied".to_string())
+            }
+        })
+    }
+}
+
 pub struct InMemoryDedup {
     seen: std::sync::Mutex<std::collections::HashSet<String>>,
     max_keys: usize,

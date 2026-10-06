@@ -67,6 +67,7 @@ pub enum MessageType {
     EventsReport,
     ActivitiesReport,
     CapabilitiesPublish,
+    SentinelReport,
     // acknowledgements (cloud → installation)
     TelemetryAck,
     HealthAck,
@@ -82,6 +83,8 @@ pub enum MessageType {
     ConfigApply,
     CommandInvoke,
     ConfigPullRequest,
+    ApprovalDecision,
+    ApprovalResult,
     // connection management
     Ping,
     Pong,
@@ -105,6 +108,9 @@ impl MessageType {
             Self::EventsReport => "events.report",
             Self::ActivitiesReport => "activities.report",
             Self::CapabilitiesPublish => "capabilities.publish",
+            Self::SentinelReport => "sentinel.report",
+            Self::ApprovalDecision => "approval.decision",
+            Self::ApprovalResult => "approval.result",
             Self::TelemetryAck => "telemetry.ack",
             Self::HealthAck => "health.ack",
             Self::EventsAck => "events.ack",
@@ -166,6 +172,9 @@ impl std::str::FromStr for MessageType {
             "config.apply" => Self::ConfigApply,
             "command.invoke" => Self::CommandInvoke,
             "config.pull.request" => Self::ConfigPullRequest,
+            "sentinel.report" => Self::SentinelReport,
+            "approval.decision" => Self::ApprovalDecision,
+            "approval.result" => Self::ApprovalResult,
             "ping" => Self::Ping,
             "pong" => Self::Pong,
             "stream.throttle" => Self::StreamThrottle,
@@ -206,6 +215,7 @@ impl MessageType {
             | Self::ConfigApply
             | Self::CommandInvoke
             | Self::ConfigPullRequest
+            | Self::ApprovalDecision
             | Self::Ping
             | Self::Pong
             | Self::StreamThrottle
@@ -217,6 +227,8 @@ impl MessageType {
             | Self::EventsReport
             | Self::ActivitiesReport
             | Self::CapabilitiesPublish
+            | Self::SentinelReport
+            | Self::ApprovalResult
             | Self::ConfigResult
             | Self::CommandResult
             | Self::ConfigState => Direction::InstallationToCloud,
@@ -229,7 +241,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn message_type_round_trips_for_all_28_types() {
+    fn message_type_round_trips_for_all_31_types() {
         let all = [
             MessageType::HandshakeHello,
             MessageType::HandshakeAuthenticate,

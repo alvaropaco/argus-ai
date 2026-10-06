@@ -103,7 +103,7 @@ impl ReportBatch {
 /// batched up to the contract's item bound.
 pub fn per_message_limit(kind: ReportKind) -> usize {
     match kind {
-        ReportKind::Telemetry | ReportKind::Health => 1,
+        ReportKind::Telemetry | ReportKind::Health | ReportKind::Sentinel => 1,
         ReportKind::Events => MAX_EVENTS_PER_REPORT,
         ReportKind::Activities => MAX_ACTIVITIES_PER_REPORT,
     }

@@ -298,6 +298,8 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
 /// Provider and model settings, the configuration kind this release can make
 /// effective.
 pub const KIND_PROVIDER: &str = "provider";
+/// Brain-loop settings (spec 006): the managed lever for the running brain.
+pub const KIND_BRAIN: &str = "brain";
 /// Agent-team configuration: recognised, but nothing local consumes it yet.
 pub const KIND_AGENT_TEAM: &str = "agent_team";
 /// Orchestration configuration: same deferral as the agent team.
@@ -334,7 +336,7 @@ impl ConfigDisposition {
 
 pub fn disposition(kind: &str) -> ConfigDisposition {
     match kind {
-        KIND_PROVIDER => ConfigDisposition::Apply,
+        KIND_PROVIDER | KIND_BRAIN => ConfigDisposition::Apply,
         KIND_AGENT_TEAM | KIND_ORCHESTRATION => ConfigDisposition::Deferred,
         _ => ConfigDisposition::Unknown,
     }

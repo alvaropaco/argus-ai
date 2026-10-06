@@ -4,6 +4,7 @@
 //! execution controls; the AI layer must not receive unrestricted root access.
 
 pub mod brain;
+pub mod brain_state;
 pub mod cloud;
 pub mod config;
 pub mod control;

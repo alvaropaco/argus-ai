@@ -31,9 +31,10 @@ use argus_cloud::mapping::health as health_mapping;
 use argus_cloud::mapping::telemetry as telemetry_mapping;
 use argus_cloud::protocol::errors::PairingDenialCode;
 use argus_cloud::protocol::messages::{
-    CommandInvokePayload, CommandResultPayload, CommandResultStatus, ConfigApplyPayload,
-    ConfigResultPayload, ConfigResultStatus, ConfigStatePayload, ConfigurationStateEntry,
-    HealthStateWire, IngestAckPayload, SessionRotatePayload, StreamThrottlePayload,
+    ApprovalDecisionPayload, ApprovalResultPayload, CommandInvokePayload, CommandResultPayload,
+    CommandResultStatus, ConfigApplyPayload, ConfigResultPayload, ConfigResultStatus,
+    ConfigStatePayload, ConfigurationStateEntry, HealthStateWire, IngestAckPayload,
+    SentinelReportPayload, SessionRotatePayload, StreamThrottlePayload,
 };
 use argus_cloud::protocol::{Envelope, MessageType};
 use argus_cloud::state::{ConnectivityTracker, EnrolledIdentity};
@@ -595,6 +596,39 @@ pub struct SupervisorDeps {
     /// Wakes the loop out of a backoff when the enrollment changes, so a fresh
     /// credential is used at once instead of after the current delay.
     pub wake: Arc<Notify>,
+    /// The live agent view + the brain's recent work (spec 006 FR-001),
+    /// read from the daemon at collection time.
+    pub sentinel: Arc<dyn SentinelSource>,
+    /// The brain's live control levers; a delivered `brain` configuration
+    /// applies here (spec 006 FR-002).
+    pub brain_control: Arc<crate::brain_state::BrainControlHandle>,
+    /// Where an operator's approval decision is applied (spec 006 FR-003).
+    pub decisions: Arc<dyn ApprovalSink>,
+}
+
+/// The live agent state behind the `sentinel.report` (spec 006 FR-001).
+/// Implemented over the [`Daemon`](crate::runtime::Daemon); injected so the
+/// supervisor stays testable without one.
+pub trait SentinelSource: Send + Sync {
+    /// The serialized `SentinelView` plus the last brain cycle, recent
+    /// plans (newest first, capped at 10), and pending approvals. Errors
+    /// are strings so a degraded daemon still reports honestly.
+    fn snapshot<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<SentinelReportPayload, String>> + Send + 'a>,
+    >;
+}
+
+/// Applies an operator's decision on a paused plan (spec 006 FR-003) —
+/// the same local grant machinery the CLI uses, never a side channel.
+pub trait ApprovalSink: Send + Sync {
+    fn decide<'a>(
+        &'a self,
+        token: uuid::Uuid,
+        grant: bool,
+        decided_by: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>;
 }
 
 /// Reported as the negotiated version until a session supplies the real one.
@@ -951,6 +985,23 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
         }
     };
 
+    // Brain levers are validated against the live handle BEFORE anything is
+    // written, so a bad delivery never half-applies (spec 006 FR-002/AC-005).
+    let applied_brain = match deps.brain_control.validate_all(&settings) {
+        Ok(applied) => applied,
+        Err(reason) => {
+            reply_config_result(
+                transport,
+                correlation,
+                version_id,
+                ConfigResultStatus::Rejected,
+                Some(reason),
+            )
+            .await;
+            return;
+        }
+    };
+
     // Credential first: managed settings must never point at a credential that
     // is not there yet.
     if let Some(credential) = credential
@@ -977,6 +1028,16 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
         )
         .await;
         return;
+    }
+
+    // The store persisted; commit the validated levers to the running loop —
+    // the next brain tick uses them, no restart (FR-002).
+    if !applied_brain.is_empty() {
+        deps.brain_control.commit_all(&applied_brain);
+        tracing::info!(
+            keys = ?applied_brain.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            "brain configuration applied live"
+        );
     }
 
     let applied_at = Utc::now();
@@ -1744,6 +1805,139 @@ async fn collect_telemetry_and_health(deps: &SupervisorDeps, now: DateTime<Utc>)
     if let Some(payload) = health_report {
         queue.enqueue(ReportKind::Health, payload, now);
     }
+    drop(queue);
+    collect_sentinel(deps, now).await;
+}
+
+/// Builds and enqueues the sentinel report (spec 006 FR-001): the live
+/// agent view plus the brain's last cycle, recent plans, and pending
+/// approvals — all read from the daemon's real state at collection time.
+async fn collect_sentinel(deps: &SupervisorDeps, now: DateTime<Utc>) {
+    let payload = match deps.sentinel.snapshot().await {
+        Ok(payload) => payload,
+        Err(reason) => {
+            tracing::warn!(reason = %reason, "sentinel report unavailable this tick");
+            return;
+        }
+    };
+    let payload = serde_json::to_value(&payload).ok();
+    if let Some(payload) = payload {
+        deps.queue
+            .lock()
+            .await
+            .enqueue(ReportKind::Sentinel, payload, now);
+    }
+}
+
+/// Handles `approval.decision` (spec 006 FR-003): the operator's grant or
+/// deny crosses the same local machinery as the CLI — the grant is consumed
+/// exactly once and the plan resumes through `run_remediation`. The result
+/// reports what actually happened; the cloud never invents an outcome.
+async fn handle_approval_decision(
+    deps: &SupervisorDeps,
+    transport: &dyn Transport,
+    frame: &Envelope,
+) {
+    let correlation = frame.correlation_id.or(Some(frame.message_id));
+
+    let Ok(payload) = serde_json::from_value::<ApprovalDecisionPayload>(frame.payload.clone())
+    else {
+        reply_approval_result(
+            transport,
+            correlation,
+            String::new(),
+            false,
+            None,
+            Some("the approval decision was malformed".to_string()),
+        )
+        .await;
+        return;
+    };
+
+    let grant = match payload.decision.as_str() {
+        "grant" => true,
+        "deny" => false,
+        other => {
+            reply_approval_result(
+                transport,
+                correlation,
+                payload.token,
+                false,
+                None,
+                Some(format!("unknown decision '{other}'")),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let Ok(token) = uuid::Uuid::parse_str(&payload.token) else {
+        reply_approval_result(
+            transport,
+            correlation,
+            payload.token,
+            false,
+            None,
+            Some("the token is not a UUID".to_string()),
+        )
+        .await;
+        return;
+    };
+
+    match deps
+        .decisions
+        .decide(token, grant, &payload.decided_by)
+        .await
+    {
+        Ok(outcome) => {
+            reply_approval_result(
+                transport,
+                correlation,
+                payload.token,
+                true,
+                Some(outcome),
+                None,
+            )
+            .await;
+        }
+        Err(reason) => {
+            reply_approval_result(
+                transport,
+                correlation,
+                payload.token,
+                false,
+                None,
+                Some(reason),
+            )
+            .await;
+        }
+    }
+}
+
+async fn reply_approval_result(
+    transport: &dyn Transport,
+    correlation: Option<Uuid>,
+    token: String,
+    accepted: bool,
+    outcome: Option<String>,
+    reason: Option<String>,
+) {
+    let payload = ApprovalResultPayload {
+        token,
+        accepted,
+        outcome,
+        reason,
+    };
+    if let Err(error) = transport
+        .send(&Envelope::new(
+            MessageType::ApprovalResult,
+            serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            correlation,
+        ))
+        .await
+    {
+        tracing::warn!(%error, "could not deliver the approval result");
+    }
 }
 
 fn message_type_for(kind: ReportKind) -> MessageType {
@@ -1752,6 +1946,7 @@ fn message_type_for(kind: ReportKind) -> MessageType {
         ReportKind::Health => MessageType::HealthReport,
         ReportKind::Events => MessageType::EventsReport,
         ReportKind::Activities => MessageType::ActivitiesReport,
+        ReportKind::Sentinel => MessageType::SentinelReport,
     }
 }
 
@@ -1831,6 +2026,9 @@ async fn handle_inbound(
         }
         Some(MessageType::CommandInvoke) => {
             handle_command_invoke(deps, transport, &frame).await;
+        }
+        Some(MessageType::ApprovalDecision) => {
+            handle_approval_decision(deps, transport, &frame).await;
         }
         Some(ty) if is_report_ack(ty) => {
             let Ok(ack) = serde_json::from_value::<IngestAckPayload>(frame.payload.clone()) else {
@@ -1946,6 +2144,43 @@ async fn wait_or_stop(stop: &mut watch::Receiver<bool>, wake: &Notify, delay: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A no-op sentinel source for supervisor tests: the honest empty state.
+    struct NullSentinel;
+    impl SentinelSource for NullSentinel {
+        fn snapshot<'a>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<SentinelReportPayload, String>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(SentinelReportPayload {
+                    view: Default::default(),
+                    last_cycle: None,
+                    plans: Vec::new(),
+                    pending_approvals: Vec::new(),
+                    reported_at: Utc::now(),
+                })
+            })
+        }
+    }
+
+    /// No decisions in supervisor tests: every remote approval is refused.
+    struct NullDecisions;
+    impl ApprovalSink for NullDecisions {
+        fn decide<'a>(
+            &'a self,
+            _token: uuid::Uuid,
+            _grant: bool,
+            _decided_by: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+        {
+            Box::pin(async { Err("no decisions in this test".to_string()) })
+        }
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     fn store() -> (CloudSecretStore, PathBuf) {
@@ -2423,6 +2658,9 @@ mod tests {
             queue: Arc::new(Mutex::new(ReportQueue::new(256))),
             metrics: Arc::new(RuntimeMetrics::new()),
             capabilities: Arc::new(Vec::new()),
+            sentinel: Arc::new(NullSentinel),
+            decisions: Arc::new(NullDecisions),
+            brain_control: Arc::new(crate::brain_state::BrainControlHandle::default()),
             managed_settings: Arc::new(ManagedSettingsStore::new(std::env::temp_dir().join(
                 format!("argus-cloud-settings-{}.toml", uuid::Uuid::new_v4()),
             ))),

@@ -259,18 +259,44 @@ async fn failed_units() -> Vec<(String, String)> {
 }
 
 /// Spawns the periodic brain loop (FR-003). Failures tick-to-tick warn and
-/// never stop the loop.
-pub fn spawn(daemon: Arc<Daemon>, brain: BrainConfig) {
+/// never stop the loop. Control levers are read from `control` each tick, so
+/// a managed-configuration change lands on the next cycle (spec 006 FR-002);
+/// each cycle's record lands in `state` for the sentinel report (FR-001).
+pub fn spawn(
+    daemon: Arc<Daemon>,
+    config: BrainConfig,
+    control: Arc<crate::brain_state::BrainControlHandle>,
+    state: Arc<crate::brain_state::BrainState>,
+) {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(brain.interval_seconds.max(5)));
+        let mut ticker = tokio::time::interval(Duration::from_secs(config.interval_seconds.max(5)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
+            let levers = control.get();
+            let period = Duration::from_secs(levers.interval_seconds.max(5));
+            if ticker.period() != period {
+                ticker = tokio::time::interval(period);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            }
             let daemon = Arc::clone(&daemon);
-            let config = brain.clone();
-            let outcome = tokio::task::spawn(async move { cycle(&daemon, &config).await }).await;
+            let brain = BrainConfig {
+                autonomy: levers.autonomy,
+                confidence_threshold: levers.confidence_threshold,
+                interval_seconds: levers.interval_seconds,
+                runbooks_dir: config.runbooks_dir.clone(),
+            };
+            let outcome = tokio::task::spawn(async move { cycle(&daemon, &brain).await }).await;
             match outcome {
                 Ok(record) => {
+                    state.record(crate::brain_state::BrainCycleRecord {
+                        evidence: record.evidence.clone(),
+                        provider_available: record.provider_available,
+                        decision: record.decision.clone(),
+                        plan: record.plan_objective.clone(),
+                        outcome: record.outcome.clone(),
+                        at: chrono::Utc::now(),
+                    });
                     if !record.evidence.is_empty() {
                         tracing::info!(
                             evidence = ?record.evidence,
