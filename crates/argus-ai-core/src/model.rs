@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelProviderConfig {
+    #[serde(default)]
     pub provider: String,
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub fallback_models: Vec<String>,

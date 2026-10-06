@@ -55,6 +55,12 @@ pub fn build_provider(
                 .unwrap_or_else(|| "https://api.deepseek.com".to_string());
             let mut models = vec![model.model.clone()];
             models.extend(model.fallback_models.iter().cloned());
+            // A partial [model] section (mid-setup) yields empty names;
+            // the provider's default keeps the adapter well-formed.
+            models.retain(|m| !m.is_empty());
+            if models.is_empty() {
+                models.push("deepseek-chat".to_string());
+            }
             tracing::info!(base_url = %base, model = %model.model, "brain provider: deepseek");
             Some(Arc::new(DeepSeekProvider::new(
                 base,

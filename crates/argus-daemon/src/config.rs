@@ -75,6 +75,10 @@ pub struct ConfigFile {
     pub otel_endpoint: Option<String>,
     #[serde(default)]
     pub cloud: Option<CloudConfig>,
+    #[serde(default)]
+    pub model: Option<argus_ai_core::model::ModelProviderConfig>,
+    #[serde(default)]
+    pub brain: Option<BrainConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -254,6 +258,12 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.cloud {
         config.cloud = value;
+    }
+    if let Some(value) = file.model {
+        config.model = value;
+    }
+    if let Some(value) = file.brain {
+        config.brain = value;
     }
 }
 
