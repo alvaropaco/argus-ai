@@ -169,39 +169,79 @@ async fn main() {
         "signal" => {
             let pid: i64 = args
                 .get(2)
-                .expect("usage: signal <pid> <stop|cont|term>")
+                .expect("usage: signal <pid> <stop|cont|term> [approve]")
                 .parse()
                 .unwrap();
             let sig = args.get(3).cloned().unwrap_or_else(|| "stop".into());
+            let approve = args.get(4).is_some_and(|a| a == "approve");
             let plan = one_step_plan(
                 CapabilityId::HOST_PROCESS_SIGNAL,
                 json!({ "pid": pid, "signal": sig }),
-                None,
+                Some((
+                    CapabilityId::HOST_PROCESS_SIGNAL,
+                    json!({ "pid": pid, "signal": "cont" }),
+                )),
             );
-            // host.process.signal is policy-gated (requires approval): run at
-            // L4 and expect the approval round-trip unless a grant exists.
-            print_outcome(
-                daemon
-                    .run_remediation(&plan, AutonomyMode::L4Autonomous, &LocalEventBus::new(64))
-                    .await,
-            );
+            // host.process.signal is policy-gated: expect the approval
+            // round-trip unless a grant exists.
+            let events = LocalEventBus::new(64);
+            match daemon
+                .run_remediation(&plan, AutonomyMode::L4Autonomous, &events)
+                .await
+            {
+                argus_daemon::control::RunOutcome::Pending(pending) if approve => {
+                    println!("paused for approval; granting token {}", pending.token);
+                    daemon
+                        .grant_approval(pending.token, "live-harness")
+                        .expect("grant");
+                    match daemon.resume_remediation(&pending, &events).await {
+                        argus_daemon::control::ResumeOutcome::Finished(report) => {
+                            print_outcome(argus_daemon::control::RunOutcome::Finished(report));
+                        }
+                        argus_daemon::control::ResumeOutcome::Refused(why) => {
+                            println!("resume refused: {why:?}");
+                        }
+                    }
+                }
+                outcome => print_outcome(outcome),
+            }
         }
         "service-restart" => {
-            let unit = args.get(2).expect("usage: service-restart <unit>").clone();
+            let unit = args
+                .get(2)
+                .expect("usage: service-restart <unit> [approve]")
+                .clone();
+            let approve = args.get(3).is_some_and(|a| a == "approve");
             let plan = one_step_plan(
                 CapabilityId::HOST_SERVICE_RESTART,
                 json!({ "unit": unit }),
                 None,
             );
-            print_outcome(
-                daemon
-                    .run_remediation(&plan, AutonomyMode::L4Autonomous, &LocalEventBus::new(64))
-                    .await,
-            );
+            let events = LocalEventBus::new(64);
+            match daemon
+                .run_remediation(&plan, AutonomyMode::L4Autonomous, &events)
+                .await
+            {
+                argus_daemon::control::RunOutcome::Pending(pending) if approve => {
+                    println!("paused for approval; granting token {}", pending.token);
+                    daemon
+                        .grant_approval(pending.token, "live-harness")
+                        .expect("grant");
+                    match daemon.resume_remediation(&pending, &events).await {
+                        argus_daemon::control::ResumeOutcome::Finished(report) => {
+                            print_outcome(argus_daemon::control::RunOutcome::Finished(report));
+                        }
+                        argus_daemon::control::ResumeOutcome::Refused(why) => {
+                            println!("resume refused: {why:?}");
+                        }
+                    }
+                }
+                outcome => print_outcome(outcome),
+            }
         }
         _ => {
             eprintln!(
-                "commands: sentinel | freeze <cgroup> [thaw-too] | restart-container <id> | signal <pid> <sig> | service-restart <unit>"
+                "commands: sentinel | freeze <cgroup> [thaw-too] | restart-container <id> [approve] | signal <pid> <sig> [approve] | service-restart <unit> [approve]"
             );
             std::process::exit(2);
         }
