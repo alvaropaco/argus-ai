@@ -736,6 +736,20 @@ impl Daemon {
         }
     }
 
+    /// Resumes the paused plan bound to `token` after an operator grant —
+    /// the second half of the approval round-trip (ADR-0030 §5): the grant
+    /// is consumed exactly once, the stored plan re-enters as-is, and the
+    /// outcome is what the operator needs to see. `None` when no pending
+    /// plan carries the token.
+    pub async fn resume_pending(
+        &self,
+        token: Uuid,
+        events: &dyn EventBus,
+    ) -> Option<ResumeOutcome> {
+        let pending = self.pending.remove(token)?;
+        Some(self.resume_remediation(&pending, events).await)
+    }
+
     /// Release a dedup key so the same evidence can be reasoned about again
     /// (the brain releases when a remediation did not resolve the situation).
     pub async fn release_dedup(&self, key: &str) {

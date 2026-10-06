@@ -50,6 +50,8 @@ enum Command {
     /// Run one brain cycle now: observe, reason with the configured
     /// provider, and act within the configured autonomy.
     Diagnose,
+    /// List the recorded reasoning history (plans and their outcomes).
+    Plans,
     /// List the runbooks loaded at startup.
     Runbooks,
 }
@@ -113,6 +115,7 @@ async fn main() -> Result<()> {
         Some(Command::Cloud { command }) => run_cloud(&cli.socket, command).await,
         Some(Command::Approval { command }) => run_approval(&cli.socket, command).await,
         Some(Command::Diagnose) => run_query(&cli.socket, Command::Diagnose).await,
+        Some(Command::Plans) => run_query(&cli.socket, Command::Plans).await,
         Some(Command::Runbooks) => run_query(&cli.socket, Command::Runbooks).await,
         Some(cmd) => run_query(&cli.socket, cmd).await,
     }
@@ -279,6 +282,7 @@ async fn run_query(socket: &PathBuf, cmd: Command) -> Result<()> {
         Command::Plugins => argus_ipc::Operation::PluginsList,
         Command::Config => argus_ipc::Operation::ConfigGet,
         Command::Diagnose => argus_ipc::Operation::BrainDiagnose,
+        Command::Plans => argus_ipc::Operation::PlanList,
         Command::Runbooks => argus_ipc::Operation::RunbooksList,
         Command::Init | Command::Upgrade | Command::Cloud { .. } | Command::Approval { .. } => {
             unreachable!("handled before run_query")

@@ -53,7 +53,7 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
             return set_privileged_execution(daemon, request);
         }
         Operation::ApprovalList => return approval_list(daemon, request),
-        Operation::ApprovalGrant => return approval_grant(daemon, &principal, request),
+        Operation::ApprovalGrant => return approval_grant(daemon, &principal, request).await,
         Operation::ApprovalDeny => return approval_deny(daemon, &principal, request),
         Operation::PlanList => return plan_list(daemon, request).await,
         Operation::AuditList => return audit_list(daemon, request).await,
@@ -141,7 +141,7 @@ fn approval_list(daemon: &Daemon, request: Request) -> Response {
 }
 
 /// Grants approval for a pending plan's token.
-fn approval_grant(daemon: &Daemon, principal: &Principal, request: Request) -> Response {
+async fn approval_grant(daemon: &Daemon, principal: &Principal, request: Request) -> Response {
     let Some(token) = parse_token(&request) else {
         return Response::err(
             request.correlation_id,
@@ -151,10 +151,29 @@ fn approval_grant(daemon: &Daemon, principal: &Principal, request: Request) -> R
     };
 
     match daemon.grant_approval(token, &granted_by(principal)) {
-        Ok(()) => Response::ok(
-            request.correlation_id,
-            serde_json::json!({ "token": token.to_string(), "state": "granted" }),
-        ),
+        Ok(()) => {
+            // The second half of the round-trip (ADR-0030 §5): the grant is
+            // consumed exactly once and the paused plan continues — the
+            // operator's decision takes effect, and the response shows what
+            // happened.
+            let events = argus_events::LocalEventBus::new(16);
+            let outcome = daemon.resume_pending(token, &events).await;
+            let resumed = match outcome {
+                Some(crate::control::ResumeOutcome::Finished(report)) => {
+                    format!("{:?}", report.status)
+                }
+                Some(crate::control::ResumeOutcome::Refused(why)) => format!("refused: {why:?}"),
+                None => "no pending plan for the token".to_string(),
+            };
+            Response::ok(
+                request.correlation_id,
+                serde_json::json!({
+                    "token": token.to_string(),
+                    "state": "granted",
+                    "outcome": resumed,
+                }),
+            )
+        }
         Err(error) => Response::err(request.correlation_id, ErrorCode::Denied, error.to_string()),
     }
 }
