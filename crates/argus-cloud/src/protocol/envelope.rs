@@ -85,6 +85,7 @@ pub enum MessageType {
     ConfigPullRequest,
     ApprovalDecision,
     ApprovalResult,
+    SentinelAck,
     // connection management
     Ping,
     Pong,
@@ -109,6 +110,7 @@ impl MessageType {
             Self::ActivitiesReport => "activities.report",
             Self::CapabilitiesPublish => "capabilities.publish",
             Self::SentinelReport => "sentinel.report",
+            Self::SentinelAck => "sentinel.ack",
             Self::ApprovalDecision => "approval.decision",
             Self::ApprovalResult => "approval.result",
             Self::TelemetryAck => "telemetry.ack",
@@ -173,6 +175,7 @@ impl std::str::FromStr for MessageType {
             "command.invoke" => Self::CommandInvoke,
             "config.pull.request" => Self::ConfigPullRequest,
             "sentinel.report" => Self::SentinelReport,
+            "sentinel.ack" => Self::SentinelAck,
             "approval.decision" => Self::ApprovalDecision,
             "approval.result" => Self::ApprovalResult,
             "ping" => Self::Ping,
@@ -212,6 +215,7 @@ impl MessageType {
             | Self::ActivitiesAck
             | Self::CapabilitiesAck
             | Self::IngestAck
+            | Self::SentinelAck
             | Self::ConfigApply
             | Self::CommandInvoke
             | Self::ConfigPullRequest
@@ -241,7 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn message_type_round_trips_for_all_31_types() {
+    fn message_type_round_trips_for_all_32_types() {
         let all = [
             MessageType::HandshakeHello,
             MessageType::HandshakeAuthenticate,
