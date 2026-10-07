@@ -251,11 +251,15 @@ async fn failed_units() -> Vec<(String, String)> {
     let Ok(units) = client.list_units().await else {
         return Vec::new();
     };
-    units
+    // Sorted by name so the cycle's subject is deterministic no matter what
+    // order systemd enumerates units in.
+    let mut failed: Vec<(String, String)> = units
         .into_iter()
         .filter(|u| u.active_state == "failed")
         .map(|u| (u.name, format!("{} {}", u.active_state, u.sub_state)))
-        .collect()
+        .collect();
+    failed.sort_by(|a, b| a.0.cmp(&b.0));
+    failed
 }
 
 /// Spawns the periodic brain loop (FR-003). Failures tick-to-tick warn and
