@@ -871,6 +871,12 @@ fn split_provider_content(
             known if MANAGED_PROVIDER_SETTINGS.contains(&known) => {
                 settings.insert(key.clone(), json_to_toml(value)?);
             }
+            // Brain levers ride the same settings table: validate_all applies
+            // the brain.* entries against the live control handle and skips
+            // everything else (spec 006 FR-002).
+            brain if brain.starts_with("brain.") => {
+                settings.insert(key.clone(), json_to_toml(value)?);
+            }
             unknown => return Err(format!("unrecognised configuration field '{unknown}'")),
         }
     }
@@ -2144,6 +2150,29 @@ async fn wait_or_stop(stop: &mut watch::Receiver<bool>, wake: &Notify, delay: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain_state::BrainControl;
+
+    #[test]
+    fn brain_levers_survive_the_provider_split() {
+        let content = serde_json::json!({
+            "kind": "brain",
+            "brain.autonomy": "l3_assisted",
+            "brain.interval_seconds": 90,
+        });
+        let (settings, credential) =
+            split_provider_content(content.as_object().unwrap()).expect("brain content splits");
+        assert!(credential.is_none());
+        assert!(settings.contains_key("brain.autonomy"));
+        assert!(settings.contains_key("brain.interval_seconds"));
+    }
+
+    #[test]
+    fn unknown_provider_fields_are_still_named() {
+        let content = serde_json::json!({ "kind": "provider", "model": "x", "nope": 1 });
+        let error = split_provider_content(content.as_object().unwrap())
+            .expect_err("unknown fields are rejected");
+        assert!(error.contains("nope"), "error names the field: {error}");
+    }
 
     /// A no-op sentinel source for supervisor tests: the honest empty state.
     struct NullSentinel;
