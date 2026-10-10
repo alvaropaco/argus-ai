@@ -34,6 +34,7 @@ impl DecisionProvider for FakeDecisionProvider {
         }
         Ok(DecisionResponse {
             model: request.model,
+            usage: None,
             answers,
         })
     }

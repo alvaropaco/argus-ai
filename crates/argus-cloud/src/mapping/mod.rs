@@ -8,4 +8,5 @@ pub mod activity;
 pub mod capability;
 pub mod event;
 pub mod health;
+pub mod redact;
 pub mod telemetry;

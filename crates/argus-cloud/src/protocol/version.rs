@@ -7,10 +7,10 @@
 use semver::Version;
 
 /// The protocol version this implementation speaks.
-pub const PROTOCOL_VERSION: &str = "1.0.0";
+pub const PROTOCOL_VERSION: &str = "1.1.0";
 
 /// Versions this implementation supports, newest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["1.0.0"];
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["1.1.0", "1.0.0"];
 
 /// Selects the highest mutually supported version, or `None` if there is no
 /// overlap. A `None` result means the installation must surface an
@@ -45,6 +45,8 @@ mod tests {
     fn negotiates_the_shared_version() {
         let peer = vec!["1.0.0".to_string()];
         assert_eq!(negotiate(&peer), Some(Version::new(1, 0, 0)));
+        let newer = vec!["1.1.0".to_string()];
+        assert_eq!(negotiate(&newer), Some(Version::new(1, 1, 0)));
     }
 
     #[test]

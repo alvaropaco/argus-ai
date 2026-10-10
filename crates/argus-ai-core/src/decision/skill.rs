@@ -230,6 +230,7 @@ false = "healthy"
         );
         let chosen = DecisionResponse {
             model: None,
+            usage: None,
             answers,
         };
         assert_eq!(
@@ -248,6 +249,7 @@ false = "healthy"
         );
         let no_skill = DecisionResponse {
             model: None,
+            usage: None,
             answers: no_skill_answers,
         };
         assert!(selected_skill(&no_skill, &applicable).is_none());

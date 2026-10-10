@@ -9,6 +9,7 @@ pub mod cloud;
 pub mod config;
 pub mod control;
 pub mod handler;
+pub mod ledger;
 pub mod observe;
 pub mod privileged;
 pub mod runtime;

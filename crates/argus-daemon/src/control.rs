@@ -3,12 +3,12 @@
 
 use argus_ai_core::decision::autonomy::may_execute_without_approval;
 use argus_domain::{
-    Action, AuthorizationRequest, AutonomyMode, CapabilityId, CapabilityRegistry,
-    CapabilityRequest, DomainEvent, EventType, Execution, ExecutionStatus, Plan, PlanStatus,
-    PolicyDecision, PolicyOutcome, Principal, RequestContext, RiskClass, Severity,
-    plan_context_hash,
+    Action, ActionEventRecord, AuthorizationRequest, AutonomyMode, CapabilityId,
+    CapabilityRegistry, CapabilityRequest, DomainEvent, EventType, Execution, ExecutionStatus,
+    Plan, PlanStatus, PolicyDecision, PolicyOutcome, Principal, RequestContext, RiskClass,
+    Severity, plan_context_hash,
 };
-use argus_events::{EventBus, types};
+use argus_events::{EventBus, LedgerSink, types};
 use argus_executor::{
     AuthorizedAction, CgroupController, ClusterController, ContainerController, Executor,
     KubernetesExecutor, RemediationExecutor, ServiceController,
@@ -27,6 +27,8 @@ use uuid::Uuid;
 /// the autopilot governor, the container/cgroup live-state readers, and the
 /// executor boundary for the remediation capabilities. Services keep their
 /// dedicated controller path; everything else routes through `remediation`.
+/// The ledger sink (spec 007) rides here too, so every chokepoint — brain,
+/// CLI, and cloud-approved runs alike — emits through the same port.
 pub struct LoopPorts<'a> {
     pub governor: &'a dyn ResourceGovernor,
     pub containers: &'a dyn ContainerController,
@@ -34,6 +36,9 @@ pub struct LoopPorts<'a> {
     pub cluster: &'a dyn ClusterController,
     pub remediation: &'a dyn Executor,
     pub kubernetes: &'a dyn Executor,
+    /// The action ledger (spec 007 FR-001): every execution attempt, any
+    /// verdict, is recorded through it.
+    pub ledger: &'a dyn LedgerSink,
 }
 
 impl LoopPorts<'_> {
@@ -41,6 +46,7 @@ impl LoopPorts<'_> {
     /// callers (and the existing tests) that carry no remediation surface.
     pub fn noop() -> Self {
         static NO_GOVERNOR: argus_policy::NoGovernor = argus_policy::NoGovernor;
+        static NO_LEDGER: argus_events::NoopLedgerSink = argus_events::NoopLedgerSink;
         struct NoController;
         impl ContainerController for NoController {
             fn restart(&self, _id: &str) -> Result<(), argus_executor::RemediationError> {
@@ -96,6 +102,7 @@ impl LoopPorts<'_> {
             cluster: &NO_CLUSTER,
             remediation: &NO_EXECUTOR,
             kubernetes: &NO_KUBERNETES,
+            ledger: &NO_LEDGER,
         }
     }
 }
@@ -147,6 +154,10 @@ pub struct ExecutionOutcome {
     pub requires_approval: Vec<CapabilityId>,
     /// The plan's final status after execution (fail-stop, rollback, or success).
     pub status: PlanStatus,
+    /// The run's correlation id — the `plan_id` every ActionEvent of this run
+    /// carries, so a trace can link its actions without signature churn
+    /// (spec 007 design notes).
+    pub plan_id: Uuid,
 }
 
 impl Default for ExecutionOutcome {
@@ -156,6 +167,7 @@ impl Default for ExecutionOutcome {
             denied: Vec::new(),
             requires_approval: Vec::new(),
             status: PlanStatus::Proposed,
+            plan_id: Uuid::nil(),
         }
     }
 }
@@ -265,6 +277,36 @@ fn action_target(action: &Action) -> Option<String> {
         .iter()
         .find_map(|key| action.arguments.get(*key).and_then(Value::as_str))
         .map(str::to_owned)
+}
+
+/// Builds one ledger record for an execution attempt (FR-001). The raw
+/// arguments ride along — the sink persists them locally and redacts the
+/// upload; emission itself never fails.
+fn action_event(
+    action: &Action,
+    correlation: Uuid,
+    verdict: &str,
+    policy_id: Option<String>,
+    outcome: &str,
+    duration_ms: Option<u64>,
+    validation: Option<Value>,
+) -> ActionEventRecord {
+    ActionEventRecord {
+        event_id: Uuid::new_v4(),
+        correlation_id: correlation,
+        causation_id: None,
+        cycle_id: None,
+        plan_id: Some(correlation),
+        kind: action.capability.as_str().to_string(),
+        target: action_target(action),
+        args: action.arguments.clone(),
+        verdict: verdict.to_string(),
+        policy_id,
+        outcome: outcome.to_string(),
+        duration_ms,
+        validation,
+        occurred_at: Utc::now(),
+    }
 }
 
 /// Executes one action through its family's boundary.
@@ -557,6 +599,7 @@ async fn run_plan(
 
     let mut outcome = ExecutionOutcome {
         status: PlanStatus::Executing,
+        plan_id: correlation,
         ..ExecutionOutcome::default()
     };
     // Indices of steps that took effect, for reverse-order rollback.
@@ -617,6 +660,20 @@ async fn run_plan(
                             None,
                         ))
                         .await;
+                    // Ledger (FR-001): a governor refusal is a deny at the
+                    // boundary, exactly like a policy denial.
+                    ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            correlation,
+                            argus_domain::VERDICT_DENY,
+                            Some("governor".to_string()),
+                            argus_domain::OUTCOME_DENIED,
+                            None,
+                            None,
+                        ))
+                        .await;
                     continue;
                 }
             }
@@ -663,6 +720,20 @@ async fn run_plan(
                         None,
                     ))
                     .await;
+                // Ledger (FR-001): the denial is first-class — the operator
+                // sees what was prevented.
+                ports
+                    .ledger
+                    .record_action(action_event(
+                        action,
+                        correlation,
+                        argus_domain::VERDICT_DENY,
+                        Some(decision.policy_id.clone()),
+                        argus_domain::OUTCOME_DENIED,
+                        None,
+                        None,
+                    ))
+                    .await;
             }
             PolicyOutcome::RequireApproval => {
                 tracing::info!(
@@ -677,6 +748,18 @@ async fn run_plan(
                         correlation_id = %correlation,
                         "plan paused awaiting operator approval"
                     );
+                    ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            correlation,
+                            argus_domain::VERDICT_REQUIRES_APPROVAL,
+                            Some(decision.policy_id.clone()),
+                            argus_domain::OUTCOME_AWAITING_APPROVAL,
+                            None,
+                            None,
+                        ))
+                        .await;
                     return PlanRun::Paused(pause_plan(plan, &executed));
                 }
                 // Resumed: the approval re-entered policy as input, never as
@@ -705,6 +788,18 @@ async fn run_plan(
             PolicyOutcome::Allow => {
                 if !may_execute_without_approval(autonomy, risk) {
                     outcome.requires_approval.push(action.capability.clone());
+                    ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            correlation,
+                            argus_domain::VERDICT_REQUIRES_APPROVAL,
+                            Some(decision.policy_id.clone()),
+                            argus_domain::OUTCOME_AWAITING_APPROVAL,
+                            None,
+                            None,
+                        ))
+                        .await;
                     continue;
                 }
 
@@ -729,6 +824,18 @@ async fn run_plan(
                         "escalation decision routes the step to a human"
                     );
                     outcome.requires_approval.push(action.capability.clone());
+                    ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            correlation,
+                            argus_domain::VERDICT_REQUIRES_APPROVAL,
+                            Some(decision.policy_id.clone()),
+                            argus_domain::OUTCOME_AWAITING_APPROVAL,
+                            None,
+                            None,
+                        ))
+                        .await;
                     return PlanRun::Paused(pause_plan(plan, &executed));
                 }
 
@@ -809,6 +916,20 @@ async fn execute_allowed_step(
                     None,
                 ))
                 .await;
+            // Ledger (FR-001): the no-op is a recorded success, so "already
+            // in the desired state" is visible as what it was.
+            env.ports
+                .ledger
+                .record_action(action_event(
+                    action,
+                    env.correlation,
+                    argus_domain::VERDICT_ALLOW,
+                    Some(decision.policy_id.clone()),
+                    argus_domain::OUTCOME_OK,
+                    None,
+                    Some(evidence.clone()),
+                ))
+                .await;
             outcome.executions.push(Execution {
                 action: action.clone(),
                 status: ExecutionStatus::Completed,
@@ -817,8 +938,10 @@ async fn execute_allowed_step(
             false
         }
         Ok(false) => {
+            let started = std::time::Instant::now();
             match execute_action(action, env.service, env.ports, decision, env.correlation) {
                 Ok(evidence) => {
+                    let duration = started.elapsed().as_millis().try_into().ok();
                     tracing::info!(
                         correlation_id = %env.correlation,
                         capability = action.capability.as_str(),
@@ -834,18 +957,31 @@ async fn execute_allowed_step(
                             None,
                         ))
                         .await;
+                    // Re-observe after the step executed and publish the validation
+                    // outcome (ADR-0031 §6); the result lands on the ledger record.
+                    let validation = validate_step(action, env).await;
+                    env.ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            env.correlation,
+                            argus_domain::VERDICT_ALLOW,
+                            Some(decision.policy_id.clone()),
+                            argus_domain::OUTCOME_OK,
+                            duration,
+                            validation,
+                        ))
+                        .await;
                     outcome.executions.push(Execution {
                         action: action.clone(),
                         status: ExecutionStatus::Completed,
                         evidence,
                     });
                     executed.push(index);
-                    // Re-observe after the step executed and publish the validation
-                    // outcome (ADR-0031 §6).
-                    validate_step(action, env).await;
                     false
                 }
                 Err(err) => {
+                    let duration = started.elapsed().as_millis().try_into().ok();
                     tracing::warn!(
                         correlation_id = %env.correlation,
                         capability = action.capability.as_str(),
@@ -854,6 +990,18 @@ async fn execute_allowed_step(
                         "step failed; rolling back executed steps"
                     );
                     record_failure(outcome, action, err, env.events, env.correlation).await;
+                    env.ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            env.correlation,
+                            argus_domain::VERDICT_ALLOW,
+                            Some(decision.policy_id.clone()),
+                            argus_domain::OUTCOME_FAILED,
+                            duration,
+                            None,
+                        ))
+                        .await;
                     rollback_executed(outcome, plan, executed, env).await;
                     true
                 }
@@ -870,6 +1018,18 @@ async fn execute_allowed_step(
                 "desired-state read failed; fail-closed"
             );
             record_failure(outcome, action, err, env.events, env.correlation).await;
+            env.ports
+                .ledger
+                .record_action(action_event(
+                    action,
+                    env.correlation,
+                    argus_domain::VERDICT_ALLOW,
+                    Some(decision.policy_id.clone()),
+                    argus_domain::OUTCOME_FAILED,
+                    None,
+                    None,
+                ))
+                .await;
             rollback_executed(outcome, plan, executed, env).await;
             true
         }
@@ -953,6 +1113,7 @@ async fn rollback_executed(
             return;
         };
         let decision = PolicyDecision::allow("plan.rollback", "declarative plan rollback");
+        let started = std::time::Instant::now();
         match execute_action(rollback, env.service, env.ports, &decision, env.correlation) {
             Ok(evidence) => {
                 let _ = env
@@ -964,6 +1125,20 @@ async fn rollback_executed(
                         None,
                     ))
                     .await;
+                // Ledger (FR-001): the undo is part of the story — the plan
+                // step that took effect and was then reversed.
+                env.ports
+                    .ledger
+                    .record_action(action_event(
+                        rollback,
+                        env.correlation,
+                        argus_domain::VERDICT_ALLOW,
+                        Some(decision.policy_id.clone()),
+                        argus_domain::OUTCOME_ROLLED_BACK,
+                        started.elapsed().as_millis().try_into().ok(),
+                        None,
+                    ))
+                    .await;
             }
             Err(err) => {
                 let _ = env
@@ -972,6 +1147,18 @@ async fn rollback_executed(
                         types::ACTION_ROLLBACK_FAILED,
                         json!({ "error": err }),
                         env.correlation,
+                        None,
+                    ))
+                    .await;
+                env.ports
+                    .ledger
+                    .record_action(action_event(
+                        rollback,
+                        env.correlation,
+                        argus_domain::VERDICT_ALLOW,
+                        Some(decision.policy_id.clone()),
+                        argus_domain::OUTCOME_FAILED,
+                        started.elapsed().as_millis().try_into().ok(),
                         None,
                     ))
                     .await;
@@ -1098,14 +1285,11 @@ fn k8s_target(action: &Action) -> Result<(String, String), String> {
 
 /// Re-observes a just-executed step's target and publishes the validation
 /// outcome (ADR-0031 §6). Fail closed: a live-state read failure publishes
-/// nothing and records the failure.
-async fn validate_step(action: &Action, env: &RunEnv<'_>) {
-    let Some(expected) = desired_state(&action.capability) else {
-        return;
-    };
-    let Some(target) = action_target(action) else {
-        return;
-    };
+/// nothing and records the failure. Returns the validation payload when one
+/// was produced, so the ledger record can carry the validation result (FR-001).
+async fn validate_step(action: &Action, env: &RunEnv<'_>) -> Option<Value> {
+    let expected = desired_state(&action.capability)?;
+    let target = action_target(action)?;
     let observed = match observe_target(action, env) {
         Ok(observed) => observed,
         Err(error) => {
@@ -1125,24 +1309,23 @@ async fn validate_step(action: &Action, env: &RunEnv<'_>) {
                     None,
                 ))
                 .await;
-            return;
+            return None;
         }
     };
     // The shared payload construction (argus_validate) is the single source for
     // both daemon hooks, so they cannot drift (ADR-0031 §6).
-    let Some((event_type, payload)) = validation_event(
+    let (event_type, payload) = validation_event(
         &action.capability,
         &target,
         expected,
         observed,
         &env.context_hash,
-    ) else {
-        return;
-    };
+    )?;
     let _ = env
         .events
-        .publish(&event(event_type, payload, env.correlation, None))
+        .publish(&event(event_type, payload.clone(), env.correlation, None))
         .await;
+    Some(payload)
 }
 
 fn request_context(correlation: Uuid) -> RequestContext {

@@ -68,6 +68,9 @@ pub enum MessageType {
     ActivitiesReport,
     CapabilitiesPublish,
     SentinelReport,
+    ActionEvent,
+    BrainTrace,
+    TokenUsage,
     // acknowledgements (cloud → installation)
     TelemetryAck,
     HealthAck,
@@ -75,6 +78,9 @@ pub enum MessageType {
     ActivitiesAck,
     CapabilitiesAck,
     IngestAck,
+    ActionEventAck,
+    BrainTraceAck,
+    TokenUsageAck,
     // results and state (installation → cloud)
     ConfigResult,
     CommandResult,
@@ -110,6 +116,9 @@ impl MessageType {
             Self::ActivitiesReport => "activities.report",
             Self::CapabilitiesPublish => "capabilities.publish",
             Self::SentinelReport => "sentinel.report",
+            Self::ActionEvent => "action.event",
+            Self::BrainTrace => "brain.trace",
+            Self::TokenUsage => "token.usage",
             Self::SentinelAck => "sentinel.ack",
             Self::ApprovalDecision => "approval.decision",
             Self::ApprovalResult => "approval.result",
@@ -119,6 +128,9 @@ impl MessageType {
             Self::ActivitiesAck => "activities.ack",
             Self::CapabilitiesAck => "capabilities.ack",
             Self::IngestAck => "ingest.ack",
+            Self::ActionEventAck => "action.event.ack",
+            Self::BrainTraceAck => "brain.trace.ack",
+            Self::TokenUsageAck => "token.usage.ack",
             Self::ConfigResult => "config.result",
             Self::CommandResult => "command.result",
             Self::ConfigState => "config.state",
@@ -162,12 +174,18 @@ impl std::str::FromStr for MessageType {
             "events.report" => Self::EventsReport,
             "activities.report" => Self::ActivitiesReport,
             "capabilities.publish" => Self::CapabilitiesPublish,
+            "action.event" => Self::ActionEvent,
+            "brain.trace" => Self::BrainTrace,
+            "token.usage" => Self::TokenUsage,
             "telemetry.ack" => Self::TelemetryAck,
             "health.ack" => Self::HealthAck,
             "events.ack" => Self::EventsAck,
             "activities.ack" => Self::ActivitiesAck,
             "capabilities.ack" => Self::CapabilitiesAck,
             "ingest.ack" => Self::IngestAck,
+            "action.event.ack" => Self::ActionEventAck,
+            "brain.trace.ack" => Self::BrainTraceAck,
+            "token.usage.ack" => Self::TokenUsageAck,
             "config.result" => Self::ConfigResult,
             "command.result" => Self::CommandResult,
             "config.state" => Self::ConfigState,
@@ -215,6 +233,9 @@ impl MessageType {
             | Self::ActivitiesAck
             | Self::CapabilitiesAck
             | Self::IngestAck
+            | Self::ActionEventAck
+            | Self::BrainTraceAck
+            | Self::TokenUsageAck
             | Self::SentinelAck
             | Self::ConfigApply
             | Self::CommandInvoke
@@ -232,6 +253,9 @@ impl MessageType {
             | Self::ActivitiesReport
             | Self::CapabilitiesPublish
             | Self::SentinelReport
+            | Self::ActionEvent
+            | Self::BrainTrace
+            | Self::TokenUsage
             | Self::ApprovalResult
             | Self::ConfigResult
             | Self::CommandResult
@@ -245,7 +269,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn message_type_round_trips_for_all_32_types() {
+    fn message_type_round_trips_for_every_type() {
         let all = [
             MessageType::HandshakeHello,
             MessageType::HandshakeAuthenticate,
@@ -259,12 +283,18 @@ mod tests {
             MessageType::EventsReport,
             MessageType::ActivitiesReport,
             MessageType::CapabilitiesPublish,
+            MessageType::ActionEvent,
+            MessageType::BrainTrace,
+            MessageType::TokenUsage,
             MessageType::TelemetryAck,
             MessageType::HealthAck,
             MessageType::EventsAck,
             MessageType::ActivitiesAck,
             MessageType::CapabilitiesAck,
             MessageType::IngestAck,
+            MessageType::ActionEventAck,
+            MessageType::BrainTraceAck,
+            MessageType::TokenUsageAck,
             MessageType::ConfigResult,
             MessageType::CommandResult,
             MessageType::ConfigState,
@@ -276,7 +306,7 @@ mod tests {
             MessageType::StreamThrottle,
             MessageType::SessionRotate,
         ];
-        assert_eq!(all.len(), 28);
+        assert_eq!(all.len(), 34);
         for ty in all {
             assert_eq!(ty.as_str().parse::<MessageType>(), Ok(ty), "{ty:?}");
         }

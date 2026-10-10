@@ -122,6 +122,22 @@ pub struct DecisionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub answers: BTreeMap<String, DecisionAnswer>,
+    /// The provider's token metering for this call, when it reported one
+    /// (spec 007 FR-003). `None` means unknown — never zero, never estimated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
+}
+
+/// One provider call's token metering (spec 007 FR-003). Absent counts mean
+/// the provider did not report them — unknown, never zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -187,6 +203,7 @@ mod tests {
         ]);
         let resp = DecisionResponse {
             model: Some("test-model".into()),
+            usage: None,
             answers,
         };
         let json = serde_json::to_value(&resp).unwrap();

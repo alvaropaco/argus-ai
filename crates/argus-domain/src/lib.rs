@@ -17,6 +17,7 @@ mod event;
 mod graph;
 mod health;
 mod id;
+mod ledger;
 mod mcp;
 mod observation;
 mod plugin;
@@ -45,6 +46,11 @@ pub use event::{DomainEvent, EventType, Severity};
 pub use graph::{NodeKind, RelationshipKind};
 pub use health::{HealthState, HealthStatus};
 pub use id::{CapabilityId, EnvironmentId, ResourceId};
+pub use ledger::{
+    ActionEventFilter, ActionEventRecord, BrainTraceRecord, DEFAULT_ACTION_EVENT_LIMIT,
+    OUTCOME_AWAITING_APPROVAL, OUTCOME_DENIED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_ROLLED_BACK,
+    OUTCOME_TIMEOUT, TokenUsageRecord, VERDICT_ALLOW, VERDICT_DENY, VERDICT_REQUIRES_APPROVAL,
+};
 pub use mcp::McpRuntime;
 pub use observation::{Observation, ObservedValue, Provenance};
 pub use plugin::{Compatibility, PluginManifest, PluginType};

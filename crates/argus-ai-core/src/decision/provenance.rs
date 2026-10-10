@@ -61,6 +61,7 @@ mod tests {
     fn response(model: Option<&str>) -> DecisionResponse {
         DecisionResponse {
             model: model.map(str::to_string),
+            usage: None,
             answers: std::collections::BTreeMap::new(),
         }
     }

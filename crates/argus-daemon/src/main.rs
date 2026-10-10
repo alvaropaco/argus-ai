@@ -121,6 +121,7 @@ fn spawn_cloud_supervisor(
         )),
         privileged_execution: daemon.privileged_execution_flag(),
         wake: daemon.cloud_wake(),
+        ledger: daemon.ledger(),
     };
     tokio::spawn(argus_daemon::cloud::supervise(deps, stop_rx));
     stop

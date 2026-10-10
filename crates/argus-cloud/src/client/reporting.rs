@@ -100,12 +100,14 @@ impl ReportBatch {
 /// How many reports of a kind may travel in one message.
 ///
 /// Telemetry and health carry a single reading each; events and activities are
-/// batched up to the contract's item bound.
+/// batched up to the contract's item bound. The ledger kinds travel one event
+/// per message: their ordering and per-event acking are the point (spec 007).
 pub fn per_message_limit(kind: ReportKind) -> usize {
     match kind {
         ReportKind::Telemetry | ReportKind::Health | ReportKind::Sentinel => 1,
         ReportKind::Events => MAX_EVENTS_PER_REPORT,
         ReportKind::Activities => MAX_ACTIVITIES_PER_REPORT,
+        ReportKind::ActionLedger | ReportKind::BrainTrace | ReportKind::TokenUsage => 1,
     }
 }
 
@@ -213,8 +215,9 @@ pub fn queue_activity(
 
 /// Whether a message type acknowledges one of our reports.
 ///
-/// The cloud chooses which acknowledgement to use per report kind, so all six
-/// must be recognised; an unrecognised one would leave a batch pending forever.
+/// The cloud chooses which acknowledgement to use per report kind, so all of
+/// them must be recognised; an unrecognised one would leave a batch pending
+/// forever. The ledger kinds (spec 007) have their own acks.
 pub fn is_report_ack(ty: MessageType) -> bool {
     matches!(
         ty,
@@ -224,6 +227,9 @@ pub fn is_report_ack(ty: MessageType) -> bool {
             | MessageType::ActivitiesAck
             | MessageType::CapabilitiesAck
             | MessageType::IngestAck
+            | MessageType::ActionEventAck
+            | MessageType::BrainTraceAck
+            | MessageType::TokenUsageAck
     )
 }
 
@@ -790,6 +796,9 @@ mod tests {
                 MessageType::ActivitiesAck,
                 MessageType::CapabilitiesAck,
                 MessageType::IngestAck,
+                MessageType::ActionEventAck,
+                MessageType::BrainTraceAck,
+                MessageType::TokenUsageAck,
             ] {
                 assert!(is_report_ack(ty), "{ty:?} must settle a pending batch");
             }

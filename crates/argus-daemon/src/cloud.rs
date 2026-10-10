@@ -604,6 +604,10 @@ pub struct SupervisorDeps {
     pub brain_control: Arc<crate::brain_state::BrainControlHandle>,
     /// Where an operator's approval decision is applied (spec 006 FR-003).
     pub decisions: Arc<dyn ApprovalSink>,
+    /// The action ledger (spec 007): the supervisor drains its upstream
+    /// buffer each session tick, so events reach the cloud within ~1 s of
+    /// occurring and ride the same ack discipline as the reports.
+    pub ledger: Arc<crate::ledger::DaemonLedger>,
 }
 
 /// The live agent state behind the `sentinel.report` (spec 006 FR-001).
@@ -1718,6 +1722,15 @@ async fn run_session(
 
                 collect_bus_events(deps, event_rx).await;
 
+                // Ledger flush (spec 007 FR-005/FR-006): every tick, so an
+                // action reaches the cloud within ~1 s of occurring.
+                if !deps.ledger.buffer().lock().await.is_empty()
+                    && let Err(error) = flush_ledger(deps, transport, &mut in_flight).await
+                {
+                    requeue_in_flight(deps, &mut in_flight).await;
+                    return ConnectionOutcome::TransportFailed(error.to_string());
+                }
+
                 if schedule.telemetry_due(now) {
                     collect_telemetry_and_health(deps, Utc::now()).await;
                     if let Err(error) = flush_reports(deps, transport, &mut in_flight).await {
@@ -1812,6 +1825,8 @@ async fn collect_telemetry_and_health(deps: &SupervisorDeps, now: DateTime<Utc>)
         queue.enqueue(ReportKind::Health, payload, now);
     }
     drop(queue);
+    // Bounded growth (spec 007 NFR): the retention prune rides the same tick.
+    deps.ledger.prune().await;
     collect_sentinel(deps, now).await;
 }
 
@@ -1953,6 +1968,9 @@ fn message_type_for(kind: ReportKind) -> MessageType {
         ReportKind::Events => MessageType::EventsReport,
         ReportKind::Activities => MessageType::ActivitiesReport,
         ReportKind::Sentinel => MessageType::SentinelReport,
+        ReportKind::ActionLedger => MessageType::ActionEvent,
+        ReportKind::BrainTrace => MessageType::BrainTrace,
+        ReportKind::TokenUsage => MessageType::TokenUsage,
     }
 }
 
@@ -1981,8 +1999,26 @@ async fn flush_reports(
     Ok(())
 }
 
-/// Returns in-flight reports to the queue, oldest first, so a failed or ended
-/// session loses nothing.
+/// Sends everything the ledger buffer holds, holding each entry in flight
+/// until its ack — the same at-least-once discipline as the reports (FR-005).
+async fn flush_ledger(
+    deps: &SupervisorDeps,
+    transport: &dyn Transport,
+    in_flight: &mut HashMap<Uuid, BufferedReport>,
+) -> Result<(), TransportError> {
+    let entries = deps.ledger.buffer().lock().await.drain(Utc::now());
+    for entry in entries {
+        let envelope = Envelope::new(message_type_for(entry.kind), entry.payload.clone(), None);
+        let message_id = envelope.message_id;
+        transport.send(&envelope).await?;
+        in_flight.insert(message_id, entry);
+    }
+    Ok(())
+}
+
+/// Returns in-flight reports to their buffers, oldest first, so a failed or
+/// ended session loses nothing: ledger entries return to the ledger buffer
+/// (whose backpressure rules protect them), the rest to the report queue.
 async fn requeue_in_flight(deps: &SupervisorDeps, in_flight: &mut HashMap<Uuid, BufferedReport>) {
     if in_flight.is_empty() {
         return;
@@ -1990,7 +2026,11 @@ async fn requeue_in_flight(deps: &SupervisorDeps, in_flight: &mut HashMap<Uuid, 
 
     let mut entries: Vec<BufferedReport> = in_flight.drain().map(|(_, entry)| entry).collect();
     entries.sort_by_key(|entry| entry.enqueued_at);
-    deps.queue.lock().await.requeue_front(entries);
+    let (ledger_entries, queue_entries): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|entry| entry.kind.is_ledger());
+    deps.queue.lock().await.requeue_front(queue_entries);
+    deps.ledger.buffer().lock().await.requeue(ledger_entries);
 }
 
 async fn handle_inbound(
@@ -2047,7 +2087,27 @@ async fn handle_inbound(
             if !ack.accepted
                 && let Some(entry) = entry
             {
-                deps.queue.lock().await.requeue_front(vec![entry]);
+                // A deterministically invalid payload would retry forever, so
+                // give up past a small cap — the entry stays in the local
+                // ledger (for the ledger kinds) or was already reported as
+                // dropped by the buffer counters (the rest).
+                const MAX_SEND_ATTEMPTS: u32 = 8;
+                if entry.attempts >= MAX_SEND_ATTEMPTS {
+                    tracing::warn!(
+                        kind = entry.kind.as_str(),
+                        attempts = entry.attempts,
+                        "the cloud keeps rejecting this report; giving up on it"
+                    );
+                    return;
+                }
+                // Back to the buffer it came from: a ledger entry must not
+                // land in the evictable report queue, or the ledger's
+                // never-drop backpressure rules would be bypassed.
+                if entry.kind.is_ledger() {
+                    deps.ledger.buffer().lock().await.requeue(vec![entry]);
+                } else {
+                    deps.queue.lock().await.requeue_front(vec![entry]);
+                }
             }
         }
         _ => {}
@@ -2150,7 +2210,6 @@ async fn wait_or_stop(stop: &mut watch::Receiver<bool>, wake: &Notify, delay: Du
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brain_state::BrainControl;
 
     #[test]
     fn brain_levers_survive_the_provider_split() {
@@ -2677,6 +2736,7 @@ mod tests {
         let privileged_execution = Arc::new(std::sync::atomic::AtomicBool::new(
             config.allow_privileged_execution,
         ));
+        let ledger_repository = Arc::clone(&repository);
         SupervisorDeps {
             config,
             secrets,
@@ -2703,6 +2763,7 @@ mod tests {
             limiter: Arc::new(PrivilegedLimiter::new(2)),
             privileged_execution,
             wake: Arc::new(Notify::new()),
+            ledger: crate::ledger::DaemonLedger::new(ledger_repository, true, 30),
         }
     }
 

@@ -6,9 +6,11 @@
 
 mod bus;
 mod error;
+mod ledger;
 
 pub use bus::{EventBus, LocalEventBus};
 pub use error::EventError;
+pub use ledger::{LedgerSink, NoopLedgerSink};
 
 /// Canonical reasoning/plan/execution event types (contracts/events.md).
 pub mod types {
@@ -28,6 +30,12 @@ pub mod types {
     pub const VALIDATION_PASSED: &str = "validation.passed";
     pub const VALIDATION_FAILED: &str = "validation.failed";
     pub const PROVIDER_DEGRADED: &str = "provider.degraded";
+
+    // Nervous system (spec 007): the brain-cycle trace and the token-usage
+    // metering records are new event vocabulary; the action side reuses the
+    // `action.*` constants above rather than inventing parallel types.
+    pub const BRAIN_TRACE: &str = "brain.trace";
+    pub const TOKEN_USAGE: &str = "token.usage";
 
     // Observation / sensor (ADR-0032)
     pub const SENSOR_HEALTHY: &str = "sensor.healthy";

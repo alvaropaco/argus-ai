@@ -322,6 +322,7 @@ fn ports<'a>(
         cluster,
         remediation: &NO_REMEDIATION,
         kubernetes,
+        ledger: &argus_events::NoopLedgerSink,
     }
 }
 

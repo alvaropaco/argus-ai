@@ -36,6 +36,10 @@ pub struct DaemonConfig {
     /// and the k8s capabilities degrade honestly.
     #[serde(default)]
     pub kubernetes: KubernetesConfig,
+    /// The action ledger's local + upload settings (spec 007). Defaults keep
+    /// the ledger always on (local) and upload on with bounded retention.
+    #[serde(default)]
+    pub ledger: LedgerConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -53,6 +57,7 @@ impl Default for DaemonConfig {
             model: argus_ai_core::model::ModelProviderConfig::default(),
             brain: BrainConfig::default(),
             kubernetes: KubernetesConfig::default(),
+            ledger: LedgerConfig::default(),
         }
     }
 }
@@ -86,6 +91,8 @@ pub struct ConfigFile {
     pub brain: Option<BrainConfig>,
     #[serde(default)]
     pub kubernetes: Option<KubernetesConfig>,
+    #[serde(default)]
+    pub ledger: Option<LedgerConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -194,6 +201,45 @@ impl<'de> Deserialize<'de> for BrainConfig {
     }
 }
 
+/// Action-ledger settings (`[ledger]` in argus.toml, spec 007).
+///
+/// The ledger itself is always local — only the *upload* is optional, so an
+/// operator can keep the audit trail while silencing the stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LedgerConfig {
+    /// Stream redacted ledger events to the cloud when enrolled. The local
+    /// ledger is unaffected by this switch (spec 007 NFR).
+    pub upload_enabled: bool,
+    /// How many days of local ledger history to retain (bounded growth).
+    pub retention_days: i64,
+}
+
+impl Default for LedgerConfig {
+    fn default() -> Self {
+        Self {
+            upload_enabled: true,
+            retention_days: 30,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LedgerConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct LedgerWire {
+            #[serde(default)]
+            upload_enabled: Option<bool>,
+            #[serde(default)]
+            retention_days: Option<i64>,
+        }
+        let wire = LedgerWire::deserialize(deserializer)?;
+        Ok(Self {
+            upload_enabled: wire.upload_enabled.unwrap_or(true),
+            retention_days: wire.retention_days.unwrap_or(30).clamp(1, 3650),
+        })
+    }
+}
+
 /// Precedence is `defaults < file < flags`; flags are applied afterwards by the
 /// caller, which is why only the first two are handled here.
 ///
@@ -292,6 +338,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.kubernetes {
         config.kubernetes = value;
+    }
+    if let Some(value) = file.ledger {
+        config.ledger = value;
     }
 }
 
@@ -655,6 +704,37 @@ telemetry_interval_seconds = 30
         let loaded = load(Some(&path)).expect("valid");
         assert!(!loaded.config.cloud.permits_privileged_execution());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_ledger_section_loads_with_defaults_and_clamps() {
+        let dir = temp_dir();
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[ledger]\nupload_enabled = false\nretention_days = 7\n",
+        );
+
+        let loaded = load(Some(&path)).expect("valid");
+        assert!(
+            !loaded.config.ledger.upload_enabled,
+            "upload can be silenced"
+        );
+        assert_eq!(loaded.config.ledger.retention_days, 7);
+
+        // Absent section: defaults (upload on, 30 days) — the ledger itself is
+        // always local (spec 007 NFR).
+        let path = write_config(&dir, "argus.toml", "environment_name = \"x\"\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.ledger, LedgerConfig::default());
+
+        let path = write_config(&dir, "argus.toml", "[ledger]\nretention_days = 0\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(
+            loaded.config.ledger.retention_days, 1,
+            "clamped to the floor"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -18,7 +18,7 @@ use argus_domain::{
     PlanStatus, PluginManifest, PolicyOutcome, Principal, PrivilegeDeclaration, Provenance,
     RequestContext, ResourceId, Reversibility, RiskClass, Severity, plan_context_hash,
 };
-use argus_events::EventBus;
+use argus_events::{EventBus, LedgerSink};
 use argus_executor::{
     BootstrapExecutor, CapabilityProvider, CgroupController, CgroupV2Controller,
     ContainerController, DockerContainerController, ExecutionError, Executor, ProcessController,
@@ -107,6 +107,9 @@ pub struct Daemon {
     /// the same handles.
     brain_state: Arc<crate::brain_state::BrainState>,
     brain_control: Arc<crate::brain_state::BrainControlHandle>,
+    /// The action ledger (spec 007): every execution attempt, trace, and
+    /// usage record flows through it — local first, upload optional.
+    ledger: Arc<crate::ledger::DaemonLedger>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -324,6 +327,11 @@ impl Daemon {
             Arc::new(AtomicBool::new(config.cloud.allow_privileged_execution));
 
         let secret_store = CloudSecretStore::default_location();
+        let ledger = crate::ledger::DaemonLedger::new(
+            Arc::clone(&repository),
+            config.ledger.upload_enabled,
+            config.ledger.retention_days,
+        );
         let (cluster, kubernetes_executor) = connect_cluster(&config);
         let decision_provider = crate::brain::build_provider(&config, &secret_store);
         let runbooks = load_runbooks(&config);
@@ -380,6 +388,7 @@ impl Daemon {
             kubernetes_executor,
             brain_state,
             brain_control,
+            ledger,
         })
     }
 
@@ -669,9 +678,29 @@ impl Daemon {
         // forgot would be unapprovable and stuck forever.
         if let RunOutcome::Pending(pending) = &outcome {
             self.pending.store(pending.clone());
+            // Ledger (spec 007): the pause is a trace the operator can find —
+            // the plan objective with an awaiting-approval outcome.
+            self.ledger
+                .record_trace(argus_domain::BrainTraceRecord {
+                    trace_id: uuid::Uuid::new_v4(),
+                    cycle_id: None,
+                    plan_id: None,
+                    evidence: Vec::new(),
+                    decision: None,
+                    objective: Some(pending.plan.objective.clone()),
+                    steps: pending
+                        .plan
+                        .steps
+                        .iter()
+                        .map(|step| step.action.capability.as_str().to_string())
+                        .collect(),
+                    outcome: Some("awaiting_approval".to_string()),
+                    occurred_at: chrono::Utc::now(),
+                })
+                .await;
         }
         if let RunOutcome::Finished(report) = &outcome {
-            self.record_run_outcome(report);
+            self.record_run_outcome(report).await;
         }
         outcome
     }
@@ -681,7 +710,22 @@ impl Daemon {
     /// policy denials and per-step executor failures come from the report,
     /// and a plan that failed with no failed step failed *after* execution,
     /// which is the validation/rollback path.
-    fn record_run_outcome(&self, report: &ExecutionOutcome) {
+    async fn record_run_outcome(&self, report: &ExecutionOutcome) {
+        // Ledger (spec 007): the plan-terminal trace — one bounded record of
+        // how the run ended, linked to its actions by `plan_id`.
+        self.ledger
+            .record_trace(argus_domain::BrainTraceRecord {
+                trace_id: uuid::Uuid::new_v4(),
+                cycle_id: None,
+                plan_id: Some(report.plan_id),
+                evidence: Vec::new(),
+                decision: None,
+                objective: None,
+                steps: Vec::new(),
+                outcome: Some(format!("{:?}", report.status)),
+                occurred_at: chrono::Utc::now(),
+            })
+            .await;
         self.selfobs.record_decision_completed();
         self.selfobs.record_event_processed();
         for _ in &report.denied {
@@ -730,7 +774,7 @@ impl Daemon {
         )
         .await;
         if let ResumeOutcome::Finished(report) = &outcome {
-            self.record_run_outcome(report);
+            self.record_run_outcome(report).await;
         }
         outcome
     }
@@ -795,6 +839,12 @@ impl Daemon {
         Arc::clone(&self.brain_control)
     }
 
+    /// The action ledger (spec 007): the sink the control loop emits through
+    /// and the brain's cycle context lives on.
+    pub fn ledger(&self) -> Arc<crate::ledger::DaemonLedger> {
+        Arc::clone(&self.ledger)
+    }
+
     /// The live Kubernetes cluster bridge, when connected (ADR-0037);
     /// `None` means every k8s capability degrades honestly.
     pub fn cluster(&self) -> Option<Arc<dyn argus_executor::ClusterController>> {
@@ -821,6 +871,7 @@ impl Daemon {
                 .as_deref()
                 .map(|executor| executor as &dyn argus_executor::Executor)
                 .unwrap_or(&NO_KUBERNETES),
+            ledger: self.ledger.as_ref(),
         }
     }
 
@@ -1705,6 +1756,7 @@ impl crate::cloud::SentinelSource for Daemon {
 
             let last_cycle = self.brain_state.last_cycle().map(|record| {
                 serde_json::json!({
+                    "cycle_id": record.cycle_id,
                     "evidence": record.evidence,
                     "provider_available": record.provider_available,
                     "decision": record.decision,

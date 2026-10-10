@@ -8,9 +8,11 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use argus_domain::{
-    AppliedConfigurationState, CapabilityPublication, CloudCommand, CloudConnection,
-    CloudEnrollment, DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision,
-    HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer,
+    ActionEventFilter, ActionEventRecord, AppliedConfigurationState, BrainTraceRecord,
+    CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment,
+    DEFAULT_ACTION_EVENT_LIMIT, DomainEvent, EnvironmentId, Execution, ExecutionApproval,
+    ExecutionDecision, HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan,
+    ReportBuffer, TokenUsageRecord,
 };
 use argus_memory::{Episode, Fact, ProcedureRecord};
 use async_trait::async_trait;
@@ -98,6 +100,28 @@ CREATE TABLE IF NOT EXISTS cloud_report_buffer (
     id   TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ledger_actions (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ledger_actions_time ON ledger_actions (occurred_at);
+CREATE INDEX IF NOT EXISTS ledger_actions_kind ON ledger_actions (kind);
+CREATE TABLE IF NOT EXISTS ledger_traces (
+    id          TEXT PRIMARY KEY,
+    cycle_id    TEXT,
+    occurred_at TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ledger_traces_cycle ON ledger_traces (cycle_id);
+CREATE TABLE IF NOT EXISTS ledger_usage (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ledger_usage_time ON ledger_usage (occurred_at);
 "#;
 
 const SINGLETON: &str = "cloud";
@@ -300,6 +324,12 @@ impl SqliteRepository {
 
     fn encode<T: serde::Serialize>(value: &T) -> Result<String, RepositoryError> {
         serde_json::to_string(value).map_err(|e| RepositoryError::Failed(e.to_string()))
+    }
+
+    /// RFC3339 UTC timestamps order lexicographically, so the text column
+    /// sorts correctly without a schema change.
+    fn occurred_at(at: &chrono::DateTime<chrono::Utc>) -> String {
+        at.to_rfc3339()
     }
 }
 
@@ -619,22 +649,373 @@ impl DomainRepository for SqliteRepository {
             .map(|data| Self::decode(&data))
             .transpose()
     }
+
+    async fn put_action_event(&self, event: &ActionEventRecord) -> Result<(), RepositoryError> {
+        let data = Self::encode(event)?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO ledger_actions (id, kind, status, occurred_at, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    event.event_id.to_string(),
+                    event.kind,
+                    event.outcome,
+                    Self::occurred_at(&event.occurred_at),
+                    data
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn list_action_events(
+        &self,
+        filter: &ActionEventFilter,
+    ) -> Result<Vec<ActionEventRecord>, RepositoryError> {
+        let limit = if filter.limit == 0 {
+            DEFAULT_ACTION_EVENT_LIMIT
+        } else {
+            filter.limit
+        };
+        let mut sql = String::from("SELECT data FROM ledger_actions");
+        let mut clauses: Vec<String> = Vec::new();
+        if let Some(since) = filter.since {
+            clauses.push(format!("occurred_at >= '{}'", Self::occurred_at(&since)));
+        }
+        if let Some(kind) = &filter.kind {
+            clauses.push(format!("kind = '{}'", kind.replace('\'', "''")));
+        }
+        if let Some(status) = &filter.status {
+            clauses.push(format!("status = '{}'", status.replace('\'', "''")));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY occurred_at DESC, rowid DESC LIMIT ");
+        sql.push_str(&limit.to_string());
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })?
+        .iter()
+        .map(|data| Self::decode(data))
+        .collect()
+    }
+
+    async fn put_brain_trace(&self, trace: &BrainTraceRecord) -> Result<(), RepositoryError> {
+        let data = Self::encode(trace)?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO ledger_traces (id, cycle_id, occurred_at, data) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    trace.trace_id.to_string(),
+                    trace.cycle_id.map(|id| id.to_string()),
+                    Self::occurred_at(&trace.occurred_at),
+                    data
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn list_brain_traces(
+        &self,
+        cycle_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<BrainTraceRecord>, RepositoryError> {
+        let limit = if limit == 0 {
+            DEFAULT_ACTION_EVENT_LIMIT
+        } else {
+            limit
+        };
+        let sql = match cycle_id {
+            Some(id) => format!(
+                "SELECT data FROM ledger_traces WHERE cycle_id = '{}' \
+                 ORDER BY occurred_at DESC, rowid DESC LIMIT {limit}",
+                id
+            ),
+            None => format!(
+                "SELECT data FROM ledger_traces ORDER BY occurred_at DESC, rowid DESC LIMIT {limit}"
+            ),
+        };
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })?
+        .iter()
+        .map(|data| Self::decode(data))
+        .collect()
+    }
+
+    async fn put_token_usage(&self, usage: &TokenUsageRecord) -> Result<(), RepositoryError> {
+        let data = Self::encode(usage)?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO ledger_usage (occurred_at, data) VALUES (?1, ?2)",
+                rusqlite::params![Self::occurred_at(&usage.occurred_at), data],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn list_token_usage(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TokenUsageRecord>, RepositoryError> {
+        let limit = if limit == 0 {
+            DEFAULT_ACTION_EVENT_LIMIT
+        } else {
+            limit
+        };
+        let sql = format!(
+            "SELECT data FROM ledger_usage ORDER BY occurred_at DESC, id DESC LIMIT {limit}"
+        );
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })?
+        .iter()
+        .map(|data| Self::decode(data))
+        .collect()
+    }
+
+    async fn retain_ledger(&self, days: i64) -> Result<(), RepositoryError> {
+        let cutoff = Self::occurred_at(&(chrono::Utc::now() - chrono::Duration::days(days.max(0))));
+        self.with_conn(|conn| {
+            for table in ["ledger_actions", "ledger_traces", "ledger_usage"] {
+                conn.execute(
+                    &format!("DELETE FROM {table} WHERE occurred_at < ?1"),
+                    rusqlite::params![cutoff],
+                )?;
+            }
+            Ok(())
+        })
+    }
 }
 
+/// The wrapper row for `ledger_traces`, whose extracted columns live beside
+/// the serialized record (the actions table keeps its columns flat instead,
+/// because its filters are flat).
 #[cfg(test)]
 mod tests {
     use argus_domain::{
-        AppliedConfigurationState, ApplyStatus, ApprovalState, BlastRadius, CapabilityDescriptor,
-        CapabilityId, CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment,
-        DecisionOutcome, DomainEvent, EnvironmentId, EventType, ExecutionApproval,
-        ExecutionDecision, HealthStatus, ManagedConfiguration, RefusalReason, ReportBuffer,
-        RiskClass, Severity,
+        ActionEventFilter, ActionEventRecord, AppliedConfigurationState, ApplyStatus,
+        ApprovalState, BlastRadius, BrainTraceRecord, CapabilityDescriptor, CapabilityId,
+        CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment, DecisionOutcome,
+        DomainEvent, EnvironmentId, EventType, ExecutionApproval, ExecutionDecision, HealthStatus,
+        ManagedConfiguration, RefusalReason, ReportBuffer, RiskClass, Severity, TokenUsageRecord,
     };
     use chrono::Utc;
     use semver::Version;
 
     use super::*;
     use crate::DomainRepository;
+
+    fn action_event(outcome: &str, kind: &str, at: chrono::DateTime<Utc>) -> ActionEventRecord {
+        ActionEventRecord {
+            event_id: uuid::Uuid::new_v4(),
+            correlation_id: uuid::Uuid::new_v4(),
+            causation_id: None,
+            cycle_id: None,
+            plan_id: Some(uuid::Uuid::new_v4()),
+            kind: kind.into(),
+            target: Some("nginx.service".into()),
+            args: serde_json::json!({ "unit": "nginx.service", "TOKEN": "raw-stays-local" }),
+            verdict: "allow".into(),
+            policy_id: Some("bootstrap.remediation".into()),
+            outcome: outcome.into(),
+            duration_ms: Some(10),
+            validation: None,
+            occurred_at: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_action_ledger_appends_and_lists_newest_first() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        assert!(
+            repo.list_action_events(&ActionEventFilter::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let old = action_event(
+            "ok",
+            "host.service.restart",
+            Utc::now() - chrono::Duration::hours(2),
+        );
+        let new = action_event("denied", "host.process.signal", Utc::now());
+        repo.put_action_event(&old).await.unwrap();
+        repo.put_action_event(&new).await.unwrap();
+
+        let listed = repo
+            .list_action_events(&ActionEventFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].event_id, new.event_id, "newest first");
+        assert_eq!(
+            listed[0].args["TOKEN"], "raw-stays-local",
+            "local fidelity keeps raw args"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_action_ledger_never_rewrites_an_event_id() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        let mut event = action_event("ok", "host.service.restart", Utc::now());
+        repo.put_action_event(&event).await.unwrap();
+        event.outcome = "failed".into();
+        repo.put_action_event(&event).await.unwrap();
+
+        let listed = repo
+            .list_action_events(&ActionEventFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1, "append-only: the re-put is ignored");
+        assert_eq!(listed[0].outcome, "ok", "the first write stands");
+    }
+
+    #[tokio::test]
+    async fn action_ledger_filters_narrow_by_kind_status_and_time() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        let denied = action_event("denied", "host.process.signal", Utc::now());
+        let ok = action_event("ok", "host.service.restart", Utc::now());
+        let ancient = action_event(
+            "ok",
+            "host.service.restart",
+            Utc::now() - chrono::Duration::days(3),
+        );
+        for event in [&denied, &ok, &ancient] {
+            repo.put_action_event(event).await.unwrap();
+        }
+
+        let by_status = repo
+            .list_action_events(&ActionEventFilter {
+                status: Some("denied".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_status.len(), 1);
+        assert_eq!(by_status[0].event_id, denied.event_id);
+
+        let by_kind = repo
+            .list_action_events(&ActionEventFilter {
+                kind: Some("host.service.restart".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_kind.len(), 2);
+
+        let recent = repo
+            .list_action_events(&ActionEventFilter {
+                since: Some(Utc::now() - chrono::Duration::hours(1)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(recent.len(), 2, "the ancient row is out of the window");
+    }
+
+    #[tokio::test]
+    async fn traces_and_usage_round_trip_and_narrow_by_cycle() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        let cycle = uuid::Uuid::new_v4();
+        let trace = BrainTraceRecord {
+            trace_id: uuid::Uuid::new_v4(),
+            cycle_id: Some(cycle),
+            plan_id: Some(uuid::Uuid::new_v4()),
+            evidence: vec!["unit: nginx.service failed".into()],
+            decision: Some("provider decision passed the gate".into()),
+            objective: Some("restore nginx".into()),
+            steps: vec!["host.service.restart".into()],
+            outcome: Some("Completed".into()),
+            occurred_at: Utc::now(),
+        };
+        repo.put_brain_trace(&trace).await.unwrap();
+        let other = BrainTraceRecord {
+            trace_id: uuid::Uuid::new_v4(),
+            cycle_id: None,
+            ..trace.clone()
+        };
+        repo.put_brain_trace(&other).await.unwrap();
+
+        let for_cycle = repo.list_brain_traces(Some(cycle), 10).await.unwrap();
+        assert_eq!(for_cycle.len(), 1);
+        assert_eq!(for_cycle[0], trace);
+        assert_eq!(repo.list_brain_traces(None, 10).await.unwrap().len(), 2);
+
+        let usage = TokenUsageRecord {
+            cycle_id: Some(cycle),
+            model: Some("deepseek-chat".into()),
+            prompt_tokens: Some(120),
+            completion_tokens: None,
+            total_tokens: None,
+            duration_ms: Some(640),
+            occurred_at: Utc::now(),
+        };
+        repo.put_token_usage(&usage).await.unwrap();
+        let listed = repo.list_token_usage(10).await.unwrap();
+        assert_eq!(listed, vec![usage]);
+        assert!(
+            listed[0].completion_tokens.is_none(),
+            "a missing provider usage block stays unknown, never zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn retaining_the_ledger_drops_only_old_rows() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        let old = action_event(
+            "ok",
+            "host.service.restart",
+            Utc::now() - chrono::Duration::days(40),
+        );
+        let new = action_event("ok", "host.service.restart", Utc::now());
+        repo.put_action_event(&old).await.unwrap();
+        repo.put_action_event(&new).await.unwrap();
+        repo.put_token_usage(&TokenUsageRecord {
+            cycle_id: None,
+            model: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            duration_ms: None,
+            occurred_at: Utc::now() - chrono::Duration::days(40),
+        })
+        .await
+        .unwrap();
+
+        repo.retain_ledger(30).await.unwrap();
+
+        let listed = repo
+            .list_action_events(&ActionEventFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].event_id, new.event_id);
+        assert!(repo.list_token_usage(10).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn environment_round_trip() {

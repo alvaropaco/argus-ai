@@ -63,7 +63,10 @@ fn envelope_uses_the_type_field_name_the_cloud_expects() {
     let value = serde_json::to_value(&envelope).unwrap();
     assert!(value.get("type").is_some(), "cloud reads `type`");
     assert!(value.get("message_type").is_none());
-    assert_eq!(value["protocol_version"], "1.0.0");
+    assert_eq!(
+        value["protocol_version"],
+        argus_cloud::protocol::version::PROTOCOL_VERSION
+    );
 }
 
 #[test]
@@ -313,7 +316,7 @@ fn telemetry_bound_is_the_documented_value() {
 
 #[test]
 fn version_negotiation_uses_the_supported_set() {
-    assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &["1.0.0"]);
+    assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &["1.1.0", "1.0.0"]);
     assert!(negotiate(&["1.0.0".to_string()]).is_some());
     assert!(negotiate(&["9.9.9".to_string()]).is_none());
 }

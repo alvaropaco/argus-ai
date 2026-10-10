@@ -161,6 +161,7 @@ mod tests {
         };
         let resp = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::new(),
         };
         assert!(validate_response(&req, &resp).is_err());
@@ -181,6 +182,7 @@ mod tests {
         };
         let resp = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::from([(
                 "q".into(),
                 DecisionAnswer::Choice {
@@ -208,6 +210,7 @@ mod tests {
         };
         let resp = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::from([(
                 "q".into(),
                 DecisionAnswer::Choice {

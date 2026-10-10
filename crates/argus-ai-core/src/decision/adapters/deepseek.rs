@@ -133,12 +133,33 @@ description}}. Output ONLY the JSON object.";
             })?;
         let answers: Value = serde_json::from_str(content)
             .map_err(|e| DecisionError::Invalid(format!("model output is not JSON: {e}")))?;
-        let response = map_answers(&answers, request)?;
+        let mapped = map_answers(&answers, request)?;
+        // The usage block is metering, not authority: parse it when present,
+        // leave it unknown when absent — never zero, never estimated (FR-003).
+        let usage = parse_usage(payload.get("usage"));
         Ok(DecisionResponse {
             model: Some(model.to_string()),
-            answers: response,
+            answers: mapped,
+            usage,
         })
     }
+}
+
+/// Parses an OpenAI-compatible `usage` object. A missing or empty block is
+/// `None` — the caller records the call's usage as unknown (spec 007 FR-003).
+pub(crate) fn parse_usage(block: Option<&Value>) -> Option<crate::decision::types::TokenUsage> {
+    let block = block?;
+    let prompt_tokens = block.get("prompt_tokens").and_then(Value::as_u64);
+    let completion_tokens = block.get("completion_tokens").and_then(Value::as_u64);
+    let total_tokens = block.get("total_tokens").and_then(Value::as_u64);
+    if prompt_tokens.is_none() && completion_tokens.is_none() && total_tokens.is_none() {
+        return None;
+    }
+    Some(crate::decision::types::TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    })
 }
 
 #[async_trait]
@@ -362,6 +383,24 @@ mod tests {
             }
         });
         assert!(map_answers(&bad, &request()).is_err());
+    }
+
+    #[test]
+    fn the_usage_block_is_parsed_when_present_and_unknown_when_absent() {
+        let payload = json!({
+            "choices": [],
+            "usage": { "prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165 }
+        });
+        let usage = parse_usage(payload.get("usage")).expect("usage present");
+        assert_eq!(usage.prompt_tokens, Some(120));
+        assert_eq!(usage.completion_tokens, Some(45));
+        assert_eq!(usage.total_tokens, Some(165));
+
+        // DeepSeek may omit the block entirely: unknown, never zero (FR-003).
+        let bare = json!({ "choices": [] });
+        assert!(parse_usage(bare.get("usage")).is_none());
+        let empty = json!({ "usage": {} });
+        assert!(parse_usage(empty.get("usage")).is_none());
     }
 
     #[test]

@@ -55,6 +55,19 @@ pub const MAX_CAPABILITY_ID_LEN: usize = 200;
 /// Maximum schema/policy/field name length used by the cloud's schemas.
 pub const MAX_SHORT_TEXT_LEN: usize = 200;
 
+// --- Ledger bounds (spec 007, contract §3) ---
+
+/// Maximum length of a ledger action's capability id.
+pub const MAX_LEDGER_KIND_LEN: usize = MAX_CAPABILITY_ID_LEN;
+/// Maximum length of a ledger action's target.
+pub const MAX_LEDGER_TARGET_LEN: usize = 500;
+/// Maximum length of one ledger free-text field (decision, objective, step).
+pub const MAX_LEDGER_TEXT_LEN: usize = 2000;
+/// Maximum evidence references per trace.
+pub const MAX_LEDGER_EVIDENCE: usize = 50;
+/// Maximum summarized steps per trace.
+pub const MAX_LEDGER_STEPS: usize = 50;
+
 // --- Cloud → installation ---
 
 /// `handshake.hello`: sent by the cloud on connect.
@@ -381,6 +394,96 @@ pub struct ApprovalDecisionPayload {
     /// `grant` or `deny`.
     pub decision: String,
     pub decided_by: String,
+}
+
+// --- Ledger payloads (spec 007 FR-005) ---
+//
+// The redacted, bounded projections of the local ledger records. Raw
+// arguments never appear here: the daemon redacts before building these
+// payloads (FR-004), and a redaction error drops the field rather than
+// uploading it raw.
+
+/// `action.event`: one execution attempt at the boundary, any verdict.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionEventPayload {
+    pub event_id: Uuid,
+    pub correlation_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<Uuid>,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The redacted argument summary; absent when nothing survives redaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Map<String, Value>>,
+    /// `allow` | `deny` | `requires_approval`.
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+    /// `ok` | `failed` | `rolled_back` | `denied` | `awaiting_approval`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<Value>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// `brain.trace`: one bounded cycle trace — evidence referenced by summary,
+/// never full payloads (FR-002).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrainTracePayload {
+    pub trace_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<Uuid>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Traces coalesced out of the buffer before this one under backpressure
+    /// (FR-005): loss is counted, never hidden.
+    #[serde(default)]
+    pub coalesced_before: u64,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// `token.usage`: one provider call's metering, or a rolling batch over the
+/// same `(cycle_id, model)` pair under backpressure (FR-003, FR-005). Missing
+/// counts stay absent — unknown, never zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenUsagePayload {
+    pub usage_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    /// Calls batched into this record (1 for a single call).
+    pub calls: u32,
+    /// Calls whose provider usage was absent — the unknowns this record stands
+    /// for, so "unknown" is visible rather than silently zero.
+    #[serde(default)]
+    pub unknown_usage: u32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    pub occurred_at: DateTime<Utc>,
 }
 
 /// `approval.result` (daemon → cloud): what the decision did.

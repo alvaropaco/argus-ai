@@ -257,6 +257,7 @@ mod tests {
     fn propose_plan_gates_on_confidence() {
         let high = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::from([("q".to_string(), DecisionAnswer::Noul { noul: 0.95 })]),
         };
         let action = argus_domain::Action {
@@ -274,6 +275,7 @@ mod tests {
 
         let low = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::from([("q".to_string(), DecisionAnswer::Noul { noul: 0.5 })]),
         };
         assert!(propose_plan(&low, 0.8, "restore nginx", vec![step]).is_none());

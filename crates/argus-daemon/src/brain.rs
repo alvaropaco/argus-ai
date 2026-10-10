@@ -15,12 +15,14 @@ use tokio::time::Duration;
 
 use argus_ai_core::decision::adapters::{DeepSeekProvider, LayaHttpProvider};
 use argus_ai_core::decision::provider::DecisionProvider;
-use argus_domain::ResourceId;
+use argus_domain::{BrainTraceRecord, ResourceId, TokenUsageRecord};
 use argus_memory::{Episode, EpisodeOutcome, ProcedureRecord, ProcedureStatus};
 use uuid::Uuid;
 
 use crate::config::{BrainConfig, DaemonConfig};
+use crate::ledger::DaemonLedger;
 use crate::runtime::Daemon;
+use argus_events::LedgerSink;
 
 /// Builds the daemon's decision provider from the `[model]` config and the
 /// secret store (FR-002). Returns `None` — observe-only — when no provider
@@ -79,6 +81,8 @@ pub fn build_provider(
 /// and the sentinel's brain fields.
 #[derive(Debug, Clone, Default)]
 pub struct BrainCycle {
+    /// The cycle's id (spec 007 FR-002).
+    pub cycle_id: Option<Uuid>,
     /// The evidence keys the cycle gathered (e.g. `unit:<name> state=failed`).
     pub evidence: Vec<String>,
     /// Whether a provider was available to reason with.
@@ -87,8 +91,54 @@ pub struct BrainCycle {
     pub decision: Option<String>,
     /// The plan the brain proposed, when the decision passed the gates.
     pub plan_objective: Option<String>,
+    /// The plan's step capabilities, so the cycle trace carries the step list
+    /// (FR-002) without re-reading the plan.
+    pub steps: Vec<String>,
     /// The plan's terminal status, when it ran.
     pub outcome: Option<String>,
+}
+
+/// Wraps the configured provider so every call is metered (spec 007 FR-003):
+/// the response's `usage` becomes a [`TokenUsageRecord`] correlated to the
+/// open cycle, the model, and the measured duration. A response without a
+/// usage block is recorded as unknown — never zero, never estimated.
+struct MeteredProvider {
+    inner: Arc<dyn DecisionProvider>,
+    ledger: Arc<DaemonLedger>,
+}
+
+impl MeteredProvider {
+    fn new(inner: Arc<dyn DecisionProvider>, ledger: Arc<DaemonLedger>) -> Arc<Self> {
+        Arc::new(Self { inner, ledger })
+    }
+}
+
+#[async_trait::async_trait]
+impl DecisionProvider for MeteredProvider {
+    async fn decide(
+        &self,
+        request: argus_ai_core::decision::types::DecisionRequest,
+    ) -> Result<
+        argus_ai_core::decision::types::DecisionResponse,
+        argus_ai_core::decision::error::DecisionError,
+    > {
+        let started = std::time::Instant::now();
+        let result = self.inner.decide(request).await;
+        if let Ok(response) = &result {
+            let usage = response.usage;
+            let record = TokenUsageRecord {
+                cycle_id: None, // stamped by the ledger's open cycle context
+                model: response.model.clone(),
+                prompt_tokens: usage.and_then(|u| u.prompt_tokens),
+                completion_tokens: usage.and_then(|u| u.completion_tokens),
+                total_tokens: usage.and_then(|u| u.total_tokens),
+                duration_ms: Some(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+                occurred_at: Utc::now(),
+            };
+            self.ledger.record_usage(record).await;
+        }
+        result
+    }
 }
 
 /// Runs one full brain cycle (FR-003) and records its memory. Used by both
@@ -107,6 +157,44 @@ pub async fn cycle_with_evidence(
     brain: &BrainConfig,
     subjects: Vec<(String, String)>,
 ) -> BrainCycle {
+    // Spec 007 FR-002: every cycle carries an id, minted at entry, that its
+    // trace, usage records, and action events share.
+    let cycle_id = Uuid::new_v4();
+    let ledger = daemon.ledger();
+    ledger.enter_cycle(cycle_id).await;
+    let record = run_cycle(daemon, brain, subjects, cycle_id).await;
+    let plan_ids = ledger.exit_cycle(cycle_id).await;
+
+    // One bounded trace per cycle (FR-002): evidence referenced by summary,
+    // the decision, the plan objective, and the outcome — linked to the
+    // actions it caused through the plan id the run observed.
+    ledger
+        .record_trace(BrainTraceRecord {
+            trace_id: Uuid::new_v4(),
+            cycle_id: Some(cycle_id),
+            plan_id: plan_ids.first().copied(),
+            evidence: record.evidence.clone(),
+            decision: record.decision.clone(),
+            objective: record.plan_objective.clone(),
+            steps: record.steps.clone(),
+            outcome: record.outcome.clone(),
+            occurred_at: Utc::now(),
+        })
+        .await;
+    BrainCycle {
+        cycle_id: Some(cycle_id),
+        ..record
+    }
+}
+
+/// The cycle body, bracketed by the caller's cycle context.
+async fn run_cycle(
+    daemon: &Daemon,
+    brain: &BrainConfig,
+    subjects: Vec<(String, String)>,
+    cycle_id: Uuid,
+) -> BrainCycle {
+    let _ = cycle_id; // carried by the ledger context; kept for traceability
     let mut record = BrainCycle::default();
     let mut evidence = argus_ai_core::decision::context::ContextBuilder::new();
     let host = ResourceId::new("host", "local").expect("valid host resource id");
@@ -131,13 +219,21 @@ pub async fn cycle_with_evidence(
     };
     let events = argus_events::LocalEventBus::new(16);
     let threshold = brain.confidence_threshold;
+    // The provider is metered (spec 007 FR-003): every call lands a usage
+    // record correlated to this cycle through the ledger context.
+    let metered = MeteredProvider::new(provider.clone(), daemon.ledger());
     match daemon
-        .propose_once(provider.as_ref(), evidence, threshold, &events)
+        .propose_once(metered.as_ref(), evidence, threshold, &events)
         .await
     {
         Ok(Some((plan, dedup_key))) => {
             record.decision = Some("provider decision passed the confidence gate".into());
             record.plan_objective = Some(plan.objective.clone());
+            record.steps = plan
+                .steps
+                .iter()
+                .map(|step| step.action.capability.as_str().to_string())
+                .collect();
             // Persist the reasoning history so `plan.list` shows the brain's
             // work (FR-008).
             let correlation = uuid::Uuid::new_v4();
@@ -294,6 +390,7 @@ pub fn spawn(
             match outcome {
                 Ok(record) => {
                     state.record(crate::brain_state::BrainCycleRecord {
+                        cycle_id: record.cycle_id,
                         evidence: record.evidence.clone(),
                         provider_available: record.provider_available,
                         decision: record.decision.clone(),

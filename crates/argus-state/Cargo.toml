@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
 argus-domain = { workspace = true }
 argus-memory = { workspace = true }
 

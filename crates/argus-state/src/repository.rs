@@ -1,9 +1,10 @@
 //! The repository abstraction for operational state.
 
 use argus_domain::{
-    AppliedConfigurationState, CapabilityPublication, CloudCommand, CloudConnection,
-    CloudEnrollment, DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision,
-    HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer,
+    ActionEventFilter, ActionEventRecord, AppliedConfigurationState, BrainTraceRecord,
+    CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment, DomainEvent,
+    EnvironmentId, Execution, ExecutionApproval, ExecutionDecision, HealthStatus, Hypothesis,
+    ManagedConfiguration, Observation, Plan, ReportBuffer, TokenUsageRecord,
 };
 use argus_memory::{Episode, Fact, ProcedureRecord};
 use async_trait::async_trait;
@@ -270,6 +271,54 @@ pub trait DomainRepository: Send + Sync {
     async fn get_report_buffer(&self) -> Result<Option<ReportBuffer>, RepositoryError> {
         Err(cloud_state_unsupported("get_report_buffer"))
     }
+
+    // --- Action ledger (spec 007): the local source of truth ---
+
+    /// Appends one execution attempt at full local fidelity (FR-001).
+    /// Append-only: re-putting an event id is a no-op, never a rewrite.
+    async fn put_action_event(&self, _event: &ActionEventRecord) -> Result<(), RepositoryError> {
+        Err(ledger_unsupported("put_action_event"))
+    }
+
+    /// Ledger rows newest-first, narrowed by the filter (`since`/`kind`/`status`).
+    async fn list_action_events(
+        &self,
+        _filter: &ActionEventFilter,
+    ) -> Result<Vec<ActionEventRecord>, RepositoryError> {
+        Err(ledger_unsupported("list_action_events"))
+    }
+
+    /// Appends one bounded trace (FR-002). Append-only on `trace_id`.
+    async fn put_brain_trace(&self, _trace: &BrainTraceRecord) -> Result<(), RepositoryError> {
+        Err(ledger_unsupported("put_brain_trace"))
+    }
+
+    /// Traces newest-first, optionally narrowed to one cycle.
+    async fn list_brain_traces(
+        &self,
+        _cycle_id: Option<Uuid>,
+        _limit: usize,
+    ) -> Result<Vec<BrainTraceRecord>, RepositoryError> {
+        Err(ledger_unsupported("list_brain_traces"))
+    }
+
+    /// Appends one token-usage record (FR-003). Missing counts are unknown.
+    async fn put_token_usage(&self, _usage: &TokenUsageRecord) -> Result<(), RepositoryError> {
+        Err(ledger_unsupported("put_token_usage"))
+    }
+
+    /// Usage records newest-first, up to `limit`.
+    async fn list_token_usage(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<TokenUsageRecord>, RepositoryError> {
+        Err(ledger_unsupported("list_token_usage"))
+    }
+
+    /// Bounded growth (spec 007 NFR): drops ledger rows older than `days`.
+    async fn retain_ledger(&self, _days: i64) -> Result<(), RepositoryError> {
+        Err(ledger_unsupported("retain_ledger"))
+    }
 }
 
 const CLOUD_STATE: &str = "cloud state";
@@ -298,5 +347,14 @@ fn reasoning_unsupported(operation: &'static str) -> RepositoryError {
 fn memory_unsupported(operation: &'static str) -> RepositoryError {
     RepositoryError::Unavailable(format!(
         "memory state is not supported by this backend (operation: {operation})"
+    ))
+}
+
+/// The action ledger (spec 007) follows the same rule: a backend that cannot
+/// persist it must say so — a silently dropped ledger row would be an audit
+/// hole an operator is entitled to know about.
+fn ledger_unsupported(operation: &'static str) -> RepositoryError {
+    RepositoryError::Unavailable(format!(
+        "action ledger is not supported by this backend (operation: {operation})"
     ))
 }

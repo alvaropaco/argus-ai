@@ -14,6 +14,9 @@ use argus_domain::AutonomyMode;
 /// `sentinel.report`'s `last_cycle` field.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BrainCycleRecord {
+    /// The cycle's id (spec 007): the correlation every trace, usage record,
+    /// and action of this cycle carries.
+    pub cycle_id: Option<uuid::Uuid>,
     pub evidence: Vec<String>,
     pub provider_available: bool,
     pub decision: Option<String>,
@@ -183,6 +186,7 @@ mod tests {
         let state = BrainState::default();
         assert!(state.last_cycle().is_none());
         state.record(BrainCycleRecord {
+            cycle_id: Some(uuid::Uuid::new_v4()),
             evidence: vec!["unit: failed".into()],
             provider_available: true,
             decision: Some("decided".into()),

@@ -3,7 +3,9 @@
 use std::sync::Mutex;
 
 use argus_domain::{
+    ActionEventFilter, ActionEventRecord, BrainTraceRecord, DEFAULT_ACTION_EVENT_LIMIT,
     DomainEvent, EnvironmentId, Execution, HealthStatus, Hypothesis, Observation, Plan,
+    TokenUsageRecord,
 };
 use async_trait::async_trait;
 
@@ -21,6 +23,10 @@ struct Inner {
     episodes: Vec<(uuid::Uuid, argus_memory::Episode)>,
     facts: Vec<argus_memory::Fact>,
     procedures: Vec<(uuid::Uuid, argus_memory::ProcedureRecord)>,
+    /// The action ledger (spec 007): append-only, insertion order.
+    action_events: Vec<ActionEventRecord>,
+    brain_traces: Vec<BrainTraceRecord>,
+    token_usage: Vec<TokenUsageRecord>,
 }
 
 /// A [`DomainRepository`] backed by process memory. Deterministic and
@@ -249,6 +255,138 @@ impl DomainRepository for InMemoryRepository {
             .health
             .clone())
     }
+
+    async fn put_action_event(&self, event: &ActionEventRecord) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        // Append-only: an id already present is left as first written.
+        if !inner
+            .action_events
+            .iter()
+            .any(|e| e.event_id == event.event_id)
+        {
+            inner.action_events.push(event.clone());
+        }
+        Ok(())
+    }
+
+    async fn list_action_events(
+        &self,
+        filter: &ActionEventFilter,
+    ) -> Result<Vec<ActionEventRecord>, RepositoryError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        let limit = if filter.limit == 0 {
+            DEFAULT_ACTION_EVENT_LIMIT
+        } else {
+            filter.limit
+        };
+        let mut rows: Vec<ActionEventRecord> = inner
+            .action_events
+            .iter()
+            .filter(|event| match &filter.since {
+                Some(since) => event.occurred_at >= *since,
+                None => true,
+            })
+            .filter(|event| match &filter.kind {
+                Some(kind) => &event.kind == kind,
+                None => true,
+            })
+            .filter(|event| match &filter.status {
+                Some(status) => &event.outcome == status,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        // Newest first, mirroring the SQLite ordering.
+        rows.sort_by_key(|row| std::cmp::Reverse(row.occurred_at));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn put_brain_trace(&self, trace: &BrainTraceRecord) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        if !inner
+            .brain_traces
+            .iter()
+            .any(|t| t.trace_id == trace.trace_id)
+        {
+            inner.brain_traces.push(trace.clone());
+        }
+        Ok(())
+    }
+
+    async fn list_brain_traces(
+        &self,
+        cycle_id: Option<uuid::Uuid>,
+        limit: usize,
+    ) -> Result<Vec<BrainTraceRecord>, RepositoryError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        let limit = if limit == 0 {
+            DEFAULT_ACTION_EVENT_LIMIT
+        } else {
+            limit
+        };
+        let mut rows: Vec<BrainTraceRecord> = inner
+            .brain_traces
+            .iter()
+            .filter(|trace| trace.cycle_id == cycle_id || cycle_id.is_none())
+            .cloned()
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.occurred_at));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn put_token_usage(&self, usage: &TokenUsageRecord) -> Result<(), RepositoryError> {
+        self.inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .token_usage
+            .push(usage.clone());
+        Ok(())
+    }
+
+    async fn list_token_usage(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TokenUsageRecord>, RepositoryError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        let limit = if limit == 0 {
+            DEFAULT_ACTION_EVENT_LIMIT
+        } else {
+            limit
+        };
+        let mut rows = inner.token_usage.clone();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.occurred_at));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn retain_ledger(&self, days: i64) -> Result<(), RepositoryError> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days.max(0));
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        inner.action_events.retain(|e| e.occurred_at >= cutoff);
+        inner.brain_traces.retain(|t| t.occurred_at >= cutoff);
+        inner.token_usage.retain(|u| u.occurred_at >= cutoff);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +508,89 @@ mod tests {
         assert_eq!(
             repo.list_executions().await.unwrap(),
             vec![(first, execution)]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ledger_round_trips_append_only() {
+        use argus_domain::{
+            ActionEventFilter, ActionEventRecord, BrainTraceRecord, TokenUsageRecord,
+        };
+
+        let repo = InMemoryRepository::new();
+        let event = ActionEventRecord {
+            event_id: uuid::Uuid::new_v4(),
+            correlation_id: uuid::Uuid::new_v4(),
+            causation_id: None,
+            cycle_id: None,
+            plan_id: Some(uuid::Uuid::new_v4()),
+            kind: "host.service.restart".into(),
+            target: Some("nginx.service".into()),
+            args: serde_json::json!({ "unit": "nginx.service" }),
+            verdict: "allow".into(),
+            policy_id: None,
+            outcome: "ok".into(),
+            duration_ms: Some(5),
+            validation: None,
+            occurred_at: chrono::Utc::now(),
+        };
+        repo.put_action_event(&event).await.unwrap();
+        repo.put_action_event(&event).await.unwrap();
+        let listed = repo
+            .list_action_events(&ActionEventFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            listed,
+            vec![event.clone()],
+            "append-only: one row per event id"
+        );
+
+        let by_status = repo
+            .list_action_events(&ActionEventFilter {
+                status: Some("denied".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(by_status.is_empty(), "the status filter narrows");
+
+        let trace = BrainTraceRecord {
+            trace_id: uuid::Uuid::new_v4(),
+            cycle_id: Some(uuid::Uuid::new_v4()),
+            plan_id: None,
+            evidence: vec![],
+            decision: None,
+            objective: Some("restore nginx".into()),
+            steps: vec![],
+            outcome: Some("Completed".into()),
+            occurred_at: chrono::Utc::now(),
+        };
+        repo.put_brain_trace(&trace).await.unwrap();
+        assert_eq!(
+            repo.list_brain_traces(trace.cycle_id, 10).await.unwrap(),
+            vec![trace]
+        );
+
+        let usage = TokenUsageRecord {
+            cycle_id: None,
+            model: Some("deepseek-chat".into()),
+            prompt_tokens: Some(10),
+            completion_tokens: None,
+            total_tokens: None,
+            duration_ms: Some(100),
+            occurred_at: chrono::Utc::now(),
+        };
+        repo.put_token_usage(&usage).await.unwrap();
+        assert_eq!(repo.list_token_usage(10).await.unwrap(), vec![usage]);
+
+        repo.retain_ledger(30).await.unwrap();
+        assert!(
+            !repo
+                .list_action_events(&ActionEventFilter::default())
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -294,6 +294,7 @@ mod tests {
     fn decided_outcome() -> DecisionOutcome {
         DecisionOutcome::Decided(DecisionResponse {
             model: Some("laya-en".to_string()),
+            usage: None,
             answers: BTreeMap::from([(
                 "remediation".to_string(),
                 DecisionAnswer::Choice {
@@ -381,6 +382,7 @@ host:a unit = "nginx.service""#;
     fn decided_outcome_with_no_answers_is_nothing_to_explain() {
         let empty = DecisionOutcome::Decided(DecisionResponse {
             model: Some("laya-en".to_string()),
+            usage: None,
             answers: BTreeMap::new(),
         });
         assert_eq!(explain_decision(&empty, &provenance()), NOTHING_TO_EXPLAIN);
@@ -422,6 +424,7 @@ host:a unit = "nginx.service""#;
 
         let first = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::from([
                 ("first".to_string(), DecisionAnswer::Noul { noul: 0.9 }),
                 ("second".to_string(), DecisionAnswer::Noul { noul: 0.8 }),
@@ -429,6 +432,7 @@ host:a unit = "nginx.service""#;
         };
         let second = DecisionResponse {
             model: None,
+            usage: None,
             answers: BTreeMap::from([
                 ("second".to_string(), DecisionAnswer::Noul { noul: 0.8 }),
                 ("first".to_string(), DecisionAnswer::Noul { noul: 0.9 }),

@@ -151,6 +151,7 @@ fn map_response(body: &Value) -> Result<DecisionResponse, DecisionError> {
 
     Ok(DecisionResponse {
         model,
+        usage: None,
         answers: mapped,
     })
 }
