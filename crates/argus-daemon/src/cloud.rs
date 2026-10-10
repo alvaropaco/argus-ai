@@ -921,6 +921,7 @@ fn json_to_toml(value: &serde_json::Value) -> Result<toml::Value, String> {
 /// untouched (FR-028, FR-036).
 async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, frame: &Envelope) {
     let correlation = frame.correlation_id.or(Some(frame.message_id));
+    tracing::info!(kind = ?frame.payload.get("kind"), version = ?frame.payload.get("version_number"), "config.apply received");
 
     let Ok(payload) = serde_json::from_value::<ConfigApplyPayload>(frame.payload.clone()) else {
         reply_config_result(
@@ -1202,6 +1203,7 @@ async fn apply_runbook_delivery(
             .await;
         }
         Err(reason) => {
+            tracing::warn!(runbook_delivery = %reason, "runbook delivery refused");
             reply_config_result(
                 transport,
                 correlation,
