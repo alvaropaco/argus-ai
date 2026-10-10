@@ -360,11 +360,19 @@ async fn remember(daemon: &Daemon, record: &BrainCycle, resolved: bool) {
 /// consulted (spec 008's MAP gate); an unavailable systemd neither reads
 /// nor consults.
 async fn failed_units() -> (Vec<(String, String)>, bool) {
-    let Ok(client) = argus_systemd::SystemdClient::connect().await else {
-        return (Vec::new(), false);
+    let client = match argus_systemd::SystemdClient::connect().await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "systemd connect failed; the cycle consults nothing");
+            return (Vec::new(), false);
+        }
     };
-    let Ok(units) = client.list_units().await else {
-        return (Vec::new(), false);
+    let units = match client.list_units().await {
+        Ok(units) => units,
+        Err(error) => {
+            tracing::warn!(%error, "systemd list_units failed; the cycle consults nothing");
+            return (Vec::new(), false);
+        }
     };
     // Sorted by name so the cycle's subject is deterministic no matter what
     // order systemd enumerates units in.
@@ -437,18 +445,16 @@ pub fn spawn(
                         // No live incident source is wired yet; the sentinel
                         // view reports the same zero — never invented.
                         open_critical_incidents: 0,
-                        // The MAP gate wants proof the environment was
-                        // actually observed: a cycle that found nothing to
-                        // reason about (the empty-evidence early return)
-                        // consulted no live state and is not mapping
-                        // evidence — an all-quiet host stays in mapping
-                        // until it has something real to look at.
-                        live_environment: !record.evidence.is_empty(),
+                        // The MAP gate wants proof live state was consulted:
+                        // the systemd read succeeded — a quiet-but-healthy
+                        // host consults (it read the units and found none
+                        // failed); an unavailable bus does not.
+                        live_environment: record.consulted_live,
                         // The typed revocation signature decided at the run
                         // site — never a string match on the outcome.
                         failed_validation: record.validation_failed,
                     };
-                    tracing::info!(
+                    tracing::debug!(
                         clean = signals.clean(),
                         live = signals.live_environment,
                         provider = signals.provider_ready,
