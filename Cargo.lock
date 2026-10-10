@@ -249,6 +249,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml",
@@ -432,6 +433,7 @@ name = "argus-runbooks"
 version = "0.2.0"
 dependencies = [
  "argus-domain",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",
@@ -453,6 +455,7 @@ version = "0.2.0"
 dependencies = [
  "argus-domain",
  "argus-memory",
+ "argus-runbooks",
  "async-trait",
  "chrono",
  "futures",
