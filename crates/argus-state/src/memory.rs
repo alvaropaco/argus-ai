@@ -3,9 +3,9 @@
 use std::sync::Mutex;
 
 use argus_domain::{
-    ActionEventFilter, ActionEventRecord, BrainTraceRecord, DEFAULT_ACTION_EVENT_LIMIT,
-    DomainEvent, EnvironmentId, Execution, HealthStatus, Hypothesis, Observation, Plan,
-    TokenUsageRecord,
+    ActionEventFilter, ActionEventRecord, AutonomyState, BrainTraceRecord,
+    DEFAULT_ACTION_EVENT_LIMIT, DomainEvent, EnvironmentId, Execution, HealthStatus, Hypothesis,
+    Observation, Plan, TokenUsageRecord,
 };
 use async_trait::async_trait;
 
@@ -27,6 +27,9 @@ struct Inner {
     action_events: Vec<ActionEventRecord>,
     brain_traces: Vec<BrainTraceRecord>,
     token_usage: Vec<TokenUsageRecord>,
+    /// The graduated-autonomy state (spec 008): one row per environment,
+    /// re-put supersedes.
+    autonomy: Option<AutonomyState>,
 }
 
 /// A [`DomainRepository`] backed by process memory. Deterministic and
@@ -387,6 +390,23 @@ impl DomainRepository for InMemoryRepository {
         inner.token_usage.retain(|u| u.occurred_at >= cutoff);
         Ok(())
     }
+
+    async fn put_autonomy_state(&self, state: &AutonomyState) -> Result<(), RepositoryError> {
+        self.inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .autonomy = Some(state.clone());
+        Ok(())
+    }
+
+    async fn get_autonomy_state(&self) -> Result<Option<AutonomyState>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .autonomy
+            .clone())
+    }
 }
 
 #[cfg(test)]
@@ -591,6 +611,28 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_autonomy_state_supersedes_its_row() {
+        let repo = InMemoryRepository::new();
+        assert_eq!(repo.get_autonomy_state().await.unwrap(), None);
+
+        let mut state = argus_domain::AutonomyState::fresh(EnvironmentId::new(), Utc::now());
+        repo.put_autonomy_state(&state).await.unwrap();
+        assert_eq!(
+            repo.get_autonomy_state().await.unwrap(),
+            Some(state.clone())
+        );
+
+        state.earned = argus_domain::AutonomyMode::L2Recommend;
+        state.rung_clean_cycles = 3;
+        repo.put_autonomy_state(&state).await.unwrap();
+        assert_eq!(
+            repo.get_autonomy_state().await.unwrap(),
+            Some(state),
+            "one row per environment: the re-put supersedes"
         );
     }
 }

@@ -110,6 +110,10 @@ pub struct Daemon {
     /// The action ledger (spec 007): every execution attempt, trace, and
     /// usage record flows through it — local first, upload optional.
     ledger: Arc<crate::ledger::DaemonLedger>,
+    /// The graduated-autonomy machine (spec 008): the persisted assimilation
+    /// state, the earned rung, and the blast-radius budget. The brain loop
+    /// ticks it; `run_plan` consumes its budget gate and effective level.
+    autonomy: Arc<crate::autonomy::AutonomyManager>,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -332,6 +336,16 @@ impl Daemon {
             config.ledger.upload_enabled,
             config.ledger.retention_days,
         );
+        // The assimilation machine (spec 008): persisted state resumes where
+        // the daemon left off; corrupt/absent/foreign state re-assimilates
+        // from `mapping` at L0 — the fail-closed readings.
+        let autonomy = crate::autonomy::AutonomyManager::load(
+            environment_id,
+            config.autonomy.clone(),
+            Arc::clone(&repository),
+            Arc::clone(&ledger),
+        )
+        .await;
         let (cluster, kubernetes_executor) = connect_cluster(&config);
         let decision_provider = crate::brain::build_provider(&config, &secret_store);
         let runbooks = load_runbooks(&config);
@@ -389,6 +403,7 @@ impl Daemon {
             brain_state,
             brain_control,
             ledger,
+            autonomy,
         })
     }
 
@@ -748,6 +763,23 @@ impl Daemon {
             // after execution — a failed validation.
             self.selfobs.record_failed_validation();
         }
+        // Spec 008 FR-003: a failed validation is a revocation signature —
+        // the earned rung pays one rung at the plan-terminal site (a no-op
+        // at L0, so the demotion never walks below the floor). Anything the
+        // daemon could not cleanly undo counts: rolled back, or a rollback
+        // that failed into NeedsManual. Otherwise the run's completed
+        // executions are the validated evidence the rung gates require
+        // (idle observation alone never climbs the ladder).
+        if argus_domain::is_validation_failure(report.status) {
+            self.autonomy.on_validation_failed().await;
+        } else {
+            let completed = report
+                .executions
+                .iter()
+                .filter(|execution| execution.status == ExecutionStatus::Completed)
+                .count() as u32;
+            self.autonomy.record_validated_executions(completed).await;
+        }
         self.selfobs.record_remediation(succeeded);
         self.selfobs.record_autonomous_action(succeeded);
     }
@@ -781,9 +813,13 @@ impl Daemon {
 
     /// The live sentinel view (spec-004 FR-003): built from real daemon state
     /// only. Risks, predictions, and incidents have no live source wired into
-    /// the daemon yet and render empty — never invented.
+    /// the daemon yet and render empty — never invented. The autonomy line
+    /// (spec 008 FR-005) rides the machine's own view: phase with gate
+    /// progress, earned rung, ceiling, effective, and remaining budgets.
     pub async fn sentinel_snapshot(&self) -> crate::sentinel::SentinelView {
         let executions = self.list_executions().await.unwrap_or_default();
+        let ceiling = self.brain_control.get().autonomy;
+        let autonomy_view = self.autonomy.view(ceiling).await;
         let inputs = crate::sentinel::SentinelInputs {
             autonomy: AutonomyMode::default(),
             environment: crate::sentinel::Environment::Production,
@@ -795,6 +831,7 @@ impl Daemon {
             recent_actions: executions.len() as u32,
             self_health: self.selfobs.snapshot(),
             situation: None,
+            autonomy_view: Some(autonomy_view),
         };
         crate::sentinel::sentinel_evaluate(&inputs, Utc::now()).view
     }
@@ -845,6 +882,23 @@ impl Daemon {
         Arc::clone(&self.ledger)
     }
 
+    /// The graduated-autonomy machine (spec 008): the assimilation state
+    /// machine, the earned rung, and the blast-radius budget gate.
+    pub fn autonomy(&self) -> Arc<crate::autonomy::AutonomyManager> {
+        Arc::clone(&self.autonomy)
+    }
+
+    /// Whether the cloud pairing is alive (spec 008 gate signal): the shared
+    /// connectivity tracker reads connected — degraded counts, because the
+    /// pairing itself is up.
+    pub async fn cloud_paired(&self) -> bool {
+        use argus_domain::CloudConnectivityState;
+        matches!(
+            self.tracker.lock().await.state(),
+            CloudConnectivityState::Connected | CloudConnectivityState::Degraded
+        )
+    }
+
     /// The live Kubernetes cluster bridge, when connected (ADR-0037);
     /// `None` means every k8s capability degrades honestly.
     pub fn cluster(&self) -> Option<Arc<dyn argus_executor::ClusterController>> {
@@ -872,6 +926,7 @@ impl Daemon {
                 .map(|executor| executor as &dyn argus_executor::Executor)
                 .unwrap_or(&NO_KUBERNETES),
             ledger: self.ledger.as_ref(),
+            budget: self.autonomy.as_ref(),
         }
     }
 

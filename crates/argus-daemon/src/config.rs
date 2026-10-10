@@ -40,6 +40,11 @@ pub struct DaemonConfig {
     /// the ledger always on (local) and upload on with bounded retention.
     #[serde(default)]
     pub ledger: LedgerConfig,
+    /// The graduated-autonomy settings (spec 008 FR-006). Absent means the
+    /// defaults: the assimilation machine works below whatever `brain.autonomy`
+    /// ceiling exists — it never raises one.
+    #[serde(default)]
+    pub autonomy: AutonomyConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -58,6 +63,7 @@ impl Default for DaemonConfig {
             brain: BrainConfig::default(),
             kubernetes: KubernetesConfig::default(),
             ledger: LedgerConfig::default(),
+            autonomy: AutonomyConfig::default(),
         }
     }
 }
@@ -93,6 +99,8 @@ pub struct ConfigFile {
     pub kubernetes: Option<KubernetesConfig>,
     #[serde(default)]
     pub ledger: Option<LedgerConfig>,
+    #[serde(default)]
+    pub autonomy: Option<AutonomyConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -240,6 +248,55 @@ impl<'de> Deserialize<'de> for LedgerConfig {
     }
 }
 
+/// Graduated-autonomy settings (`[autonomy]` in argus.toml, spec 008 FR-006).
+///
+/// Absent section → defaults; every knob is clamped, so a typo'd extreme
+/// degrades to the nearest valid bound rather than disabling the gates. The
+/// ceiling semantics and defaults of `brain.autonomy` are unchanged — this
+/// machine works below whatever ceiling exists, it never raises one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AutonomyConfig {
+    /// Completed clean cycles the shadow window requires before the phase
+    /// turns `earned` (default 10, clamped 1–1000).
+    pub shadow_min_cycles: u32,
+    /// Clean cycles required at each rung before the next promotion
+    /// (default 20, clamped 1–10 000).
+    pub rung_clean_cycles: u32,
+    /// The blast-radius budget: anchored windows keyed by risk class and
+    /// scope (spec 008 FR-004), each key clamped ≥1.
+    pub budgets: argus_policy::BudgetLimits,
+}
+
+impl Default for AutonomyConfig {
+    fn default() -> Self {
+        Self {
+            shadow_min_cycles: 10,
+            rung_clean_cycles: 20,
+            budgets: argus_policy::BudgetLimits::default(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AutonomyConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct AutonomyWire {
+            #[serde(default)]
+            shadow_min_cycles: Option<u32>,
+            #[serde(default)]
+            rung_clean_cycles: Option<u32>,
+            #[serde(default)]
+            budgets: Option<argus_policy::BudgetLimits>,
+        }
+        let wire = AutonomyWire::deserialize(deserializer)?;
+        Ok(Self {
+            shadow_min_cycles: wire.shadow_min_cycles.unwrap_or(10).clamp(1, 1000),
+            rung_clean_cycles: wire.rung_clean_cycles.unwrap_or(20).clamp(1, 10_000),
+            budgets: wire.budgets.unwrap_or_default(),
+        })
+    }
+}
+
 /// Precedence is `defaults < file < flags`; flags are applied afterwards by the
 /// caller, which is why only the first two are handled here.
 ///
@@ -341,6 +398,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.ledger {
         config.ledger = value;
+    }
+    if let Some(value) = file.autonomy {
+        config.autonomy = value;
     }
 }
 
@@ -735,6 +795,44 @@ telemetry_interval_seconds = 30
             loaded.config.ledger.retention_days, 1,
             "clamped to the floor"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_autonomy_section_loads_with_defaults_and_clamps() {
+        let dir = temp_dir();
+
+        // Absent section: the defaults — the machine works below whatever
+        // ceiling exists, it never raises one (spec 008 FR-006).
+        let path = write_config(&dir, "argus.toml", "environment_name = \"x\"\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.autonomy, AutonomyConfig::default());
+
+        // Explicit values ride through; the budget keys clamp ≥1.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[autonomy]\nshadow_min_cycles = 3\nrung_clean_cycles = 5\n\n[autonomy.budgets]\nlow_risk_per_hour = 2\ncontrolled_per_day = 0\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.autonomy.shadow_min_cycles, 3);
+        assert_eq!(loaded.config.autonomy.rung_clean_cycles, 5);
+        assert_eq!(loaded.config.autonomy.budgets.low_risk_per_hour, 2);
+        assert_eq!(
+            loaded.config.autonomy.budgets.controlled_per_day, 1,
+            "a zero budget is clamped to the floor — exhaustion pauses, never denies"
+        );
+
+        // Extremes clamp to the documented bounds.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[autonomy]\nshadow_min_cycles = 100_000\nrung_clean_cycles = 0\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.autonomy.shadow_min_cycles, 1000);
+        assert_eq!(loaded.config.autonomy.rung_clean_cycles, 1);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

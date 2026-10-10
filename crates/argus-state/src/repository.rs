@@ -1,10 +1,10 @@
 //! The repository abstraction for operational state.
 
 use argus_domain::{
-    ActionEventFilter, ActionEventRecord, AppliedConfigurationState, BrainTraceRecord,
-    CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment, DomainEvent,
-    EnvironmentId, Execution, ExecutionApproval, ExecutionDecision, HealthStatus, Hypothesis,
-    ManagedConfiguration, Observation, Plan, ReportBuffer, TokenUsageRecord,
+    ActionEventFilter, ActionEventRecord, AppliedConfigurationState, AutonomyState,
+    BrainTraceRecord, CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment,
+    DomainEvent, EnvironmentId, Execution, ExecutionApproval, ExecutionDecision, HealthStatus,
+    Hypothesis, ManagedConfiguration, Observation, Plan, ReportBuffer, TokenUsageRecord,
 };
 use argus_memory::{Episode, Fact, ProcedureRecord};
 use async_trait::async_trait;
@@ -319,6 +319,20 @@ pub trait DomainRepository: Send + Sync {
     async fn retain_ledger(&self, _days: i64) -> Result<(), RepositoryError> {
         Err(ledger_unsupported("retain_ledger"))
     }
+
+    // --- Graduated autonomy (spec 008): the persisted assimilation state ---
+
+    /// Persists the per-environment autonomy state (phase, earned rung, gate
+    /// counters, budget windows — spec 008 FR-001), replacing any previous
+    /// row: one row per environment, re-put is supersede.
+    async fn put_autonomy_state(&self, _state: &AutonomyState) -> Result<(), RepositoryError> {
+        Err(autonomy_unsupported("put_autonomy_state"))
+    }
+
+    /// The persisted autonomy state, or `None` before the first tick.
+    async fn get_autonomy_state(&self) -> Result<Option<AutonomyState>, RepositoryError> {
+        Err(autonomy_unsupported("get_autonomy_state"))
+    }
 }
 
 const CLOUD_STATE: &str = "cloud state";
@@ -356,5 +370,14 @@ fn memory_unsupported(operation: &'static str) -> RepositoryError {
 fn ledger_unsupported(operation: &'static str) -> RepositoryError {
     RepositoryError::Unavailable(format!(
         "action ledger is not supported by this backend (operation: {operation})"
+    ))
+}
+
+/// The graduated-autonomy state (spec 008) follows the same rule: a backend
+/// that cannot persist it must say so — the caller treats the failure as
+/// fail-closed (a fresh `mapping` state at L0), never silently forgets.
+fn autonomy_unsupported(operation: &'static str) -> RepositoryError {
+    RepositoryError::Unavailable(format!(
+        "autonomy state is not supported by this backend (operation: {operation})"
     ))
 }

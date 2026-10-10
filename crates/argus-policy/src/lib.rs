@@ -5,9 +5,10 @@
 //! point for a future Cedar-backed evaluator without coupling domain contracts
 //! to Cedar types (ADR-010).
 
-mod approval;
+pub mod approval;
 mod autopilot;
 mod bootstrap;
+pub mod budget;
 mod escalation;
 
 pub use approval::ApprovalStore;
@@ -16,6 +17,7 @@ pub use autopilot::{
     ResourceAdjustment, ResourceGovernor,
 };
 pub use bootstrap::BootstrapPolicyEvaluator;
+pub use budget::BudgetLimits;
 pub use escalation::{
     Environment, Escalation, EscalationInput, EvidenceQuality, decide_escalation,
 };

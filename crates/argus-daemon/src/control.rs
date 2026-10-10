@@ -23,12 +23,16 @@ use semver::Version;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::autonomy::{BudgetGate, NoopBudget};
+
 /// The remediation ports the control loop executes through (spec 003 M3):
 /// the autopilot governor, the container/cgroup live-state readers, and the
 /// executor boundary for the remediation capabilities. Services keep their
 /// dedicated controller path; everything else routes through `remediation`.
 /// The ledger sink (spec 007) rides here too, so every chokepoint — brain,
-/// CLI, and cloud-approved runs alike — emits through the same port.
+/// CLI, and cloud-approved runs alike — emits through the same port. The
+/// blast-radius budget gate (spec 008) rides beside it: one port per
+/// cross-cutting concern, never a recomputation in the loop.
 pub struct LoopPorts<'a> {
     pub governor: &'a dyn ResourceGovernor,
     pub containers: &'a dyn ContainerController,
@@ -39,6 +43,10 @@ pub struct LoopPorts<'a> {
     /// The action ledger (spec 007 FR-001): every execution attempt, any
     /// verdict, is recorded through it.
     pub ledger: &'a dyn LedgerSink,
+    /// The blast-radius budget (spec 008 FR-004): consulted in the Allow
+    /// branch before the autonomy matrix; exhaustion degrades the step to an
+    /// approval pause.
+    pub budget: &'a dyn BudgetGate,
 }
 
 impl LoopPorts<'_> {
@@ -47,6 +55,7 @@ impl LoopPorts<'_> {
     pub fn noop() -> Self {
         static NO_GOVERNOR: argus_policy::NoGovernor = argus_policy::NoGovernor;
         static NO_LEDGER: argus_events::NoopLedgerSink = argus_events::NoopLedgerSink;
+        static NO_BUDGET: NoopBudget = NoopBudget;
         struct NoController;
         impl ContainerController for NoController {
             fn restart(&self, _id: &str) -> Result<(), argus_executor::RemediationError> {
@@ -103,6 +112,7 @@ impl LoopPorts<'_> {
             remediation: &NO_EXECUTOR,
             kubernetes: &NO_KUBERNETES,
             ledger: &NO_LEDGER,
+            budget: &NO_BUDGET,
         }
     }
 }
@@ -786,7 +796,45 @@ async fn run_plan(
                 }
             }
             PolicyOutcome::Allow => {
+                // Spec 008 FR-004: the blast-radius budget bounds earned
+                // authority, composed *before* the autonomy matrix. An
+                // operator grant is authority the budget does not ration: on
+                // a resumed run the consumed single-use token is exactly
+                // that, so grant-backed steps bypass the reserve entirely —
+                // rationing them would re-pause a granted plan forever.
+                let grant_backed = resumed || decision.policy_id == "plan.approval";
+                let now = Utc::now();
+                if !grant_backed && !ports.budget.reserve(risk, plan.blast_radius, now).await {
+                    tracing::info!(
+                        correlation_id = %correlation,
+                        capability = action.capability.as_str(),
+                        "blast-radius budget exhausted; the plan pauses for approval"
+                    );
+                    outcome.requires_approval.push(action.capability.clone());
+                    ports
+                        .ledger
+                        .record_action(action_event(
+                            action,
+                            correlation,
+                            argus_domain::VERDICT_REQUIRES_APPROVAL,
+                            Some("budget.exhausted".to_string()),
+                            argus_domain::OUTCOME_AWAITING_APPROVAL,
+                            None,
+                            None,
+                        ))
+                        .await;
+                    // Exhaustion is a pause, not a skip: the plan parks on a
+                    // single-use token the operator can grant, and the
+                    // resume re-enters as grant-backed authority (AC-004).
+                    return PlanRun::Paused(pause_plan(plan, &executed));
+                }
+
                 if !may_execute_without_approval(autonomy, risk) {
+                    // The matrix rejected the step, so it never executes:
+                    // surrender the reservation taken above.
+                    if !grant_backed {
+                        ports.budget.refund(risk, plan.blast_radius, now).await;
+                    }
                     outcome.requires_approval.push(action.capability.clone());
                     ports
                         .ledger
@@ -823,6 +871,11 @@ async fn run_plan(
                         capability = action.capability.as_str(),
                         "escalation decision routes the step to a human"
                     );
+                    // The step pauses without executing: the reservation is
+                    // surrendered with it.
+                    if !grant_backed {
+                        ports.budget.refund(risk, plan.blast_radius, now).await;
+                    }
                     outcome.requires_approval.push(action.capability.clone());
                     ports
                         .ledger
@@ -839,7 +892,7 @@ async fn run_plan(
                     return PlanRun::Paused(pause_plan(plan, &executed));
                 }
 
-                if execute_allowed_step(
+                let terminal = execute_allowed_step(
                     &mut outcome,
                     plan,
                     index,
@@ -848,8 +901,21 @@ async fn run_plan(
                     &mut executed,
                     &decision,
                 )
-                .await
-                {
+                .await;
+                // An already-desired no-op executed nothing — zero blast
+                // radius, nothing to bound — so its reservation is
+                // surrendered. A failed-then-rolled-back step keeps it: the
+                // effect ran and was undone (spec 008 FR-004).
+                if !grant_backed {
+                    let no_op = outcome.executions.last().is_some_and(|execution| {
+                        execution.status == ExecutionStatus::Completed
+                            && execution.evidence.get("already_desired") == Some(&json!(true))
+                    });
+                    if no_op {
+                        ports.budget.refund(risk, plan.blast_radius, now).await;
+                    }
+                }
+                if terminal {
                     return PlanRun::Finished(outcome);
                 }
             }

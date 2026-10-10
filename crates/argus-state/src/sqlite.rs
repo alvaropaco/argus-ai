@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use argus_domain::{
-    ActionEventFilter, ActionEventRecord, AppliedConfigurationState, BrainTraceRecord,
-    CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment,
+    ActionEventFilter, ActionEventRecord, AppliedConfigurationState, AutonomyState,
+    BrainTraceRecord, CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment,
     DEFAULT_ACTION_EVENT_LIMIT, DomainEvent, EnvironmentId, Execution, ExecutionApproval,
     ExecutionDecision, HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan,
     ReportBuffer, TokenUsageRecord,
@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS ledger_usage (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ledger_usage_time ON ledger_usage (occurred_at);
+CREATE TABLE IF NOT EXISTS autonomy_state (
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
 "#;
 
 const SINGLETON: &str = "cloud";
@@ -808,6 +812,18 @@ impl DomainRepository for SqliteRepository {
             Ok(())
         })
     }
+
+    async fn put_autonomy_state(&self, state: &AutonomyState) -> Result<(), RepositoryError> {
+        // One row per environment: the record carries its environment key and
+        // a re-put supersedes (spec 008 FR-001).
+        self.put_json("autonomy_state", "autonomy", &Self::encode(state)?)
+    }
+
+    async fn get_autonomy_state(&self) -> Result<Option<AutonomyState>, RepositoryError> {
+        self.get_json("autonomy_state", "autonomy")?
+            .map(|data| Self::decode(&data))
+            .transpose()
+    }
 }
 
 /// The wrapper row for `ledger_traces`, whose extracted columns live beside
@@ -1025,6 +1041,32 @@ mod tests {
         let id = EnvironmentId::new();
         repo.save_environment(&id).await.unwrap();
         assert_eq!(repo.get_environment().await.unwrap(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn autonomy_state_round_trips_as_a_single_superseding_row() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        assert_eq!(repo.get_autonomy_state().await.unwrap(), None);
+
+        let mut state = argus_domain::AutonomyState::fresh(EnvironmentId::new(), Utc::now());
+        repo.put_autonomy_state(&state).await.unwrap();
+        assert_eq!(
+            repo.get_autonomy_state().await.unwrap(),
+            Some(state.clone())
+        );
+
+        // The tick's mutations supersede: counters and budget windows ride
+        // the serialized record, so a restart resumes mid-assimilation
+        // (spec 008 FR-001, AC-007).
+        state.phase = argus_domain::AssimilationPhase::Shadow;
+        state.shadow_clean_cycles = 7;
+        state.budget.low_risk_hour = Some((12_345, 4));
+        repo.put_autonomy_state(&state).await.unwrap();
+
+        let loaded = repo.get_autonomy_state().await.unwrap().unwrap();
+        assert_eq!(loaded, state);
+        assert_eq!(loaded.shadow_clean_cycles, 7);
+        assert_eq!(loaded.budget.low_risk_hour, Some((12_345, 4)));
     }
 
     #[tokio::test]

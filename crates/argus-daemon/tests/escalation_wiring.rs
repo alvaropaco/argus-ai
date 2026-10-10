@@ -121,6 +121,7 @@ fn ports<'a>(
         }
     }
     static NO_KUBERNETES: NoKubernetes = NoKubernetes;
+    static NO_BUDGET: argus_daemon::autonomy::NoopBudget = argus_daemon::autonomy::NoopBudget;
     control::LoopPorts {
         governor,
         containers: &CONTAINERS,
@@ -129,6 +130,7 @@ fn ports<'a>(
         remediation: executor,
         kubernetes: &NO_KUBERNETES,
         ledger: &argus_events::NoopLedgerSink,
+        budget: &NO_BUDGET,
     }
 }
 
@@ -274,4 +276,99 @@ async fn the_sentinel_snapshot_reflects_live_daemon_state() {
         None,
         "no autonomous action has run yet"
     );
+}
+
+// --- Graduated autonomy, wired (spec 008, AC-001) ---
+
+/// The daemon's assimilation machine ticks through `daemon.autonomy()` and
+/// the earned/effective line surfaces in the sentinel report the cloud reads.
+#[tokio::test]
+async fn the_daemons_autonomy_machine_ticks_and_surfaces_in_the_sentinel_report() {
+    // A unique per-run path (uuid suffix): a PID-keyed name collides when
+    // the OS reuses pids, and a reused file would read as a restart.
+    let state_path = std::env::temp_dir()
+        .join(format!("argus-autonomy-test-{}.db", uuid::Uuid::new_v4()))
+        .to_string_lossy()
+        .into_owned();
+    let daemon = Daemon::init(DaemonConfig {
+        state_path: state_path.clone(),
+        ..DaemonConfig::default()
+    })
+    .await
+    .unwrap();
+
+    // A fresh daemon sits at `mapping`/L0: min(ceiling, L0) — the production
+    // default is unchanged (spec 008 NFR).
+    let machine = daemon.autonomy();
+    assert_eq!(
+        machine.effective(AutonomyMode::L4Autonomous).await,
+        AutonomyMode::L0Observe,
+        "nothing is earned yet, whatever the ceiling"
+    );
+    let ceiling = AutonomyMode::L2Recommend;
+    let view = daemon.sentinel_snapshot().await;
+    let autonomy = view
+        .autonomy
+        .as_ref()
+        .expect("the autonomy line rides the view");
+    assert_eq!(autonomy["phase"], "mapping");
+    assert_eq!(autonomy["effective"], "l0_observe");
+
+    // An unenrolled daemon is honestly unpaired: the gate cannot pass on a
+    // machine the cloud cannot see.
+    assert!(!daemon.cloud_paired().await);
+
+    // The operator grants the ceiling the way the cloud does — the managed
+    // `brain.autonomy` lever, applied live (spec 006): the ceiling is "how
+    // far may this instance grow", never a command to act at that level.
+    daemon
+        .brain_control()
+        .apply_setting("brain.autonomy", &json!("l2_recommend"))
+        .unwrap();
+
+    // Clean cycles at the L2 ceiling (the pairing signal supplied, as the
+    // brain loop would on a paired instance): the shadow window fills and
+    // the phase turns earned at L2.
+    for _ in 0..11 {
+        machine
+            .on_cycle(argus_daemon::autonomy::CycleSignals {
+                ceiling,
+                provider_ready: true,
+                cloud_paired: true,
+                safe_mode_active: false,
+                open_critical_incidents: 0,
+                live_environment: true,
+                failed_validation: false,
+            })
+            .await;
+    }
+    assert_eq!(machine.snapshot().await.earned, AutonomyMode::L2Recommend);
+
+    // The sentinel report now carries the earned line (AC-001's visibility).
+    let view = daemon.sentinel_snapshot().await;
+    let autonomy = view
+        .autonomy
+        .as_ref()
+        .expect("the autonomy line rides the view");
+    assert_eq!(autonomy["phase"], "earned");
+    assert_eq!(autonomy["earned"], "l2_recommend");
+    assert_eq!(autonomy["ceiling"], "l2_recommend");
+    assert_eq!(autonomy["effective"], "l2_recommend");
+    assert_eq!(autonomy["budgets"]["low_risk_per_hour"]["limit"], 20);
+
+    // The persisted state survives a reload — a restart resumes (AC-007).
+    let reloaded = Daemon::init(DaemonConfig {
+        state_path: daemon.config().state_path.clone(),
+        ..DaemonConfig::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        reloaded.autonomy().snapshot().await.earned,
+        AutonomyMode::L2Recommend,
+        "the earned rung survives the restart"
+    );
+
+    // No leaked state files.
+    std::fs::remove_file(&state_path).ok();
 }

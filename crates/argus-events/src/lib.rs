@@ -37,6 +37,12 @@ pub mod types {
     pub const BRAIN_TRACE: &str = "brain.trace";
     pub const TOKEN_USAGE: &str = "token.usage";
 
+    // Graduated autonomy (spec 008): promotions and demotions of the earned
+    // rung are first-class domain events; the ladder itself is local state
+    // (ADR-0040), so nothing cloud-side consumes these beyond the ledger.
+    pub const AUTONOMY_PROMOTED: &str = "autonomy.promoted";
+    pub const AUTONOMY_DEMOTED: &str = "autonomy.demoted";
+
     // Observation / sensor (ADR-0032)
     pub const SENSOR_HEALTHY: &str = "sensor.healthy";
     pub const SENSOR_DEGRADED: &str = "sensor.degraded";

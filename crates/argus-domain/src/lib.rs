@@ -8,6 +8,7 @@
 //! model (see `specs/001-bootstrap/data-model.md`).
 
 mod authorization;
+mod autonomy;
 mod capability;
 mod change;
 mod cloud;
@@ -29,6 +30,7 @@ mod validate;
 pub use authorization::{
     AuthorizationRequest, BlastRadius, CapabilityRequest, PolicyDecision, PolicyOutcome,
 };
+pub use autonomy::{AssimilationPhase, AutonomyState, BudgetWindows, is_validation_failure};
 pub use capability::{
     CapabilityDescriptor, OsPrivilege, PrivilegeDeclaration, Reversibility, RiskClass,
     input_matches,

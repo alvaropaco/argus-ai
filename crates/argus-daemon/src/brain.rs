@@ -96,6 +96,11 @@ pub struct BrainCycle {
     pub steps: Vec<String>,
     /// The plan's terminal status, when it ran.
     pub outcome: Option<String>,
+    /// Whether the cycle's plan terminated in a validation failure — the
+    /// typed revocation signature (spec 008 FR-003), decided at the run site
+    /// via `argus_domain::is_validation_failure` so this signal cannot drift
+    /// from the runtime's plan-terminal hook.
+    pub validation_failed: bool,
 }
 
 /// Wraps the configured provider so every call is metered (spec 007 FR-003):
@@ -238,11 +243,16 @@ async fn run_cycle(
             // work (FR-008).
             let correlation = uuid::Uuid::new_v4();
             let _ = daemon.repository().put_plan(correlation, &plan).await;
-            // 3. Act — through the ordinary boundary, at the operator's level.
-            let outcome = daemon.run_remediation(&plan, brain.autonomy, &events).await;
+            // 3. Act — through the ordinary boundary, at the *effective*
+            // level (spec 008 FR-003): min(managed ceiling, earned rung).
+            // The ceiling is the operator's "how far may this instance
+            // grow", never a command to act at that level now.
+            let effective = daemon.autonomy().effective(brain.autonomy).await;
+            let outcome = daemon.run_remediation(&plan, effective, &events).await;
             match outcome {
                 crate::control::RunOutcome::Finished(report) => {
                     let resolved = report.status == argus_domain::PlanStatus::Completed;
+                    record.validation_failed = argus_domain::is_validation_failure(report.status);
                     for (index, execution) in report.executions.iter().enumerate() {
                         let _ = daemon
                             .repository()
@@ -386,7 +396,8 @@ pub fn spawn(
                 interval_seconds: levers.interval_seconds,
                 runbooks_dir: config.runbooks_dir.clone(),
             };
-            let outcome = tokio::task::spawn(async move { cycle(&daemon, &brain).await }).await;
+            let spawned = Arc::clone(&daemon);
+            let outcome = tokio::task::spawn(async move { cycle(&spawned, &brain).await }).await;
             match outcome {
                 Ok(record) => {
                     state.record(crate::brain_state::BrainCycleRecord {
@@ -398,6 +409,37 @@ pub fn spawn(
                         outcome: record.outcome.clone(),
                         at: chrono::Utc::now(),
                     });
+                    // Spec 008: the assimilation machine ticks with the brain
+                    // loop — this cycle's shape is the gate evidence (FR-001/
+                    // FR-002). All signals are numbers the daemon already
+                    // computes: provider health, cloud connectivity, the
+                    // self-observability safe mode, and the run outcome.
+                    let safe_mode = crate::sentinel::safe_mode_from(
+                        &daemon.self_observability().snapshot(),
+                        &argus_observability::DegradationThresholds::default(),
+                    );
+                    let signals = crate::autonomy::CycleSignals {
+                        ceiling: levers.autonomy,
+                        provider_ready: record.provider_available
+                            && daemon.provider_health().status
+                                == crate::runtime::ProviderStatus::Ready,
+                        cloud_paired: daemon.cloud_paired().await,
+                        safe_mode_active: safe_mode != argus_observability::SafeMode::None,
+                        // No live incident source is wired yet; the sentinel
+                        // view reports the same zero — never invented.
+                        open_critical_incidents: 0,
+                        // The MAP gate wants proof the environment was
+                        // actually observed: a cycle that found nothing to
+                        // reason about (the empty-evidence early return)
+                        // consulted no live state and is not mapping
+                        // evidence — an all-quiet host stays in mapping
+                        // until it has something real to look at.
+                        live_environment: !record.evidence.is_empty(),
+                        // The typed revocation signature decided at the run
+                        // site — never a string match on the outcome.
+                        failed_validation: record.validation_failed,
+                    };
+                    daemon.autonomy().on_cycle(signals).await;
                     if !record.evidence.is_empty() {
                         tracing::info!(
                             evidence = ?record.evidence,

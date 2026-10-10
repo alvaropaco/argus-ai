@@ -3,6 +3,7 @@
 //! The trusted control boundary. Owns authorization enforcement, auditing, and
 //! execution controls; the AI layer must not receive unrestricted root access.
 
+pub mod autonomy;
 pub mod brain;
 pub mod brain_state;
 pub mod cloud;

@@ -315,6 +315,7 @@ fn ports<'a>(
     static NO_CGROUPS: NoCgroups = NoCgroups;
     static NO_CONTAINERS: NoContainers = NoContainers;
     static NO_REMEDIATION: NoExecutor = NoExecutor;
+    static NO_BUDGET: argus_daemon::autonomy::NoopBudget = argus_daemon::autonomy::NoopBudget;
     control::LoopPorts {
         governor: &GOVERNOR,
         containers: &NO_CONTAINERS,
@@ -323,6 +324,7 @@ fn ports<'a>(
         remediation: &NO_REMEDIATION,
         kubernetes,
         ledger: &argus_events::NoopLedgerSink,
+        budget: &NO_BUDGET,
     }
 }
 

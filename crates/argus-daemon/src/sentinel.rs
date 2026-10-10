@@ -19,6 +19,7 @@ use argus_policy::{Escalation, EscalationInput, EvidenceQuality, decide_escalati
 use argus_risk::Risk;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 /// The environment-health rollup surfaced in the TUI/cloud (CAP-21).
@@ -46,6 +47,13 @@ pub struct SentinelView {
     /// Resource-pressure subjects with their worst severity.
     pub pressure: Vec<PressureSignal>,
     pub generated_at: DateTime<Utc>,
+    /// The graduated-autonomy line (spec 008 FR-005): assimilation phase
+    /// with gate progress, earned rung, ceiling, effective level, and the
+    /// remaining blast-radius budgets. Additive and skip-if-none — the cloud
+    /// validates the view loosely, and snapshots without a machine render
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<Map<String, Value>>,
 }
 
 /// One resource-pressure signal in the view.
@@ -89,6 +97,10 @@ pub struct SentinelInputs {
     /// The escalation inputs for the situation under evaluation, when one is
     /// pending a decision.
     pub situation: Option<EscalationInput>,
+    /// The autonomy machine's view map (spec 008 FR-005), when one is wired;
+    /// carried through to the view verbatim — the sentinel adds nothing.
+    /// (Named apart from `autonomy`, which is the escalation's level input.)
+    pub autonomy_view: Option<Map<String, Value>>,
 }
 
 /// One sentinel evaluation's outcome: the surfaced view and the decision.
@@ -148,6 +160,7 @@ pub fn sentinel_evaluate(inputs: &SentinelInputs, now: DateTime<Utc>) -> Sentine
         recent_actions: inputs.recent_actions,
         pressure,
         generated_at: now,
+        autonomy: inputs.autonomy_view.clone(),
     };
 
     // In a safe mode the escalation degrades: stale inputs or suspended
@@ -305,6 +318,7 @@ mod tests {
                 Some(0.9),
                 PolicyOutcome::Allow,
             )),
+            autonomy_view: None,
         }
     }
 
@@ -417,6 +431,39 @@ mod tests {
         let d = sentinel_evaluate(&inputs(), Utc::now());
         let json = serde_json::to_string(&d.view).unwrap();
         let back: SentinelView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d.view);
+    }
+
+    #[test]
+    fn the_autonomy_line_is_additive_and_skip_if_none() {
+        // Without a machine the view renders exactly as before: the field is
+        // absent from the payload, and old readers see no change.
+        let d = sentinel_evaluate(&inputs(), Utc::now());
+        let json = serde_json::to_value(&d.view).unwrap();
+        assert!(json.get("autonomy").is_none(), "skip-if-none");
+
+        // With one, the map rides verbatim — the sentinel adds nothing.
+        let mut inputs = inputs();
+        inputs.autonomy_view = Some(
+            serde_json::json!({
+                "phase": "shadow",
+                "phase_progress": { "cycles": 7, "required": 10 },
+                "earned": "l0_observe",
+                "ceiling": "l2_recommend",
+                "effective": "l0_observe",
+                "budgets": { "low_risk_per_hour": { "remaining": 17, "limit": 20 } },
+            })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        );
+        let d = sentinel_evaluate(&inputs, Utc::now());
+        let json = serde_json::to_value(&d.view).unwrap();
+        assert_eq!(json["autonomy"]["phase"], "shadow");
+        assert_eq!(json["autonomy"]["phase_progress"]["cycles"], 7);
+        assert_eq!(json["autonomy"]["effective"], "l0_observe");
+        // And the shape round-trips for the cloud (loose validation upstream).
+        let back: SentinelView = serde_json::from_value(json).unwrap();
         assert_eq!(back, d.view);
     }
 }

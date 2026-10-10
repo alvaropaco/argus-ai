@@ -144,6 +144,16 @@ async fn run_approved(ledger: &Arc<RecordingLedger>) -> control::ExecutionOutcom
 
 /// The noop execution surface with the recording ledger swapped in.
 fn ports_with_ledger(ledger: &Arc<RecordingLedger>) -> control::LoopPorts<'_> {
+    static NO_BUDGET: argus_daemon::autonomy::NoopBudget = argus_daemon::autonomy::NoopBudget;
+    ports_with_budget(ledger, &NO_BUDGET)
+}
+
+/// [`ports_with_ledger`] with the blast-radius budget gate swapped too —
+/// the seam the spec-008 tests preset.
+fn ports_with_budget<'a>(
+    ledger: &'a Arc<RecordingLedger>,
+    budget: &'a dyn argus_daemon::autonomy::BudgetGate,
+) -> control::LoopPorts<'a> {
     let noop = control::LoopPorts::noop();
     control::LoopPorts {
         governor: noop.governor,
@@ -153,6 +163,7 @@ fn ports_with_ledger(ledger: &Arc<RecordingLedger>) -> control::LoopPorts<'_> {
         remediation: noop.remediation,
         kubernetes: noop.kubernetes,
         ledger: ledger.as_ref(),
+        budget,
     }
 }
 
@@ -244,5 +255,312 @@ async fn a_policy_denial_lands_in_the_ledger() {
     assert!(
         service.recorded_calls().is_empty(),
         "a denied action never executes"
+    );
+}
+
+// --- Blast-radius budget gate (spec 008 FR-004, AC-004) ---
+
+/// A budget gate the tests preset: `available` says whether a reservation
+/// succeeds, and every reserve/refund lands here tagged with its operation,
+/// risk, and scope — so a test can see exactly what the loop consumed and
+/// what it gave back.
+struct RecordingBudget {
+    available: std::sync::atomic::AtomicBool,
+    records: Mutex<Vec<(&'static str, RiskClass, BlastRadius)>>,
+}
+
+impl RecordingBudget {
+    fn exhausted() -> Self {
+        Self {
+            available: std::sync::atomic::AtomicBool::new(false),
+            records: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn available() -> Self {
+        Self {
+            available: std::sync::atomic::AtomicBool::new(true),
+            records: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn snapshot(&self) -> Vec<(&'static str, RiskClass, BlastRadius)> {
+        self.records.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl argus_daemon::autonomy::BudgetGate for RecordingBudget {
+    async fn reserve(
+        &self,
+        risk: RiskClass,
+        scope: BlastRadius,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        let reserved = self.available.load(Ordering::SeqCst);
+        if reserved {
+            // Only a successful reserve is a consumption; an exhausted
+            // window logs nothing.
+            self.records.lock().unwrap().push(("reserve", risk, scope));
+        }
+        reserved
+    }
+
+    async fn refund(
+        &self,
+        risk: RiskClass,
+        scope: BlastRadius,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.records.lock().unwrap().push(("refund", risk, scope));
+    }
+}
+
+/// A registry whose low-risk service capabilities declare no per-invocation
+/// approval, so at L3 the step reaches the Allow branch and auto-executes —
+/// the budget gate is what decides its fate.
+fn registry_auto() -> CapabilityRegistry {
+    let mut registry = CapabilityRegistry::new();
+    for capability in [
+        CapabilityId::HOST_SERVICE_RESTART,
+        CapabilityId::HOST_SERVICE_STOP,
+        CapabilityId::HOST_SERVICE_START,
+    ] {
+        let id = CapabilityId::new(capability).expect("bootstrap capability id");
+        registry
+            .register(
+                CapabilityDescriptor::new(
+                    id,
+                    "argusd",
+                    capability,
+                    RiskClass::LowRisk,
+                    Version::new(0, 1, 0),
+                    json!({
+                        "type": "object",
+                        "required": ["unit"],
+                        "properties": { "unit": { "type": "string" } },
+                        "additionalProperties": false,
+                    }),
+                    json!({}),
+                    Reversibility::Reversible,
+                )
+                .with_blast_radius(BlastRadius::Host),
+            )
+            .expect("unique descriptor");
+    }
+    registry
+}
+
+/// An exhausted budget pauses the PLAN as `requires_approval` with policy id
+/// `budget.exhausted` — the ledger event lands, nothing executes, and the
+/// operator's grant on the issued token resumes the plan: an operator grant
+/// is authority the budget does not ration (AC-004).
+#[tokio::test]
+async fn an_exhausted_budget_pauses_the_plan_and_a_grant_resumes_it() {
+    let ledger = Arc::new(RecordingLedger::default());
+    let budget = Arc::new(RecordingBudget::exhausted());
+    let registry = registry_auto();
+    let policy = BootstrapPolicyEvaluator::new();
+    let service = MockServiceController::new();
+    let events = LocalEventBus::new(64);
+
+    let outcome = control::authorize_and_run_with_ports(
+        &plan(),
+        &registry,
+        &policy,
+        &service,
+        &events,
+        argus_domain::AutonomyMode::L3Assisted,
+        &ports_with_budget(&ledger, budget.as_ref()),
+    )
+    .await;
+
+    // The plan parks on a single-use token — approvable, not skipped.
+    let control::RunOutcome::Pending(pending) = outcome else {
+        panic!("exhaustion pauses the plan for approval");
+    };
+    assert_eq!(pending.plan.status, PlanStatus::AwaitingApproval);
+    assert!(!pending.token.is_nil(), "a single-use token is issued");
+    assert!(
+        service.recorded_calls().is_empty(),
+        "nothing executes under exhaustion"
+    );
+
+    let rows = ledger.snapshot();
+    assert_eq!(rows.len(), 1, "the pause is a first-class ledger row");
+    assert_eq!(rows[0].verdict, "requires_approval");
+    assert_eq!(
+        rows[0].policy_id.as_deref(),
+        Some("budget.exhausted"),
+        "the policy id names the exhausted budget"
+    );
+    assert_eq!(rows[0].outcome, "awaiting_approval");
+    assert!(
+        budget.snapshot().is_empty(),
+        "a failed reserve consumed nothing"
+    );
+
+    // The operator grants the token: the resume runs under grant-backed
+    // authority and executes despite the exhausted budget.
+    let approvals = ApprovalStore::new();
+    approvals.grant_for_a_while(
+        pending.token,
+        pending.context_hash.clone(),
+        "operator",
+        Utc::now(),
+        chrono::Duration::minutes(5),
+    );
+    match control::resume_and_run_with_ports(
+        &pending,
+        &approvals,
+        &registry,
+        &policy,
+        &service,
+        &events,
+        argus_domain::AutonomyMode::L3Assisted,
+        &ports_with_budget(&ledger, budget.as_ref()),
+    )
+    .await
+    {
+        control::ResumeOutcome::Finished(finished) => {
+            assert_eq!(finished.status, PlanStatus::Completed);
+            assert_eq!(finished.executions.len(), 1, "the granted plan executed");
+        }
+        control::ResumeOutcome::Refused(reason) => {
+            panic!("expected the resume to run, refused: {reason:?}")
+        }
+    }
+    assert_eq!(
+        service.recorded_calls(),
+        vec![("restart".to_string(), "nginx.service".to_string())],
+        "the granted step executed once"
+    );
+    assert!(
+        budget.snapshot().is_empty(),
+        "the grant-backed resume reserved nothing"
+    );
+}
+
+/// A landed auto-execution keeps its reservation; an already-desired no-op
+/// reserves and refunds (zero blast radius); an operator-approved step never
+/// touches the budget at all.
+#[tokio::test]
+async fn reservations_track_what_actually_executed() {
+    let ledger = Arc::new(RecordingLedger::default());
+    let budget = Arc::new(RecordingBudget::available());
+    // Bound before the local `registry` below shadows the helper's name.
+    let approval_registry = registry();
+    let registry = registry_auto();
+    let policy = BootstrapPolicyEvaluator::new();
+    let service = MockServiceController::new();
+    let events = LocalEventBus::new(64);
+
+    // The auto path: the low-risk service step lands through the Allow
+    // branch and executes against the mock.
+    let outcome = control::authorize_and_run_with_ports(
+        &plan(),
+        &registry,
+        &policy,
+        &service,
+        &events,
+        argus_domain::AutonomyMode::L3Assisted,
+        &ports_with_budget(&ledger, budget.as_ref()),
+    )
+    .await;
+    let control::RunOutcome::Finished(finished) = outcome else {
+        panic!("the allowed step executes");
+    };
+    assert_eq!(finished.executions.len(), 1);
+    assert_eq!(
+        budget.snapshot(),
+        vec![("reserve", RiskClass::LowRisk, BlastRadius::Host)],
+        "the landed auto-execution consumed the budget"
+    );
+
+    // The same target is now already in its desired state (the restart made
+    // it so): the second run is a no-op — it reserved, then surrendered the
+    // unit, because nothing took effect.
+    let outcome = control::authorize_and_run_with_ports(
+        &plan(),
+        &registry,
+        &policy,
+        &service,
+        &events,
+        argus_domain::AutonomyMode::L3Assisted,
+        &ports_with_budget(&ledger, budget.as_ref()),
+    )
+    .await;
+    let control::RunOutcome::Finished(no_op) = outcome else {
+        panic!("the idempotent step finishes");
+    };
+    assert_eq!(
+        no_op.executions[0].evidence["already_desired"], true,
+        "the second run was an already-desired no-op"
+    );
+    assert_eq!(
+        budget.snapshot(),
+        vec![
+            ("reserve", RiskClass::LowRisk, BlastRadius::Host),
+            ("reserve", RiskClass::LowRisk, BlastRadius::Host),
+            ("refund", RiskClass::LowRisk, BlastRadius::Host),
+        ],
+        "the no-op's reservation was surrendered"
+    );
+
+    // The operator path: an approval-requiring step (the default registry
+    // declares one) pauses, is granted, and the resume executes — reserving
+    // nothing, because an operator grant is not the budget's to ration.
+    let approvals = ApprovalStore::new();
+    let pending = match control::authorize_and_run_with_ports(
+        &plan(),
+        &approval_registry,
+        &policy,
+        &service,
+        &events,
+        argus_domain::AutonomyMode::L3Assisted,
+        &ports_with_budget(&ledger, budget.as_ref()),
+    )
+    .await
+    {
+        control::RunOutcome::Pending(pending) => pending,
+        control::RunOutcome::Finished(outcome) => panic!("expected a pause: {outcome:?}"),
+    };
+    approvals.grant_for_a_while(
+        pending.token,
+        pending.context_hash.clone(),
+        "operator",
+        Utc::now(),
+        chrono::Duration::minutes(5),
+    );
+    match control::resume_and_run_with_ports(
+        &pending,
+        &approvals,
+        &approval_registry,
+        &policy,
+        &service,
+        &events,
+        argus_domain::AutonomyMode::L3Assisted,
+        &ports_with_budget(&ledger, budget.as_ref()),
+    )
+    .await
+    {
+        control::ResumeOutcome::Finished(outcome) => {
+            assert_eq!(outcome.executions.len(), 1, "the approved step ran");
+        }
+        control::ResumeOutcome::Refused(reason) => {
+            panic!("expected the resume to run, refused: {reason:?}")
+        }
+    }
+    // Still the two reserves and one refund from runs 1 and 2: the
+    // operator-approved resume added nothing.
+    assert_eq!(
+        budget.snapshot(),
+        vec![
+            ("reserve", RiskClass::LowRisk, BlastRadius::Host),
+            ("reserve", RiskClass::LowRisk, BlastRadius::Host),
+            ("refund", RiskClass::LowRisk, BlastRadius::Host),
+        ],
+        "the operator-approved resume reserved and refunded nothing"
     );
 }

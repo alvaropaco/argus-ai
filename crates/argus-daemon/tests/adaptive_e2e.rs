@@ -231,6 +231,7 @@ fn ac017_the_postmortem_carries_only_recorded_figures() {
                 ..SelfHealth::default()
             },
             situation: None,
+            autonomy_view: None,
         },
         t0(),
     )
@@ -274,6 +275,7 @@ fn ac018_autofix_vs_askhuman_and_privilege_neutrality() {
                     event_lag_ms: Some(50),
                     ..SelfHealth::default()
                 },
+                autonomy_view: None,
             },
             t0()
         )
@@ -396,6 +398,7 @@ fn ac019_a_broken_sensor_or_stale_queue_degrades_to_a_safe_mode() {
                 Some(0.9),
                 PolicyOutcome::Allow,
             )),
+            autonomy_view: None,
         },
         t0(),
     );
@@ -648,6 +651,7 @@ fn the_success_signal_threads_every_milestone_layer_together() {
                 ..SelfHealth::default()
             },
             situation: Some(situation),
+            autonomy_view: None,
         },
         t0(),
     );
@@ -732,6 +736,7 @@ fn the_adaptive_layer_is_deterministic_end_to_end() {
                     ..SelfHealth::default()
                 },
                 situation: Some(situation),
+                autonomy_view: None,
             },
             t0(),
         );
