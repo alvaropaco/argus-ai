@@ -1002,7 +1002,10 @@ mod tests {
     async fn budget_exhaustion_pauses_and_rolls_with_time() {
         let repo: Arc<dyn DomainRepository> = Arc::new(InMemoryRepository::new());
         let (machine, _rx) = manager(Arc::clone(&repo)).await;
-        let now = Utc::now();
+        // Anchored mid-day UTC, fixed: the test's "+1h has not rolled the day
+        // window" step is only true away from the UTC midnight boundary, and
+        // a wall-clock anchor made the test fail every day at 23:xx UTC.
+        let now = chrono::TimeZone::timestamp_opt(&Utc, 1_800_000_000 + 43_200, 0).unwrap();
         let gate: &dyn BudgetGate = machine.as_ref();
 
         // Two low-risk executions at host scope fill the test's hourly limit

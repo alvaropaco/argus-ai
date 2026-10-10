@@ -446,6 +446,7 @@ dependencies = [
 name = "argus-sensors"
 version = "0.2.0"
 dependencies = [
+ "rustix",
  "thiserror 2.0.20",
 ]
 

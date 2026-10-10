@@ -8,6 +8,10 @@ description = "ARGUS kernel-native sensors: typed readers over /proc, /sys, cgro
 
 [dependencies]
 thiserror = { workspace = true }
+# The audited syscall boundary for statvfs (spec 011 FR-003): the workspace
+# forbids `unsafe`, so the raw call lives here, not in the reader. Already in
+# the dependency tree — no new crates.
+rustix = { version = "1.1", features = ["fs"] }
 
 [lints]
 workspace = true

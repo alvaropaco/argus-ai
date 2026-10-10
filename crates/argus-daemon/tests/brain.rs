@@ -10,6 +10,10 @@ use argus_ai_core::decision::types::DecisionAnswer;
 use argus_daemon::config::{BrainConfig, DaemonConfig};
 use argus_daemon::{Daemon, brain};
 use argus_domain::AutonomyMode;
+use argus_domain::{
+    BlastRadius, CapabilityDescriptor, CapabilityId, Plan, Reversibility, RiskClass,
+};
+use semver::Version;
 
 fn test_config(name: &str) -> DaemonConfig {
     DaemonConfig {
@@ -664,4 +668,408 @@ async fn the_sentinel_report_carries_the_procedure_attribution() {
         report.plans[0].get("runbook").is_none(),
         "provider plans stay unattributed on the wire"
     );
+}
+
+// --- Spec 011: the situation vocabulary — the brain perceives more than
+// --- failed units ---
+
+/// A memory-pressure situation at the given reading — the pure collector's
+/// exact shape (brain.rs `situations_from`).
+fn memory_pressure(reading: f64) -> brain::Situation {
+    brain::Situation {
+        signature: brain::MEMORY_PRESSURE.into(),
+        subject: "mem".into(),
+        detail: format!("mem at {reading:.1}%"),
+    }
+}
+
+#[tokio::test]
+async fn a_memory_pressure_crossing_reasons_through_the_provider_path() {
+    // No runbooks: the crossing's evidence holds for the provider — the
+    // existing flow, evidence superset (spec 011 FR-002, AC-001).
+    let daemon = Daemon::init(test_config("pressure-provider"))
+        .await
+        .unwrap();
+    let (provider, calls) = CountingProvider::new(restarting_provider());
+    daemon.set_provider(Some(Arc::new(provider)));
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+
+    // The trace names the signature and the reading that triggered it
+    // (FR-005, ADR-0043 §4) — starved evidence no more.
+    assert_eq!(record.evidence, ["memory-pressure: mem at 91.4%"]);
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the provider reasoned from the crossing's evidence"
+    );
+    // The provider answers the host-health skill, whose remediation action
+    // is fail-closed on a `unit` evidence entry: pressure-only evidence
+    // yields no plan (the skill proposes nothing it cannot name — spec 005's
+    // honesty). A pressure situation ACTS through a promoted runbook's
+    // procedure, not through the skill.
+    assert!(record.plan_objective.is_none());
+    assert_eq!(
+        record.decision.as_deref(),
+        Some("no actionable decision this cycle")
+    );
+    assert!(
+        daemon
+            .repository()
+            .list_episodes()
+            .await
+            .unwrap()
+            .is_empty(),
+        "no plan ran, so no episode"
+    );
+
+    // The stable provider dedup: a no-decision result releases the
+    // situation-set key — the fail-closed re-consult the evidence key's
+    // semantics always had.
+    let second = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+    assert!(second.plan_objective.is_none());
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a no-decision release re-consults, fail-closed"
+    );
+}
+
+#[tokio::test]
+async fn a_promoted_pressure_runbook_that_cannot_express_the_subject_falls_through() {
+    // The restart schema wants `unit`; the pressure situation's subject is
+    // `mem`. Zero valid steps → the provider evidence path, honestly (the
+    // spec-011 edge case; spec 010's schema validation, per signature).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pressure-procedure.toml"),
+        r#"
+name = "pressure-procedure"
+trigger = { symptom = "memory-pressure" }
+allowed_actions = ["host.service.restart"]
+rollback = ["host.service.restart"]
+gates = ["evaluation", "simulation", "validation", "policy", "approval", "promotion"]
+
+[[validation]]
+description = "memory settled"
+attribute = "memory.used_percent"
+comparison = { less_than = 90 }
+"#,
+    )
+    .unwrap();
+    let mut config = test_config("pressure-zero-steps");
+    config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+    let daemon = Daemon::init(config).await.unwrap();
+    assert_eq!(
+        daemon
+            .runbooks()
+            .by_name("pressure-procedure")
+            .expect("the pressure runbook loads")
+            .status(),
+        argus_runbooks::RunbookStatus::Promoted,
+        "a runbook authored for the new signature climbs the moment the situation exists"
+    );
+    let (provider, calls) = CountingProvider::new(restarting_provider());
+    daemon.set_provider(Some(Arc::new(provider)));
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the construction fall-through logged and the provider reasoned"
+    );
+    assert!(
+        record.runbook.is_none(),
+        "zero valid steps attributes nothing"
+    );
+    assert!(
+        record.plan_objective.is_none(),
+        "the host-health skill names no pressure remediation"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_unit_and_pressure_crossings_reason_in_order_with_one_provider_request() {
+    // AC-004: both situations collected, reasoned in collection order
+    // (failed units first, then memory, then disk), separate evidence, and
+    // ONE provider request over the merged evidence when no procedure plan
+    // fires.
+    let daemon = Daemon::init(test_config("mixed-situations")).await.unwrap();
+    let (provider, calls) = CountingProvider::new(restarting_provider());
+    daemon.set_provider(Some(Arc::new(provider)));
+
+    let situations = vec![
+        brain::Situation {
+            signature: brain::HOST_HEALTH.into(),
+            subject: "argus-test.service".into(),
+            detail: "failed failed".into(),
+        },
+        memory_pressure(91.4),
+        brain::Situation {
+            signature: brain::DISK_PRESSURE.into(),
+            subject: "/".into(),
+            detail: "/ at 97.2%".into(),
+        },
+    ];
+    let record =
+        brain::cycle_with_situations(&daemon, &BrainConfig::default(), situations, true).await;
+
+    assert_eq!(
+        record.evidence,
+        [
+            "argus-test.service: failed failed",
+            "memory-pressure: mem at 91.4%",
+            "disk-pressure: / at 97.2%",
+        ]
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one provider request carries all situations' evidence"
+    );
+    assert_eq!(
+        record.plan_objective.as_deref(),
+        Some("restore the host service")
+    );
+    let episodes = daemon.repository().list_episodes().await.unwrap();
+    assert_eq!(episodes.len(), 1, "one episode for the one acting plan");
+    assert_eq!(episodes[0].1.symptom, "host-health");
+}
+
+#[tokio::test]
+async fn the_sentinel_pressure_section_rides_the_collector_and_clears_without_a_crossing() {
+    // FR-005: one perception, two consumers — the sentinel view reads the
+    // same crossings the brain collected; a reading below the threshold
+    // clears them (no latching).
+    let daemon = Daemon::init(test_config("pressure-sentinel"))
+        .await
+        .unwrap();
+
+    brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+    let view = daemon.sentinel_snapshot().await;
+    assert_eq!(view.pressure.len(), 1, "the crossing surfaces as pressure");
+    assert_eq!(view.pressure[0].subject, "mem");
+
+    brain::cycle_with_situations(&daemon, &BrainConfig::default(), Vec::new(), true).await;
+    let view = daemon.sentinel_snapshot().await;
+    assert!(view.pressure.is_empty(), "resolved pressure un-surfaces");
+}
+
+// --- Spec 011: the acting pressure procedure — a subject-capable capability
+// --- end to end (AC-001's acting half, AC-003) ---
+
+/// A subject-capable stand-in capability (the unit tests' `host.cache.drain`
+/// schema): the smallest action a memory-pressure procedure could drive, and
+/// the shape every bootstrap schema lacks — they each want a more specific
+/// subject (`unit`, `name`, `pid`, `container`).
+fn drain_descriptor() -> CapabilityDescriptor {
+    CapabilityDescriptor::new(
+        CapabilityId::new("host.cache.drain").unwrap(),
+        "argusd",
+        "host.cache.drain",
+        RiskClass::LowRisk,
+        Version::new(0, 1, 0),
+        serde_json::json!({
+            "type": "object",
+            "required": ["subject"],
+            "properties": { "subject": { "type": "string" } },
+            "additionalProperties": false,
+        }),
+        serde_json::json!({}),
+        Reversibility::Reversible,
+    )
+    .with_blast_radius(BlastRadius::Host)
+}
+
+/// A promoted runbook authored for the memory-pressure signature, driving
+/// the subject-capable capability.
+fn promoted_pressure_runbook_dir(name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("procedure.toml"),
+        format!(
+            r#"
+name = "{name}"
+trigger = {{ symptom = "memory-pressure" }}
+allowed_actions = ["host.cache.drain"]
+rollback = ["host.cache.drain"]
+gates = ["evaluation", "simulation", "validation", "policy", "approval", "promotion"]
+
+[[validation]]
+description = "unit active again"
+attribute = "unit.active_state"
+comparison = {{ equal = "active" }}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+async fn daemon_with_drain_runbook(name: &str, test: &str) -> Daemon {
+    let dir = promoted_pressure_runbook_dir(name);
+    let mut config = test_config(test);
+    config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+    Daemon::init_with_extra_capabilities(config, vec![drain_descriptor()])
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_promoted_memory_pressure_runbook_drives_an_acting_attributed_procedure_plan() {
+    // AC-001's acting half + AC-003's episode symptom, end to end: the
+    // subject-capable capability registered, the memory-pressure runbook
+    // promoted, the crossing collected — the runbook's own deterministic
+    // procedure crosses the ordinary boundary and the episode records the
+    // SITUATION's signature.
+    let daemon = daemon_with_drain_runbook("drain-cache", "pressure-acting").await;
+    assert_eq!(
+        daemon.runbooks().by_name("drain-cache").unwrap().status(),
+        argus_runbooks::RunbookStatus::Promoted
+    );
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+
+    // The attributed procedure plan: the runbook's own procedure, its step
+    // argument derived from the pressure subject (spec 011 FR-002).
+    assert_eq!(
+        record.plan_objective.as_deref(),
+        Some("procedure: drain-cache")
+    );
+    assert_eq!(record.runbook.as_deref(), Some("drain-cache"));
+    assert_eq!(record.steps, ["host.cache.drain"]);
+    let outcome = record.outcome.expect("the plan ran through the boundary");
+    assert!(
+        outcome.starts_with("Denied") || outcome.starts_with("awaiting approval"),
+        "L0 executes nothing, but the procedure crossed the boundary: {outcome}"
+    );
+
+    // The persisted plan carries the attribution (FR-002).
+    let plans = daemon.repository().list_plans().await.unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].1.runbook.as_deref(), Some("drain-cache"));
+
+    // The episode's symptom is the SITUATION's signature (AC-003), its
+    // remediation the procedure name-linkage the Evaluation gate accepts.
+    let episodes = daemon.repository().list_episodes().await.unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].1.symptom, "memory-pressure");
+    assert_eq!(
+        episodes[0].1.remediation.as_deref(),
+        Some("procedure: drain-cache")
+    );
+
+    // At L0 a fresh daemon executes nothing, so the runbook's Validation →
+    // Policy gates record no outcome yet — a run that never executes is not
+    // an attempt.
+    assert_eq!(
+        daemon.runbooks().by_name("drain-cache").unwrap().attempts(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_resolution_does_not_release_a_key_held_by_a_pending_plan() {
+    // The pressure procedure pauses for an approval; a momentary
+    // below-threshold reading must not release its dedup key — a recrossing
+    // must not propose a second plan while the first approval is open. The
+    // paused plan and its claim are seeded exactly as the brain's `act`
+    // leaves them (the policy allowlist cannot pause a non-bootstrap
+    // capability at L0, so the pause itself is exercised by the host-health
+    // pause test); what this pins is the resolution step's hold.
+    let daemon = Daemon::init(test_config("pressure-resolution"))
+        .await
+        .unwrap();
+    let key = "memory-pressure:mem";
+
+    // Without a pending plan the resolution releases (FR-004): the settled
+    // crossing re-reasons.
+    assert!(daemon.claim_dedup(key).await.unwrap());
+    brain::release_resolved_pressure(
+        &daemon,
+        &settled_memory_readings(),
+        &argus_daemon::config::SituationsConfig::default(),
+    )
+    .await;
+    assert!(
+        daemon.claim_dedup(key).await.unwrap(),
+        "released, so the recrossing can claim again"
+    );
+
+    // Now as the brain leaves a paused procedure: the key claimed (the
+    // assertion above holds it) and a pending attributed plan carrying it.
+    daemon.store_pending(argus_daemon::control::PendingPlan {
+        plan: Plan {
+            objective: "procedure: drain-cache".into(),
+            steps: Vec::new(),
+            preconditions: Vec::new(),
+            expected_outcomes: Vec::new(),
+            blast_radius: BlastRadius::Host,
+            confidence: 0.5,
+            status: argus_domain::PlanStatus::Proposed,
+            runbook: Some("drain-cache".into()),
+        },
+        token: uuid::Uuid::new_v4(),
+        context_hash: String::new(),
+        executed: Vec::new(),
+        dedup_key: Some(key.to_string()),
+    });
+
+    // The reading settles below the threshold: the resolution step runs —
+    // but the pending plan holds the key, so it must not release.
+    brain::release_resolved_pressure(
+        &daemon,
+        &settled_memory_readings(),
+        &argus_daemon::config::SituationsConfig::default(),
+    )
+    .await;
+    assert!(
+        !daemon.claim_dedup(key).await.unwrap(),
+        "held: a momentary resolution must not free a recrossing to propose a \
+         second plan around the open approval"
+    );
+    assert_eq!(daemon.list_pending_approvals().len(), 1);
+}
+
+/// A memory reading well below the default threshold: the settled crossing.
+fn settled_memory_readings() -> brain::Readings {
+    brain::Readings {
+        memory: Some(argus_sensors::meminfo::MemInfo {
+            mem_total: 1_000_000,
+            mem_available: 500_000,
+            ..argus_sensors::meminfo::MemInfo::default()
+        }),
+        ..brain::Readings::default()
+    }
 }

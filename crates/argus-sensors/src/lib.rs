@@ -13,7 +13,7 @@ mod sys;
 
 pub use cgroup::{CgroupSnapshot, CgroupV2Reader};
 pub use proc::{diskstats, loadavg, meminfo, netdev, pressure, process, stat, vmstat};
-pub use sys::{net, thermal};
+pub use sys::{disk, net, thermal};
 
 /// Error for a sensor read. A sensor that cannot run reports `Unavailable` and
 /// contributes nothing (graceful degradation) rather than failing the loop.

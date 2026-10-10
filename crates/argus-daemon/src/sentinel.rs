@@ -109,6 +109,10 @@ pub struct SentinelInputs {
     /// The runbook table (spec 009 FR-005), when the library is non-empty;
     /// carried through to the view verbatim — the sentinel adds nothing.
     pub runbooks_view: Option<Map<String, Value>>,
+    /// The situation collector's current resource-pressure crossings (spec
+    /// 011 FR-005), carried onto the view's pressure section additively —
+    /// the risk-derived signals stay first, and the sentinel adds nothing.
+    pub pressure: Vec<PressureSignal>,
 }
 
 /// One sentinel evaluation's outcome: the surfaced view and the decision.
@@ -148,14 +152,18 @@ pub fn sentinel_evaluate(inputs: &SentinelInputs, now: DateTime<Utc>) -> Sentine
         EnvironmentHealth::Healthy
     };
 
-    let pressure = inputs
+    // The pressure section is additive (spec 011 FR-005): the risk-derived
+    // signals stay first, and the brain collector's crossings ride the same
+    // view — one perception, two consumers, never two truths.
+    let mut pressure = inputs
         .risks
         .iter()
         .map(|r| PressureSignal {
             subject: r.subject.as_str().to_string(),
             severity: r.severity,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    pressure.extend(inputs.pressure.iter().cloned());
 
     let view = SentinelView {
         environment_health,
@@ -330,6 +338,7 @@ mod tests {
             )),
             autonomy_view: None,
             runbooks_view: None,
+            pressure: Vec::new(),
         }
     }
 
@@ -374,6 +383,36 @@ mod tests {
         // The view carries the prediction prose verbatim — labeled.
         assert!(d.view.predictions[0].starts_with("PREDICTED"));
         assert_eq!(d.view.pressure.len(), 1);
+    }
+
+    #[test]
+    fn the_pressure_section_is_additive_over_the_collector_crossings() {
+        // Spec 011 FR-005: the brain collector's crossings ride the same
+        // pressure section the risk-derived signals use — additive, never a
+        // second truth.
+        let mut crossings = inputs();
+        crossings.pressure = vec![
+            PressureSignal {
+                subject: "mem".into(),
+                severity: Severity::Warning,
+            },
+            PressureSignal {
+                subject: "/".into(),
+                severity: Severity::Warning,
+            },
+        ];
+        let d = sentinel_evaluate(&crossings, Utc::now());
+        assert_eq!(d.view.pressure.len(), 3, "the risk signal stays first");
+        assert_eq!(d.view.pressure[0].subject, "service:api");
+        assert_eq!(d.view.pressure[1].subject, "mem");
+        assert_eq!(d.view.pressure[2].subject, "/");
+
+        // No risks and no crossings: the section renders exactly as before.
+        let mut quiet = inputs();
+        quiet.risks.clear();
+        quiet.pressure.clear();
+        let d = sentinel_evaluate(&quiet, Utc::now());
+        assert!(d.view.pressure.is_empty(), "skip-if-none preserved");
     }
 
     #[test]

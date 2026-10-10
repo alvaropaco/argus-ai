@@ -64,6 +64,11 @@ pub struct Daemon {
     /// Remembers which observations have already been reasoned about, so a
     /// repeated observation spawns no plan (ADR-0028 §5).
     dedup: InMemoryDedup,
+    /// The situation collector's current resource-pressure crossings (spec
+    /// 011 FR-005), recorded at the daemon boundary so the sentinel view and
+    /// the brain reason from one perception, never two truths. Empty means
+    /// no crossing: the view renders exactly as before.
+    pressure: std::sync::RwLock<Vec<crate::sentinel::PressureSignal>>,
     /// Wakes the cloud supervisor out of a reconnect backoff when the enrollment
     /// changes, so a fresh credential is used immediately rather than after the
     /// current delay elapses.
@@ -283,6 +288,25 @@ impl Daemon {
     /// Initializes the daemon, opening the state store and persisting/loading
     /// environment identity and an initial health record.
     pub async fn init(config: DaemonConfig) -> Result<Self, RepositoryError> {
+        Self::init_inner(config, Vec::new()).await
+    }
+
+    /// [`Self::init`] plus `extra` capability descriptors registered after
+    /// the bootstrap set — the e2e seam for a subject-capable stand-in the
+    /// pressure-procedure tests drive (spec 011). Registration widens
+    /// nothing by itself: a procedure still needs a promoted runbook that
+    /// declares the capability.
+    pub async fn init_with_extra_capabilities(
+        config: DaemonConfig,
+        extra: Vec<CapabilityDescriptor>,
+    ) -> Result<Self, RepositoryError> {
+        Self::init_inner(config, extra).await
+    }
+
+    async fn init_inner(
+        config: DaemonConfig,
+        extra: Vec<CapabilityDescriptor>,
+    ) -> Result<Self, RepositoryError> {
         let repository: Arc<dyn DomainRepository> =
             Arc::new(SqliteRepository::open(&config.state_path)?);
 
@@ -307,6 +331,11 @@ impl Daemon {
             registry
                 .register(descriptor)
                 .expect("bootstrap descriptors are unique");
+        }
+        for descriptor in extra {
+            registry
+                .register(descriptor)
+                .expect("extra capability descriptors are unique");
         }
 
         // The remediation surface (spec 003 M3, FR-016/FR-017): typed
@@ -385,6 +414,7 @@ impl Daemon {
             plugins: Vec::new(),
             privileged_execution,
             dedup: InMemoryDedup::new(),
+            pressure: std::sync::RwLock::new(Vec::new()),
             cloud_wake: Arc::new(tokio::sync::Notify::new()),
             pending: PendingApprovals::new(),
             approvals: ApprovalStore::new(),
@@ -853,9 +883,11 @@ impl Daemon {
 
     /// The live sentinel view (spec-004 FR-003): built from real daemon state
     /// only. Risks, predictions, and incidents have no live source wired into
-    /// the daemon yet and render empty — never invented. The autonomy line
-    /// (spec 008 FR-005) rides the machine's own view: phase with gate
-    /// progress, earned rung, ceiling, effective, and remaining budgets.
+    /// the daemon yet and render empty — never invented. The pressure section
+    /// rides the situation collector's current crossings (spec 011 FR-005) —
+    /// one perception, two consumers. The autonomy line (spec 008 FR-005)
+    /// rides the machine's own view: phase with gate progress, earned rung,
+    /// ceiling, effective, and remaining budgets.
     pub async fn sentinel_snapshot(&self) -> crate::sentinel::SentinelView {
         let executions = self.list_executions().await.unwrap_or_default();
         let ceiling = self.brain_control.get().autonomy;
@@ -873,8 +905,27 @@ impl Daemon {
             situation: None,
             autonomy_view: Some(autonomy_view),
             runbooks_view: self.runbooks.view(),
+            pressure: self.current_pressure(),
         };
         crate::sentinel::sentinel_evaluate(&inputs, Utc::now()).view
+    }
+
+    /// Records the cycle's resource-pressure crossings (spec 011 FR-005) —
+    /// the collector's present pressure situations. Empty clears: a reading
+    /// below its threshold un-surfaces the pressure, no latching.
+    pub fn note_pressure(&self, crossings: Vec<crate::sentinel::PressureSignal>) {
+        *self
+            .pressure
+            .write()
+            .expect("pressure lock is not poisoned") = crossings;
+    }
+
+    /// The current crossings, for the sentinel view.
+    fn current_pressure(&self) -> Vec<crate::sentinel::PressureSignal> {
+        self.pressure
+            .read()
+            .expect("pressure lock is not poisoned")
+            .clone()
     }
 
     /// The self-observability counters, for status/telemetry surfaces.
@@ -1010,10 +1061,14 @@ impl Daemon {
     }
 
     /// The procedure-plan half of the reasoning loop (spec 010 FR-001,
-    /// ADR-0042 §1): claims the SAME evidence-derived dedup key the provider
-    /// path would claim, then builds the deterministic plan from the promoted
-    /// runbook — so the two paths can never double-act on one situation. The
-    /// plan comes back UNEXECUTED with its dedup key, exactly like
+    /// ADR-0042 §1, generalized per signature by spec 011 FR-002): claims the
+    /// situation's dedup key the caller derives — host-health's
+    /// evidence-derived key (`observation_dedup_key`, byte-identical to
+    /// today), pressure's stable `(signature, subject)` — then builds the
+    /// deterministic plan from the promoted runbook. A claimed key means the
+    /// same situation is already reasoned about (a plan is in flight, or it
+    /// resolved and the crossing persists), so nothing double-acts on it. The
+    /// plan comes back UNEXECUTED with its key, exactly like
     /// [`Self::propose_once`]. `None` — with the key released — when the
     /// runbook cannot express the situation (zero schema-valid steps), so the
     /// provider path can run unchanged: fail-closed, never a missed
@@ -1022,24 +1077,21 @@ impl Daemon {
     pub async fn propose_procedure(
         &self,
         runbook: &argus_runbooks::Runbook,
-        evidence: &ContextBuilder,
-        subjects: &[(String, String)],
+        situation: &crate::brain::Situation,
+        dedup_key: &str,
     ) -> Result<Option<(Plan, String)>, DecisionError> {
-        use argus_ai_core::decision::host_health::observation_dedup_key;
-
-        let key = observation_dedup_key(evidence);
-        if !self.dedup.claim(&key).await? {
-            // The same evidence is already claimed — a plan is in flight or
-            // its situation resolved; the procedure path dedups identically.
+        if !self.dedup.claim(dedup_key).await? {
+            // The situation is already claimed — a plan is in flight or its
+            // situation resolved; the procedure path dedups identically.
             return Ok(None);
         }
         let descriptors: Vec<CapabilityDescriptor> = self.registry.list().cloned().collect();
-        match crate::brain::procedure_plan(runbook, subjects, &descriptors) {
-            Some(plan) => Ok(Some((plan, key))),
+        match crate::brain::procedure_plan(runbook, situation, &descriptors) {
+            Some(plan) => Ok(Some((plan, dedup_key.to_string()))),
             None => {
                 // Zero valid steps: release the key so the provider path —
                 // which re-claims it — can reason about the situation.
-                self.dedup.release(&key).await?;
+                self.dedup.release(dedup_key).await?;
                 Ok(None)
             }
         }
@@ -1063,6 +1115,25 @@ impl Daemon {
     /// (the brain releases when a remediation did not resolve the situation).
     pub async fn release_dedup(&self, key: &str) {
         let _: Result<(), _> = self.dedup.release(key).await;
+    }
+
+    /// Claims a dedup key ahead of a reasoning step — the brain claims the
+    /// stable situation-set key before posing the merged provider request,
+    /// the same mechanism the procedure path uses (spec 011). `false` when
+    /// the key is already claimed: the situation set is already reasoned
+    /// about.
+    pub async fn claim_dedup(&self, key: &str) -> Result<bool, DecisionError> {
+        self.dedup.claim(key).await
+    }
+
+    /// Whether a paused (approval-pending) plan carries `key` — its
+    /// situation is still being handled, so the brain holds the key instead
+    /// of releasing it (spec 011: a momentary resolution must not free a
+    /// recrossing to propose a second plan around an open approval).
+    pub fn pending_holds_dedup(&self, key: &str) -> bool {
+        self.list_pending_approvals()
+            .iter()
+            .any(|pending| pending.dedup_key.as_deref() == Some(key))
     }
 
     /// Runs one host-health reasoning step end to end: build the request from

@@ -45,6 +45,11 @@ pub struct DaemonConfig {
     /// ceiling exists — it never raises one.
     #[serde(default)]
     pub autonomy: AutonomyConfig,
+    /// The situation thresholds (spec 011 FR-001). Absent means the defaults:
+    /// 90%, which ordinary operation stays below, so the default
+    /// configuration observes exactly as today.
+    #[serde(default)]
+    pub situations: SituationsConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -64,6 +69,7 @@ impl Default for DaemonConfig {
             kubernetes: KubernetesConfig::default(),
             ledger: LedgerConfig::default(),
             autonomy: AutonomyConfig::default(),
+            situations: SituationsConfig::default(),
         }
     }
 }
@@ -101,6 +107,8 @@ pub struct ConfigFile {
     pub ledger: Option<LedgerConfig>,
     #[serde(default)]
     pub autonomy: Option<AutonomyConfig>,
+    #[serde(default)]
+    pub situations: Option<SituationsConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -297,6 +305,50 @@ impl<'de> Deserialize<'de> for AutonomyConfig {
     }
 }
 
+/// Situation-threshold settings (`[situations]` in argus.toml, spec 011
+/// FR-001).
+///
+/// Absent section → defaults; every knob is clamped, so a typo'd extreme
+/// degrades to the nearest valid bound rather than disabling the checks (the
+/// `AutonomyConfig` pattern). The defaults sit at 90% — above ordinary
+/// operation — so the default configuration collects no pressure situations
+/// and observes exactly as today (AC-006).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SituationsConfig {
+    /// The memory-pressure crossing: `memory.used_percent` at/above this
+    /// collects a `memory-pressure` situation (default 90, clamped 50–99).
+    pub memory_used_percent: f64,
+    /// The disk-pressure crossing: root-filesystem usage percent at/above
+    /// this collects a `disk-pressure` situation (default 90, clamped 50–99).
+    pub disk_used_percent: f64,
+}
+
+impl Default for SituationsConfig {
+    fn default() -> Self {
+        Self {
+            memory_used_percent: 90.0,
+            disk_used_percent: 90.0,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SituationsConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct SituationsWire {
+            #[serde(default)]
+            memory_used_percent: Option<f64>,
+            #[serde(default)]
+            disk_used_percent: Option<f64>,
+        }
+        let wire = SituationsWire::deserialize(deserializer)?;
+        Ok(Self {
+            memory_used_percent: wire.memory_used_percent.unwrap_or(90.0).clamp(50.0, 99.0),
+            disk_used_percent: wire.disk_used_percent.unwrap_or(90.0).clamp(50.0, 99.0),
+        })
+    }
+}
+
 /// Precedence is `defaults < file < flags`; flags are applied afterwards by the
 /// caller, which is why only the first two are handled here.
 ///
@@ -401,6 +453,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.autonomy {
         config.autonomy = value;
+    }
+    if let Some(value) = file.situations {
+        config.situations = value;
     }
 }
 
@@ -844,6 +899,40 @@ telemetry_interval_seconds = 30
         let loaded = load(Some(&path)).expect("valid");
         assert_eq!(loaded.config.autonomy.shadow_min_cycles, 1000);
         assert_eq!(loaded.config.autonomy.rung_clean_cycles, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_situations_section_loads_with_defaults_and_clamps() {
+        let dir = temp_dir();
+
+        // Absent section: the defaults (90/90) — the default configuration
+        // observes exactly as today (spec 011 FR-001, AC-006).
+        let path = write_config(&dir, "argus.toml", "environment_name = \"x\"\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.situations, SituationsConfig::default());
+
+        // Explicit values ride through.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[situations]\nmemory_used_percent = 75\ndisk_used_percent = 80.5\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.situations.memory_used_percent, 75.0);
+        assert_eq!(loaded.config.situations.disk_used_percent, 80.5);
+
+        // Extremes clamp to the documented bounds (50–99): a typo'd extreme
+        // degrades to the nearest valid bound, never disables the checks.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[situations]\nmemory_used_percent = 1\ndisk_used_percent = 150\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.situations.memory_used_percent, 50.0);
+        assert_eq!(loaded.config.situations.disk_used_percent, 99.0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

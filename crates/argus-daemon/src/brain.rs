@@ -1,9 +1,14 @@
-//! The brain: the running observe → reason → act loop (spec 005).
+//! The brain: the running observe → reason → act loop (spec 005), perceiving
+//! a typed situation set (spec 011): failed systemd units (`host-health`,
+//! unchanged) plus resource-pressure threshold crossings (`memory-pressure`,
+//! `disk-pressure`) read kernel-native each cycle.
 //!
-//! The loop turns live state into typed evidence, poses the host-health
-//! structured decisions to the configured provider through
-//! [`Daemon::diagnose_once`], and executes any returned plan through the
-//! ordinary safety boundary (`run_remediation`) at the operator's
+//! The loop turns each situation into typed evidence, drives any promoted
+//! runbook whose trigger matches the situation's signature through its own
+//! deterministic procedure, and otherwise poses the host-health structured
+//! decisions — all situations' evidence in one request — to the configured
+//! provider through [`Daemon::diagnose_once`]. Every plan executes through
+//! the ordinary safety boundary (`run_remediation`) at the operator's
 //! configured autonomy — L0 by default, so a fresh install observes and
 //! explains but executes nothing. Model output is data: it can answer
 //! questions, never grant authority.
@@ -14,12 +19,13 @@ use chrono::Utc;
 use tokio::time::Duration;
 
 use argus_ai_core::decision::adapters::{DeepSeekProvider, LayaHttpProvider};
+use argus_ai_core::decision::context::ContextBuilder;
 use argus_ai_core::decision::provider::DecisionProvider;
 use argus_domain::{Action, BrainTraceRecord, Plan, PlanStep, ResourceId, TokenUsageRecord};
 use argus_memory::{Episode, EpisodeOutcome, ProcedureRecord, ProcedureStatus};
 use uuid::Uuid;
 
-use crate::config::{BrainConfig, DaemonConfig};
+use crate::config::{BrainConfig, DaemonConfig, SituationsConfig};
 use crate::ledger::DaemonLedger;
 use crate::runtime::Daemon;
 use argus_events::LedgerSink;
@@ -157,19 +163,71 @@ impl DecisionProvider for MeteredProvider {
 /// Runs one full brain cycle (FR-003) and records its memory. Used by both
 /// the periodic loop and the `brain.diagnose` IPC trigger.
 pub async fn cycle(daemon: &Daemon, brain: &BrainConfig) -> BrainCycle {
-    // Evidence from live state: the first failed systemd unit is the
-    // cycle's subject (the host-health skill reasons about one service).
-    let (subjects, consulted_live) = failed_units().await;
-    let subjects: Vec<(String, String)> = subjects.into_iter().take(1).collect();
-    cycle_with_evidence(daemon, brain, subjects, consulted_live).await
+    // Spec 011 FR-001: the cycle's situation set, collected from
+    // kernel-native sources — failed systemd units (today's behavior,
+    // unchanged) plus the live pressure readings.
+    let (failed_units, units_live) = failed_units().await;
+    // Fail-closed (AC-005): a failed reading contributes no situation and is
+    // logged — never a fabricated one, and the failed-unit collection is
+    // never degraded by a pressure read.
+    let (memory, memory_live) = match argus_sensors::meminfo::read() {
+        Ok(memory) => (Some(memory), true),
+        Err(error) => {
+            tracing::warn!(%error, "meminfo read failed; no memory-pressure situation this cycle");
+            (None, false)
+        }
+    };
+    let (disk, disk_live) = match argus_sensors::disk::usage(argus_sensors::disk::DEFAULT_MOUNT) {
+        Ok(disk) => (Some(disk), true),
+        Err(error) => {
+            tracing::warn!(%error, "statvfs read failed; no disk-pressure situation this cycle");
+            (None, false)
+        }
+    };
+    let readings = Readings {
+        failed_units,
+        memory,
+        disk,
+    };
+    let situations = situations_from(&readings, &daemon.config().situations);
+    // FR-004: a pressure situation whose reading dropped below the threshold
+    // has resolved — its dedup key releases so a recrossing re-reasons (held
+    // while a plan for the situation is pending approval).
+    release_resolved_pressure(daemon, &readings, &daemon.config().situations).await;
+    // The honest MAP-gate signal (spec 008): true when ANY situation
+    // collection read succeeded — a quiet-but-healthy host consults (it read
+    // the sources and found no situation); a host where every source failed
+    // did not.
+    let consulted_live = units_live || memory_live || disk_live;
+    cycle_with_situations(daemon, brain, situations, consulted_live).await
 }
 
 /// The cycle over injected subjects — the seam tests use so a brain cycle
-/// can be exercised without a system bus.
+/// can be exercised without a system bus. Subjects map to `host-health`
+/// situations, the established vocabulary.
 pub async fn cycle_with_evidence(
     daemon: &Daemon,
     brain: &BrainConfig,
     subjects: Vec<(String, String)>,
+    consulted_live: bool,
+) -> BrainCycle {
+    let situations = subjects
+        .into_iter()
+        .map(|(unit, state)| Situation {
+            signature: HOST_HEALTH.to_string(),
+            subject: unit,
+            detail: state,
+        })
+        .collect();
+    cycle_with_situations(daemon, brain, situations, consulted_live).await
+}
+
+/// The cycle over injected situations — the seam tests use so a brain cycle
+/// can be exercised without a system bus or kernel readings (spec 011).
+pub async fn cycle_with_situations(
+    daemon: &Daemon,
+    brain: &BrainConfig,
+    situations: Vec<Situation>,
     consulted_live: bool,
 ) -> BrainCycle {
     // Spec 007 FR-002: every cycle carries an id, minted at entry, that its
@@ -177,7 +235,7 @@ pub async fn cycle_with_evidence(
     let cycle_id = Uuid::new_v4();
     let ledger = daemon.ledger();
     ledger.enter_cycle(cycle_id).await;
-    let record = run_cycle(daemon, brain, subjects, cycle_id, consulted_live).await;
+    let record = run_cycle(daemon, brain, situations, cycle_id, consulted_live).await;
     let plan_ids = ledger.exit_cycle(cycle_id).await;
 
     // One bounded trace per cycle (FR-002): evidence referenced by summary,
@@ -202,11 +260,14 @@ pub async fn cycle_with_evidence(
     }
 }
 
-/// The cycle body, bracketed by the caller's cycle context.
+/// The cycle body, bracketed by the caller's cycle context: reason per
+/// situation in collection order (spec 011 FR-002), act on each procedure
+/// plan through the ordinary boundary, and fall to ONE provider request over
+/// the merged evidence when no procedure plan fired (ADR-0043 §3).
 async fn run_cycle(
     daemon: &Daemon,
     brain: &BrainConfig,
-    subjects: Vec<(String, String)>,
+    situations: Vec<Situation>,
     cycle_id: Uuid,
     consulted_live: bool,
 ) -> BrainCycle {
@@ -215,12 +276,27 @@ async fn run_cycle(
         consulted_live,
         ..BrainCycle::default()
     };
-    let mut evidence = argus_ai_core::decision::context::ContextBuilder::new();
     let host = ResourceId::new("host", "local").expect("valid host resource id");
-    for (unit, state) in &subjects {
-        evidence.evidence(host.as_str(), "unit", serde_json::json!(unit));
-        evidence.evidence(host.as_str(), "service.state", serde_json::json!(state));
-        record.evidence.push(format!("{unit}: {state}"));
+
+    // Spec 011 FR-005: the sentinel's pressure section rides the SAME
+    // collector the brain reasons from — one perception, two consumers,
+    // never two truths. Present while a reading crosses its threshold,
+    // cleared when it does not (no latching).
+    daemon.note_pressure(pressure_signals(&situations));
+
+    // 1. Evidence — per situation, in collection order (deterministic: failed
+    //    units first, then memory, then disk). Every line names the reading
+    //    that triggered the situation (ADR-0043 §4): failed-unit evidence
+    //    exactly as today; pressure lines `{signature}: {detail}` where the
+    //    detail carries the reading.
+    let mut per_situation: Vec<(Situation, ContextBuilder)> = Vec::new();
+    let mut merged = ContextBuilder::new();
+    for situation in &situations {
+        let mut evidence = ContextBuilder::new();
+        add_situation_evidence(&mut evidence, host.as_str(), situation);
+        add_situation_evidence(&mut merged, host.as_str(), situation);
+        record.evidence.push(evidence_line(situation));
+        per_situation.push((situation.clone(), evidence));
     }
     if record.evidence.is_empty() {
         // Nothing to reason about: a healthy host produces no decision.
@@ -229,56 +305,108 @@ async fn run_cycle(
     }
     record.provider_available = daemon.provider().is_some();
 
-    // 2. Reason — procedure plans first (spec 010 FR-001, ADR-0042 §1): when
-    //    the cycle's situation matches a promoted runbook's trigger, the
-    //    runbook's own deterministic procedure crosses the ordinary boundary
-    //    below and the provider is never consulted — a procedure plan is not
-    //    AI output at all. No matching promoted runbook — or any construction
-    //    failure, fail-closed — and the provider path runs byte-identically
-    //    (AC-002).
+    // 2. Reason — procedure plans first, per situation (spec 011 FR-002,
+    //    ADR-0042 §1): when a situation's signature matches a promoted
+    //    runbook's trigger, the runbook's own deterministic procedure crosses
+    //    the ordinary boundary below and the provider is never consulted — a
+    //    procedure plan is not AI output at all. No matching promoted
+    //    runbook — or any construction failure, fail-closed — and the
+    //    situation's evidence holds for the provider request.
     let events = argus_events::LocalEventBus::new(16);
     let threshold = brain.confidence_threshold;
-    let attributed = match promoted_runbook(daemon) {
-        Some(runbook) => match daemon
-            .propose_procedure(&runbook, &evidence, &subjects)
-            .await
-        {
-            Ok(attributed) => attributed,
-            Err(error) => {
-                tracing::warn!(
-                    runbook = %runbook.name,
-                    %error,
-                    "procedure plan attempt failed; falling through to the provider"
-                );
-                None
+    let mut procedure_fired = false;
+    for (situation, evidence) in &per_situation {
+        let attributed = match promoted_runbook(daemon, &situation.signature) {
+            Some(runbook) => {
+                let dedup_key = situation_dedup_key(situation, evidence);
+                match daemon
+                    .propose_procedure(&runbook, situation, &dedup_key)
+                    .await
+                {
+                    Ok(attributed) => attributed,
+                    Err(error) => {
+                        tracing::warn!(
+                            runbook = %runbook.name,
+                            %error,
+                            "procedure plan attempt failed; falling through to the provider"
+                        );
+                        None
+                    }
+                }
             }
-        },
-        None => None,
-    };
+            None => None,
+        };
+        if let Some((plan, dedup_key)) = attributed {
+            procedure_fired = true;
+            act(
+                daemon,
+                brain,
+                &mut record,
+                &plan,
+                dedup_key,
+                &situation.signature,
+                &events,
+            )
+            .await;
+        }
+    }
 
-    let (plan, dedup_key) = if let Some((plan, dedup_key)) = attributed {
-        record.decision = Some(format!(
-            "procedure plan from promoted runbook '{}'",
-            plan.runbook.as_deref().unwrap_or_default()
-        ));
-        (plan, dedup_key)
-    } else {
+    // 3. The provider path — ONE request over ALL situations' merged
+    //    evidence when no procedure plan fired (spec 011 FR-002): the
+    //    existing flow, evidence superset. A procedure plan anywhere in the
+    //    cycle suppresses it (a procedure plan is not AI output at all);
+    //    provider plans answer the host-health skill, so their episodes keep
+    //    today's signature.
+    if !procedure_fired {
         let Some(provider) = daemon.provider() else {
             tracing::info!("brain cycle: no provider configured; observe-only");
             return record;
         };
+        // The request's dedup key derives from the STABLE situation
+        // identities — the joined per-situation keys — never the raw
+        // evidence: the readings jitter, the situation set does not (spec
+        // 011 NFR). Claimed before the propose (the procedure path's
+        // mechanism), so the two paths can never double-act on one
+        // situation set; released on a no-decision result here and on
+        // non-resolution in `act` — the evidence key's exact semantics.
+        let provider_key = situation_set_key(&situations);
+        let claimed = match daemon.claim_dedup(&provider_key).await {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                record.decision = Some(format!("decision failed: {error}"));
+                return record;
+            }
+        };
+        if !claimed {
+            // The situation set is already reasoned about — a plan is in
+            // flight, or it resolved and persists.
+            record.decision = Some("no actionable decision this cycle".into());
+            return record;
+        }
         // The provider is metered (spec 007 FR-003): every call lands a usage
         // record correlated to this cycle through the ledger context.
         let metered = MeteredProvider::new(provider.clone(), daemon.ledger());
         match daemon
-            .propose_once(metered.as_ref(), evidence, threshold, &events)
+            .propose_once(metered.as_ref(), merged, threshold, &events)
             .await
         {
-            Ok(Some((plan, dedup_key))) => {
-                record.decision = Some("provider decision passed the confidence gate".into());
-                (plan, dedup_key)
+            Ok(Some((plan, _evidence_key))) => {
+                act(
+                    daemon,
+                    brain,
+                    &mut record,
+                    &plan,
+                    provider_key,
+                    HOST_HEALTH,
+                    &events,
+                )
+                .await;
             }
             Ok(None) => {
+                // Nothing actionable: release the set (fail-closed, the
+                // evidence key's release-on-nothing) so the next cycle can
+                // reason again.
+                daemon.release_dedup(&provider_key).await;
                 record.decision = Some("no actionable decision this cycle".into());
                 return record;
             }
@@ -287,29 +415,77 @@ async fn run_cycle(
                 return record;
             }
         }
-    };
+    }
+    record
+}
 
-    record.plan_objective = Some(plan.objective.clone());
-    record.runbook = plan.runbook.clone();
-    record.steps = plan
-        .steps
-        .iter()
-        .map(|step| step.action.capability.as_str().to_string())
-        .collect();
+/// Adds one situation's structured evidence to a builder: failed-unit entries
+/// exactly as today; pressure entries naming the signature and the reading.
+fn add_situation_evidence(evidence: &mut ContextBuilder, host: &str, situation: &Situation) {
+    match situation.signature.as_str() {
+        HOST_HEALTH => {
+            evidence.evidence(host, "unit", serde_json::json!(situation.subject));
+            evidence.evidence(host, "service.state", serde_json::json!(situation.detail));
+        }
+        _ => {
+            evidence.evidence(host, "situation", serde_json::json!(situation.signature));
+            evidence.evidence(host, "pressure", serde_json::json!(situation.detail));
+        }
+    }
+}
+
+/// The trace line for one situation: the failed-unit form today's traces
+/// carry, or `{signature}: {detail}` for pressure — the reading that
+/// triggered everything (spec 011 FR-005, ADR-0043 §4).
+fn evidence_line(situation: &Situation) -> String {
+    match situation.signature.as_str() {
+        HOST_HEALTH => format!("{}: {}", situation.subject, situation.detail),
+        _ => format!("{}: {}", situation.signature, situation.detail),
+    }
+}
+
+/// Acts one decided plan through the ordinary boundary and records what
+/// happened — the shared tail of the procedure and provider paths. The cycle
+/// record's decision/plan fields reflect the FIRST acting situation of the
+/// cycle (collection order); every acting situation lands its own episode,
+/// runbook outcome, and dedup handling (spec 011 FR-002).
+async fn act(
+    daemon: &Daemon,
+    brain: &BrainConfig,
+    record: &mut BrainCycle,
+    plan: &Plan,
+    dedup_key: String,
+    signature: &str,
+    events: &dyn argus_events::EventBus,
+) {
+    let first = record.plan_objective.is_none();
+    if first {
+        record.decision = Some(match plan.runbook.as_deref() {
+            Some(runbook) => format!("procedure plan from promoted runbook '{runbook}'"),
+            None => "provider decision passed the confidence gate".into(),
+        });
+        record.plan_objective = Some(plan.objective.clone());
+        record.runbook = plan.runbook.clone();
+        record.steps = plan
+            .steps
+            .iter()
+            .map(|step| step.action.capability.as_str().to_string())
+            .collect();
+    }
     // Persist the reasoning history so `plan.list` shows the brain's
     // work (FR-008).
     let correlation = uuid::Uuid::new_v4();
-    let _ = daemon.repository().put_plan(correlation, &plan).await;
-    // 3. Act — through the ordinary boundary, at the *effective*
-    // level (spec 008 FR-003): min(managed ceiling, earned rung).
-    // The ceiling is the operator's "how far may this instance
-    // grow", never a command to act at that level now.
+    let _ = daemon.repository().put_plan(correlation, plan).await;
+    // Act — through the ordinary boundary, at the *effective* level (spec
+    // 008 FR-003): min(managed ceiling, earned rung). The ceiling is the
+    // operator's "how far may this instance grow", never a command to act
+    // at that level now.
     let effective = daemon.autonomy().effective(brain.autonomy).await;
-    let outcome = daemon.run_remediation(&plan, effective, &events).await;
+    let outcome = daemon.run_remediation(plan, effective, events).await;
     match outcome {
         crate::control::RunOutcome::Finished(report) => {
             let resolved = report.status == argus_domain::PlanStatus::Completed;
-            record.validation_failed = argus_domain::is_validation_failure(report.status);
+            record.validation_failed |= argus_domain::is_validation_failure(report.status);
             for (index, execution) in report.executions.iter().enumerate() {
                 let _ = daemon
                     .repository()
@@ -321,8 +497,10 @@ async fn run_cycle(
                     )
                     .await;
             }
-            record.outcome = Some(format!("{:?}", report.status));
-            remember(daemon, &record, resolved).await;
+            if first {
+                record.outcome = Some(format!("{:?}", report.status));
+            }
+            remember(daemon, signature, Some(plan.objective.clone()), resolved).await;
             // Spec 010 FR-003/FR-004: the terminal outcome flows to the
             // attributed runbook — Validation → Policy plus a successful
             // history entry when the run completed, an unsuccessful entry
@@ -330,7 +508,7 @@ async fn run_cycle(
             // records nothing: a procedure that never ran is not an attempt.
             // Plans without attribution (the provider path) are untouched;
             // the spec-009 trigger-vocabulary fallback is retired.
-            daemon.note_runbook_outcome(&plan, &report).await;
+            daemon.note_runbook_outcome(plan, &report).await;
             if resolved {
                 // The situation is resolved; the dedup key stays claimed.
             } else {
@@ -354,27 +532,22 @@ async fn run_cycle(
                 pending.dedup_key = Some(dedup_key);
                 daemon.store_pending(pending);
             }
-            record.outcome = Some(format!("awaiting approval {token}"));
-            remember(daemon, &record, false).await;
+            if first {
+                record.outcome = Some(format!("awaiting approval {token}"));
+            }
+            remember(daemon, signature, Some(plan.objective.clone()), false).await;
         }
     }
-    record
-}
-
-/// The cycle's situation signature: the brain's normalized symptom for its
-/// cycles — the same vocabulary [`remember`] records episodes under, and the
-/// only situation vocabulary today. Other triggers climb the moment their
-/// situations exist: the mechanism is trigger-agnostic (spec 010 §6).
-fn cycle_signature() -> argus_runbooks::RunbookTrigger {
-    argus_runbooks::RunbookTrigger::Symptom("host-health".into())
 }
 
 /// The first promoted runbook (name-ordered) whose trigger matches the
-/// cycle's situation — the runbook whose procedure this cycle would run.
+/// situation's signature — the runbook whose procedure this cycle would run.
+/// The signature IS the vocabulary (spec 011 FR-002): a runbook authored for
+/// `memory-pressure` matches the moment a memory-pressure situation exists.
 /// Candidates and approved-but-unpromoted runbooks never drive procedures
 /// (ADR-0036 §3).
-fn promoted_runbook(daemon: &Daemon) -> Option<argus_runbooks::Runbook> {
-    let trigger = cycle_signature();
+fn promoted_runbook(daemon: &Daemon, signature: &str) -> Option<argus_runbooks::Runbook> {
+    let trigger = argus_runbooks::RunbookTrigger::Symptom(signature.to_string());
     daemon.runbooks().list().into_iter().find(|runbook| {
         runbook.status() == argus_runbooks::RunbookStatus::Promoted
             && runbook.matches_trigger(&trigger)
@@ -382,28 +555,32 @@ fn promoted_runbook(daemon: &Daemon) -> Option<argus_runbooks::Runbook> {
 }
 
 /// Builds the deterministic procedure plan from a promoted runbook (spec 010
-/// FR-001): objective `procedure: <name>`, one step per allowed action
-/// targeting the situation's subject (the failed unit) with the runbook's
-/// declared rollback entry paired where present, blast radius the worst of
-/// its actions' registered descriptors, confidence the runbook's historical
-/// success rate when known (else a conservative 0.5).
+/// FR-001, generalized per signature by spec 011 FR-002): objective
+/// `procedure: <name>`, one step per allowed action targeting the situation's
+/// subject with the runbook's declared rollback entry paired where present,
+/// blast radius the worst of its actions' registered descriptors, confidence
+/// the runbook's historical success rate when known (else a conservative 0.5).
 ///
-/// Every step validates against its capability's registered input schema at
-/// construction ([`argus_domain::input_matches`]): a non-conforming step is
-/// skipped, an unregistered capability is non-conforming by definition (a
-/// procedure plan widens nothing), and a runbook whose actions cannot express
-/// the situation yields no plan at all — the caller falls through to the
-/// provider honestly. Attribution rides the plan ([`Plan::runbook`]): the
-/// plan *is* the runbook's procedure, never an inferred link.
+/// Step arguments derive per signature (spec 011): `host-health` targets the
+/// failed unit (`{"unit": …}`); pressure signatures carry the situation's
+/// subject as the only argument candidate (`{"subject": …}`) — a mount for
+/// disk, `mem` for memory. Every step validates against its capability's
+/// registered input schema at construction ([`argus_domain::input_matches`]):
+/// a non-conforming step is skipped, an unregistered capability is
+/// non-conforming by definition (a procedure plan widens nothing), and a
+/// runbook whose actions cannot express the situation yields no plan at all —
+/// the caller falls through to the provider honestly. Attribution rides the
+/// plan ([`Plan::runbook`]): the plan *is* the runbook's procedure, never an
+/// inferred link.
 pub fn procedure_plan(
     runbook: &argus_runbooks::Runbook,
-    subjects: &[(String, String)],
+    situation: &Situation,
     descriptors: &[argus_domain::CapabilityDescriptor],
 ) -> Option<Plan> {
-    // The situation's subject: the brain's host-health vocabulary reasons
-    // about exactly one failed unit.
-    let (unit, _state) = subjects.first()?;
-    let arguments = serde_json::json!({ "unit": unit });
+    let arguments = match situation.signature.as_str() {
+        HOST_HEALTH => serde_json::json!({ "unit": situation.subject }),
+        _ => serde_json::json!({ "subject": situation.subject }),
+    };
 
     let mut steps = Vec::new();
     let mut blast_radius = argus_domain::BlastRadius::None;
@@ -485,17 +662,20 @@ fn worst_blast_radius(
 }
 
 /// Record what happened into the memory layers (FR-003): one episode per
-/// cycle that acted, and a procedure outcome keyed by the plan objective.
-async fn remember(daemon: &Daemon, record: &BrainCycle, resolved: bool) {
+/// acting situation — its symptom the SITUATION's signature (spec 011
+/// FR-002; failed units keep `host-health`) — and a procedure outcome keyed
+/// by the plan objective under the same signature, so the success rate is
+/// real history per remediation, not per-run noise.
+async fn remember(daemon: &Daemon, signature: &str, objective: Option<String>, resolved: bool) {
     let subject = ResourceId::new("host", "local").expect("valid host resource id");
     let now = Utc::now();
     let episode = Episode {
         id: Uuid::new_v4(),
         subject,
-        symptom: "host-health".to_string(),
+        symptom: signature.to_string(),
         resource_class: "host".to_string(),
         root_cause: None,
-        remediation: record.plan_objective.clone(),
+        remediation: objective.clone(),
         outcome: if resolved {
             EpisodeOutcome::Resolved
         } else {
@@ -509,24 +689,19 @@ async fn remember(daemon: &Daemon, record: &BrainCycle, resolved: bool) {
         tracing::warn!(%error, "failed to persist the brain episode");
     }
 
-    // Procedure outcomes aggregate under a stable name so the success rate
-    // is real history, not per-run noise.
-    let name = record
-        .plan_objective
-        .clone()
-        .unwrap_or_else(|| "host-health".to_string());
+    let name = objective.unwrap_or_else(|| signature.to_string());
     let existing = daemon
         .repository()
         .list_procedures()
         .await
         .unwrap_or_default()
         .into_iter()
-        .find(|(_, p)| p.name == name && p.trigger == "host-health");
+        .find(|(_, p)| p.name == name && p.trigger == signature);
     let mut procedure = match &existing {
         Some((_, p)) => p.clone(),
         None => ProcedureRecord::new(
             Uuid::new_v4(),
-            "host-health",
+            signature,
             name,
             ProcedureStatus::Candidate,
             now,
@@ -567,6 +742,191 @@ async fn failed_units() -> (Vec<(String, String)>, bool) {
         .collect();
     failed.sort_by(|a, b| a.0.cmp(&b.0));
     (failed, true)
+}
+
+/// The situation signature of failed systemd units — the established
+/// vocabulary (spec 011 FR-001), unchanged.
+pub const HOST_HEALTH: &str = "host-health";
+/// The live memory-pressure signature: `memory.used_percent` at/above the
+/// configured threshold, subject `mem` (spec 011 FR-001).
+pub const MEMORY_PRESSURE: &str = "memory-pressure";
+/// The live disk-pressure signature: root-filesystem usage at/above the
+/// configured threshold, subject the mount (spec 011 FR-001).
+pub const DISK_PRESSURE: &str = "disk-pressure";
+
+/// One situation the brain perceived this cycle (ADR-0043 §1): a signature —
+/// the vocabulary runbooks declare against — the subject it names, and the
+/// reading that triggered it, in evidence form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Situation {
+    /// The situation type (`host-health`, `memory-pressure`, `disk-pressure`).
+    pub signature: String,
+    /// What the situation is about: the failed unit, or the pressured
+    /// resource (`mem`, the mount).
+    pub subject: String,
+    /// The reading that triggered the situation: the unit state for
+    /// `host-health`; `mem at 91.4%` for pressure. The number an operator
+    /// auditing a procedure plan sees (ADR-0043 §4).
+    pub detail: String,
+}
+
+impl Situation {
+    /// The situation's stable identity — `(signature, subject)`. The
+    /// pressure situations dedup on it directly (stable while the crossing
+    /// persists, distinct per situation — spec 011 NFR, AC-004); the
+    /// provider path joins these identities into its set key
+    /// ([`situation_set_key`]). The host-health PROCEDURE path keeps its
+    /// evidence-derived key (byte-identical), via [`situation_dedup_key`].
+    pub fn dedup_key(&self) -> String {
+        format!("{}:{}", self.signature, self.subject)
+    }
+}
+
+/// The raw readings one cycle collected (spec 011 FR-001) — the collector's
+/// INPUT, so thresholds and situation shape are testable without a kernel.
+#[derive(Debug, Clone, Default)]
+pub struct Readings {
+    /// Failed systemd units as `(unit, state)` pairs, name-sorted — the
+    /// host-health source. Empty when the bus is unavailable.
+    pub failed_units: Vec<(String, String)>,
+    /// The `/proc/meminfo` reading; `None` when the read failed — that
+    /// situation contributes nothing (fail-closed, AC-005).
+    pub memory: Option<argus_sensors::meminfo::MemInfo>,
+    /// The statvfs reading for the root mount; `None` when the read failed.
+    pub disk: Option<argus_sensors::disk::DiskUsage>,
+}
+
+/// The pure situation collector (spec 011 FR-001): readings in, situations
+/// out, in the cycle's deterministic order — failed units first (the
+/// established vocabulary, capped at one like today), then memory, then
+/// disk. A situation is present while its reading crosses the threshold and
+/// absent when it does not: no hysteresis, no latching. A failed reading
+/// contributes no situation (fail-closed, AC-005) — never a fabricated one.
+pub fn situations_from(readings: &Readings, config: &SituationsConfig) -> Vec<Situation> {
+    let mut situations = Vec::new();
+    // Failed systemd units → `host-health`, unchanged. Capped at one: the
+    // host-health skill reasons about a single service.
+    if let Some((unit, state)) = readings.failed_units.first() {
+        situations.push(Situation {
+            signature: HOST_HEALTH.to_string(),
+            subject: unit.clone(),
+            detail: state.clone(),
+        });
+    }
+    if let Some(memory) = &readings.memory {
+        let used = memory.used_percent();
+        if used >= config.memory_used_percent {
+            tracing::info!(
+                reading = used,
+                threshold = config.memory_used_percent,
+                "memory-pressure situation collected: mem at {used}%"
+            );
+            situations.push(Situation {
+                signature: MEMORY_PRESSURE.to_string(),
+                subject: "mem".to_string(),
+                detail: format!("mem at {used:.1}%"),
+            });
+        }
+    }
+    if let Some(disk) = &readings.disk
+        && disk.used_percent >= config.disk_used_percent
+    {
+        tracing::info!(
+            reading = disk.used_percent,
+            threshold = config.disk_used_percent,
+            "disk-pressure situation collected: {} at {}%",
+            disk.mount,
+            disk.used_percent
+        );
+        situations.push(Situation {
+            signature: DISK_PRESSURE.to_string(),
+            subject: disk.mount.clone(),
+            detail: format!("{} at {:.1}%", disk.mount, disk.used_percent),
+        });
+    }
+    situations
+}
+
+/// The pressure dedup keys whose readings are present and BELOW threshold —
+/// genuine resolutions (spec 011 FR-004): the situation is absent and its
+/// dedup key releases, so a recrossing re-reasons. A failed reading releases
+/// nothing: absence by read failure is not resolution (fail-closed).
+pub fn resolved_pressure_keys(readings: &Readings, config: &SituationsConfig) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(memory) = &readings.memory
+        && memory.used_percent() < config.memory_used_percent
+    {
+        keys.push(format!("{MEMORY_PRESSURE}:mem"));
+    }
+    if let Some(disk) = &readings.disk
+        && disk.used_percent < config.disk_used_percent
+    {
+        keys.push(format!("{DISK_PRESSURE}:{}", disk.mount));
+    }
+    keys
+}
+
+/// The cycle's resolution step (spec 011 FR-004): releases each pressure key
+/// whose reading settled below its threshold — except while a paused
+/// (approval-pending) plan carries that exact key: its situation is still
+/// being handled, and a momentary resolution must not free a recrossing to
+/// propose a second plan around an open approval. Host-health releases ride
+/// today's run-outcome mechanics, untouched.
+pub async fn release_resolved_pressure(
+    daemon: &Daemon,
+    readings: &Readings,
+    config: &SituationsConfig,
+) {
+    for key in resolved_pressure_keys(readings, config) {
+        if daemon.pending_holds_dedup(&key) {
+            tracing::debug!(
+                %key,
+                "pressure resolution holds its dedup key: a plan for the situation is pending approval"
+            );
+            continue;
+        }
+        daemon.release_dedup(&key).await;
+    }
+}
+
+/// The situation's dedup key for the procedure path. `host-health` keeps the
+/// evidence-derived key ([`argus_ai_core::decision::host_health::
+/// observation_dedup_key`] — byte-identical to today); pressure situations
+/// key on `(signature, subject)`, so a stable crossing reasons once even as
+/// the reading fluctuates (spec 011 NFR).
+fn situation_dedup_key(situation: &Situation, evidence: &ContextBuilder) -> String {
+    if situation.signature == HOST_HEALTH {
+        use argus_ai_core::decision::host_health::observation_dedup_key;
+        observation_dedup_key(evidence)
+    } else {
+        situation.dedup_key()
+    }
+}
+
+/// The provider request's dedup key: the cycle's situation identities —
+/// [`Situation::dedup_key()`] per situation — sorted and joined. Stable while
+/// the situation set persists (the readings jitter; the identities do not)
+/// and distinct per set, so one provider request reasons one situation set
+/// once instead of re-planning on every reading wiggle (spec 011 NFR).
+fn situation_set_key(situations: &[Situation]) -> String {
+    let mut keys: Vec<String> = situations.iter().map(Situation::dedup_key).collect();
+    keys.sort();
+    keys.join("|")
+}
+
+/// The current resource-pressure crossings as sentinel pressure signals
+/// (spec 011 FR-005): one per pressure situation at `Warning` — a threshold
+/// crossing is a warning, never an invented error. Host-health is not
+/// pressure.
+fn pressure_signals(situations: &[Situation]) -> Vec<crate::sentinel::PressureSignal> {
+    situations
+        .iter()
+        .filter(|s| s.signature == MEMORY_PRESSURE || s.signature == DISK_PRESSURE)
+        .map(|s| crate::sentinel::PressureSignal {
+            subject: s.subject.clone(),
+            severity: argus_domain::Severity::Warning,
+        })
+        .collect()
 }
 
 /// Spawns the periodic brain loop (FR-003). Failures tick-to-tick warn and
@@ -631,9 +991,10 @@ pub fn spawn(
                         // view reports the same zero — never invented.
                         open_critical_incidents: 0,
                         // The MAP gate wants proof live state was consulted:
-                        // the systemd read succeeded — a quiet-but-healthy
-                        // host consults (it read the units and found none
-                        // failed); an unavailable bus does not.
+                        // ANY situation collection read succeeded (spec 011)
+                        // — the systemd read, the meminfo read, or the
+                        // statvfs read. A quiet-but-healthy host consults;
+                        // a host where every source failed does not.
                         live_environment: record.consulted_live,
                         // The typed revocation signature decided at the run
                         // site — never a string match on the outcome.
@@ -668,6 +1029,7 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SituationsConfig;
     use argus_domain::{BlastRadius, CapabilityDescriptor, CapabilityId, Reversibility, RiskClass};
     use argus_runbooks::{Runbook, RunbookTrigger};
     use semver::Version;
@@ -697,8 +1059,8 @@ mod tests {
         .with_blast_radius(BlastRadius::Host)
     }
 
-    /// A pod restart targets pods by `name` — a vocabulary the host-health
-    /// situation (a failed systemd unit) cannot express.
+    /// A pod restart targets pods by `name` — a vocabulary no situation in
+    /// this test (a failed unit, or a pressure subject) can express.
     fn pod_restart_descriptor() -> CapabilityDescriptor {
         CapabilityDescriptor::new(
             CapabilityId::new("k8s.pod.restart").unwrap(),
@@ -716,6 +1078,28 @@ mod tests {
             Reversibility::Reversible,
         )
         .with_blast_radius(BlastRadius::Environment)
+    }
+
+    /// A drain-style action whose schema accepts the pressure vocabulary's
+    /// one argument candidate (`subject`) — the stand-in for a capability a
+    /// memory-pressure procedure could drive.
+    fn drain_descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor::new(
+            CapabilityId::new("host.cache.drain").unwrap(),
+            "argusd",
+            "host.process.signal",
+            RiskClass::Controlled,
+            Version::new(0, 1, 0),
+            serde_json::json!({
+                "type": "object",
+                "required": ["subject"],
+                "properties": { "subject": { "type": "string" } },
+                "additionalProperties": false,
+            }),
+            serde_json::json!({}),
+            Reversibility::Reversible,
+        )
+        .with_blast_radius(BlastRadius::Host)
     }
 
     fn runbook(name: &str, actions: Vec<&str>, rollback: Vec<&str>) -> Runbook {
@@ -738,8 +1122,43 @@ mod tests {
         )
     }
 
-    fn subjects() -> Vec<(String, String)> {
-        vec![("argus-test.service".into(), "failed failed".into())]
+    fn runbook_for(name: &str, signature: &str, actions: Vec<&str>) -> Runbook {
+        Runbook::candidate(
+            Uuid::new_v4(),
+            name,
+            RunbookTrigger::Symptom(signature.into()),
+            vec![],
+            vec![],
+            vec![],
+            actions
+                .into_iter()
+                .map(|action| CapabilityId::new(action).unwrap())
+                .collect(),
+            vec![],
+            vec![],
+        )
+    }
+
+    /// The host-health situation the procedure-plan tests reason about: one
+    /// failed unit, today's vocabulary.
+    fn host_health() -> Situation {
+        Situation {
+            signature: HOST_HEALTH.to_string(),
+            subject: "argus-test.service".to_string(),
+            detail: "failed failed".to_string(),
+        }
+    }
+
+    /// A memory reading at the given used percent: `(total − available) /
+    /// total` matches exactly at one decimal.
+    fn meminfo_at(used_percent: f64) -> argus_sensors::meminfo::MemInfo {
+        let total = 1_000_000u64;
+        let available = (total as f64 * (1.0 - used_percent / 100.0)).round() as u64;
+        argus_sensors::meminfo::MemInfo {
+            mem_total: total,
+            mem_available: available,
+            ..argus_sensors::meminfo::MemInfo::default()
+        }
     }
 
     #[test]
@@ -749,7 +1168,7 @@ mod tests {
             vec!["host.service.restart"],
             vec!["host.service.restart"],
         );
-        let plan = procedure_plan(&rb, &subjects(), &[restart_descriptor()]).expect("a plan");
+        let plan = procedure_plan(&rb, &host_health(), &[restart_descriptor()]).expect("a plan");
 
         // Attribution by construction: the plan carries the runbook's name,
         // both in the field and in the objective approvals read.
@@ -780,6 +1199,25 @@ mod tests {
     }
 
     #[test]
+    fn a_pressure_runbook_derives_its_arguments_from_the_subject() {
+        // Spec 011 FR-002: step arguments derive per signature — a
+        // memory-pressure runbook's steps carry the situation's subject as
+        // the one argument candidate, and `input_matches` decides.
+        let rb = runbook_for("drain-cache", MEMORY_PRESSURE, vec!["host.cache.drain"]);
+        let situation = Situation {
+            signature: MEMORY_PRESSURE.to_string(),
+            subject: "mem".to_string(),
+            detail: "mem at 91.4%".to_string(),
+        };
+        let plan = procedure_plan(&rb, &situation, &[drain_descriptor()]).expect("a plan");
+        assert_eq!(plan.runbook.as_deref(), Some("drain-cache"));
+        assert_eq!(
+            plan.steps[0].action.arguments,
+            serde_json::json!({ "subject": "mem" })
+        );
+    }
+
+    #[test]
     fn non_conforming_and_unregistered_steps_are_skipped() {
         // The pod action's schema wants `name`, which the situation (a failed
         // unit) cannot supply; the cordon capability is not registered at all.
@@ -790,7 +1228,7 @@ mod tests {
         );
         let plan = procedure_plan(
             &rb,
-            &subjects(),
+            &host_health(),
             &[restart_descriptor(), pod_restart_descriptor()],
         )
         .expect("the conforming step survives");
@@ -807,14 +1245,19 @@ mod tests {
 
     #[test]
     fn a_runbook_that_cannot_express_the_situation_yields_no_plan() {
-        let rb = runbook("pod-procedure", vec!["k8s.pod.restart"], vec![]);
+        // The pod action's schema wants `name`; neither a failed unit nor a
+        // pressure subject can supply it — zero valid steps falls through to
+        // the provider honestly (spec 011, the disk-pressure design note).
+        let rb = runbook_for("pod-procedure", MEMORY_PRESSURE, vec!["k8s.pod.restart"]);
+        let situation = Situation {
+            signature: MEMORY_PRESSURE.to_string(),
+            subject: "mem".to_string(),
+            detail: "mem at 91.4%".to_string(),
+        };
         assert!(
-            procedure_plan(&rb, &subjects(), &[pod_restart_descriptor()]).is_none(),
-            "zero valid steps falls through to the provider honestly"
+            procedure_plan(&rb, &situation, &[pod_restart_descriptor()]).is_none(),
+            "a capability that cannot express the subject builds no plan"
         );
-        // No subject at all: nothing to target, no plan.
-        let rb = runbook("restart-failed", vec!["host.service.restart"], vec![]);
-        assert!(procedure_plan(&rb, &[], &[restart_descriptor()]).is_none());
     }
 
     #[test]
@@ -828,7 +1271,7 @@ mod tests {
         rb.record_outcome(false);
         let plan = procedure_plan(
             &rb,
-            &subjects(),
+            &host_health(),
             &[restart_descriptor(), pod_restart_descriptor()],
         )
         .expect("the service step survives");
@@ -846,5 +1289,145 @@ mod tests {
         assert_eq!(worst_blast_radius(Host, Environment), Environment);
         assert_eq!(worst_blast_radius(Environment, Fleet), Fleet);
         assert_eq!(worst_blast_radius(NoRadius, NoRadius), NoRadius);
+    }
+
+    // --- Spec 011: the pure situation collector ---
+
+    #[test]
+    fn a_memory_crossing_collects_the_pressure_situation() {
+        let readings = Readings {
+            memory: Some(meminfo_at(91.4)),
+            ..Readings::default()
+        };
+        let situations = situations_from(&readings, &SituationsConfig::default());
+        assert_eq!(situations.len(), 1);
+        assert_eq!(situations[0].signature, MEMORY_PRESSURE);
+        assert_eq!(situations[0].subject, "mem");
+        assert_eq!(situations[0].detail, "mem at 91.4%");
+        // The reading IS the evidence (ADR-0043 §4): the trigger line names
+        // the number that crossed.
+        assert_eq!(
+            evidence_line(&situations[0]),
+            "memory-pressure: mem at 91.4%"
+        );
+    }
+
+    #[test]
+    fn the_crossing_is_at_and_above_the_threshold_never_below() {
+        // Exactly at the default 90: present (>=, AC-001).
+        let at = Readings {
+            memory: Some(meminfo_at(90.0)),
+            ..Readings::default()
+        };
+        assert_eq!(situations_from(&at, &SituationsConfig::default()).len(), 1);
+        // One tick below: absent (no hysteresis, no latching).
+        let below = Readings {
+            memory: Some(meminfo_at(89.9)),
+            ..Readings::default()
+        };
+        assert!(
+            situations_from(&below, &SituationsConfig::default()).is_empty(),
+            "below the threshold there is no situation (AC-002)"
+        );
+    }
+
+    #[test]
+    fn a_failed_reading_contributes_no_situation() {
+        // meminfo/statvfs unavailable → `None` → no pressure situation,
+        // never a fabricated one (AC-005). Failed-unit collection rides its
+        // own source and proceeds.
+        let readings = Readings {
+            failed_units: vec![("argus-test.service".into(), "failed failed".into())],
+            memory: None,
+            disk: None,
+        };
+        let situations = situations_from(&readings, &SituationsConfig::default());
+        assert_eq!(situations.len(), 1);
+        assert_eq!(situations[0].signature, HOST_HEALTH);
+    }
+
+    #[test]
+    fn situations_collect_in_deterministic_order_units_then_memory_then_disk() {
+        let readings = Readings {
+            failed_units: vec![
+                ("b.service".into(), "failed failed".into()),
+                ("a.service".into(), "failed failed".into()),
+            ],
+            memory: Some(meminfo_at(95.0)),
+            disk: Some(argus_sensors::disk::DiskUsage::from_blocks(
+                "/", 4096, 100, 2,
+            )),
+        };
+        let situations = situations_from(&readings, &SituationsConfig::default());
+        assert_eq!(situations.len(), 3, "one failed unit (capped), mem, disk");
+        assert_eq!(situations[0].signature, HOST_HEALTH);
+        assert_eq!(
+            situations[0].subject, "b.service",
+            "name-sorted, capped at one"
+        );
+        assert_eq!(situations[1].signature, MEMORY_PRESSURE);
+        assert_eq!(situations[2].signature, DISK_PRESSURE);
+        assert_eq!(situations[2].subject, "/");
+        assert_eq!(situations[2].detail, "/ at 98.0%");
+        // Separate dedup keys per (signature, subject) — AC-004.
+        let keys: std::collections::HashSet<String> =
+            situations.iter().map(Situation::dedup_key).collect();
+        assert_eq!(keys.len(), 3, "every situation dedups apart");
+    }
+
+    #[test]
+    fn pressure_dedup_keys_are_signature_and_subject_not_the_fluctuating_reading() {
+        let first = Situation {
+            signature: MEMORY_PRESSURE.to_string(),
+            subject: "mem".to_string(),
+            detail: "mem at 91.4%".to_string(),
+        };
+        let second = Situation {
+            signature: MEMORY_PRESSURE.to_string(),
+            subject: "mem".to_string(),
+            detail: "mem at 92.1%".to_string(),
+        };
+        assert_eq!(
+            first.dedup_key(),
+            second.dedup_key(),
+            "a stable crossing reasons once (spec 011 NFR)"
+        );
+    }
+
+    #[test]
+    fn resolved_pressure_keys_release_exactly_the_settled_crossings() {
+        let readings = Readings {
+            memory: Some(meminfo_at(50.0)),
+            disk: Some(argus_sensors::disk::DiskUsage::from_blocks(
+                "/", 4096, 100, 2,
+            )),
+            failed_units: vec![("argus-test.service".into(), "failed failed".into())],
+        };
+        // Memory settled below the threshold; disk still crossing.
+        let keys = resolved_pressure_keys(&readings, &SituationsConfig::default());
+        assert_eq!(keys, vec!["memory-pressure:mem".to_string()]);
+        // A failed reading releases nothing: absence is not resolution.
+        let failed_read = Readings {
+            memory: None,
+            disk: None,
+            failed_units: vec![],
+        };
+        assert!(resolved_pressure_keys(&failed_read, &SituationsConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn pressure_signals_surface_only_pressure_situations() {
+        let situations = vec![
+            host_health(),
+            Situation {
+                signature: MEMORY_PRESSURE.to_string(),
+                subject: "mem".to_string(),
+                detail: "mem at 91.4%".to_string(),
+            },
+        ];
+        let signals = pressure_signals(&situations);
+        assert_eq!(signals.len(), 1, "host-health is not pressure");
+        assert_eq!(signals[0].subject, "mem");
+        assert_eq!(signals[0].severity, argus_domain::Severity::Warning);
     }
 }
