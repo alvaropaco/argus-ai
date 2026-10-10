@@ -80,6 +80,7 @@ fn one_step_plan(
         blast_radius: BlastRadius::Host,
         confidence: 0.95,
         status: PlanStatus::Proposed,
+        runbook: None,
     }
 }
 

@@ -209,7 +209,7 @@ async fn plan_list(daemon: &Daemon, request: Request) -> Response {
             let plans = plans
                 .into_iter()
                 .map(|(id, plan)| {
-                    serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "correlation_id": id.to_string(),
                         "objective": plan.objective,
                         "status": plan.status,
@@ -221,7 +221,15 @@ async fn plan_list(daemon: &Daemon, request: Request) -> Response {
                                 "rollback": step.rollback.as_ref().map(|r| r.capability.as_str()),
                             })
                         }).collect::<Vec<_>>(),
-                    })
+                    });
+                    // Spec 010 FR-002: a procedure plan's runbook attribution
+                    // rides the entry — additive, absent for provider plans.
+                    if let Some(runbook) = &plan.runbook
+                        && let Some(object) = entry.as_object_mut()
+                    {
+                        object.insert("runbook".into(), serde_json::Value::String(runbook.clone()));
+                    }
+                    entry
                 })
                 .collect::<Vec<_>>();
             Response::ok(request.correlation_id, serde_json::json!(plans))

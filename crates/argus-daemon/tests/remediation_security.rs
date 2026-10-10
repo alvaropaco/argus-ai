@@ -241,6 +241,7 @@ fn plan(steps: Vec<(Action, Option<Action>)>) -> Plan {
         blast_radius: BlastRadius::Host,
         confidence: 0.9,
         status: PlanStatus::Proposed,
+        runbook: None,
     }
 }
 

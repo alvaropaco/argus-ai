@@ -127,6 +127,12 @@ pub struct PendingPlan {
     /// Indices of steps that already executed before the pause, so a post-resume
     /// failure still rolls back pre-pause effects (ADR-0030 §5).
     pub executed: Vec<usize>,
+    /// The evidence-derived dedup key the proposing cycle claimed — carried by
+    /// attributed (procedure) plans only (spec 010 AC-004): when the resumed
+    /// run does not resolve the situation, the resume releases the key so the
+    /// next cycle may reason again. Absent for provider plans, whose
+    /// pause/resume behavior is unchanged.
+    pub dedup_key: Option<String>,
 }
 
 /// The result of routing a plan through the safety boundary.
@@ -571,6 +577,9 @@ fn pause_plan(plan: &Plan, executed: &[usize]) -> PendingPlan {
         token,
         context_hash,
         executed: executed.to_vec(),
+        // The proposing cycle attaches its dedup key for attributed plans;
+        // the pause site itself has no evidence context.
+        dedup_key: None,
     }
 }
 
@@ -1485,6 +1494,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         }
     }
 
@@ -2000,6 +2010,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         }
     }
 
@@ -2038,6 +2049,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         }
     }
 
@@ -2247,6 +2259,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         }
     }
 
@@ -2320,6 +2333,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         };
 
         let service = MockServiceController::new();

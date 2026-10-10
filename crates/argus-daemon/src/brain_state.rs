@@ -21,6 +21,10 @@ pub struct BrainCycleRecord {
     pub provider_available: bool,
     pub decision: Option<String>,
     pub plan: Option<String>,
+    /// The promoted runbook whose procedure the cycle ran, when the plan was
+    /// a deterministic procedure plan (spec 010 FR-002). `None` — absent on
+    /// the report — for provider plans.
+    pub runbook: Option<String>,
     pub outcome: Option<String>,
     pub at: chrono::DateTime<chrono::Utc>,
 }
@@ -191,6 +195,7 @@ mod tests {
             provider_available: true,
             decision: Some("decided".into()),
             plan: Some("restore".into()),
+            runbook: None,
             outcome: Some("Completed".into()),
             at: chrono::Utc::now(),
         });

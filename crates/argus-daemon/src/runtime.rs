@@ -806,8 +806,49 @@ impl Daemon {
         .await;
         if let ResumeOutcome::Finished(report) = &outcome {
             self.record_run_outcome(report).await;
+            // Spec 010 AC-006: a resumed attributed plan is the same plan —
+            // its outcome flows to its runbook exactly as a brain-loop run's
+            // would. Provider plans carry no attribution and are untouched.
+            self.note_runbook_outcome(&pending.plan, report).await;
+            // Spec 010 AC-004: a resumed attributed run that did not resolve
+            // the situation releases its dedup key, so the next cycle may
+            // reason again. Provider plans carry no key and are unchanged.
+            if report.status != PlanStatus::Completed
+                && let Some(key) = &pending.dedup_key
+            {
+                self.release_dedup(key).await;
+            }
         }
         outcome
+    }
+
+    /// Routes a terminal attributed-plan outcome to its runbook (spec 010
+    /// FR-004/FR-005, ADR-0042 §3): a completed run earns the opportunistic
+    /// Validation → Policy evidence plus a successful history entry; any
+    /// other terminal status records an unsuccessful history entry and moves
+    /// no gate — no automatic demotion (ADR-0040 discipline).
+    ///
+    /// Only an ATTEMPTED procedure is an attempt: a report that carried no
+    /// executions — policy, autonomy, or escalation refused before anything
+    /// ran — records nothing at all, so a refused procedure can never drive
+    /// the runbook's success rate down with zero real runs. Plans without
+    /// attribution — the provider path — are untouched.
+    pub(crate) async fn note_runbook_outcome(&self, plan: &Plan, report: &ExecutionOutcome) {
+        let Some(name) = plan.runbook.as_deref() else {
+            return;
+        };
+        if report.executions.is_empty() {
+            return;
+        }
+        if report.status == PlanStatus::Completed {
+            let descriptors: Vec<CapabilityDescriptor> = self.registry.list().cloned().collect();
+            let policy = argus_policy::BootstrapPolicyEvaluator::with_local_remediation();
+            self.runbooks
+                .on_attributed_plan_validated(name, &descriptors, &policy)
+                .await;
+        } else {
+            self.runbooks.note_procedure_outcome(name, false).await;
+        }
     }
 
     /// The live sentinel view (spec-004 FR-003): built from real daemon state
@@ -965,6 +1006,42 @@ impl Daemon {
         match result? {
             EvidenceDecision::Plan(plan, _provenance, key) => Ok(Some((*plan, key))),
             EvidenceDecision::Deduplicated(_) | EvidenceDecision::Nothing => Ok(None),
+        }
+    }
+
+    /// The procedure-plan half of the reasoning loop (spec 010 FR-001,
+    /// ADR-0042 §1): claims the SAME evidence-derived dedup key the provider
+    /// path would claim, then builds the deterministic plan from the promoted
+    /// runbook — so the two paths can never double-act on one situation. The
+    /// plan comes back UNEXECUTED with its dedup key, exactly like
+    /// [`Self::propose_once`]. `None` — with the key released — when the
+    /// runbook cannot express the situation (zero schema-valid steps), so the
+    /// provider path can run unchanged: fail-closed, never a missed
+    /// remediation. The provider is not consulted and its health is not
+    /// touched: a procedure plan is not AI output at all.
+    pub async fn propose_procedure(
+        &self,
+        runbook: &argus_runbooks::Runbook,
+        evidence: &ContextBuilder,
+        subjects: &[(String, String)],
+    ) -> Result<Option<(Plan, String)>, DecisionError> {
+        use argus_ai_core::decision::host_health::observation_dedup_key;
+
+        let key = observation_dedup_key(evidence);
+        if !self.dedup.claim(&key).await? {
+            // The same evidence is already claimed — a plan is in flight or
+            // its situation resolved; the procedure path dedups identically.
+            return Ok(None);
+        }
+        let descriptors: Vec<CapabilityDescriptor> = self.registry.list().cloned().collect();
+        match crate::brain::procedure_plan(runbook, subjects, &descriptors) {
+            Some(plan) => Ok(Some((plan, key))),
+            None => {
+                // Zero valid steps: release the key so the provider path —
+                // which re-claims it — can reason about the situation.
+                self.dedup.release(&key).await?;
+                Ok(None)
+            }
         }
     }
 
@@ -1787,16 +1864,22 @@ impl crate::cloud::SentinelSource for Daemon {
                 .rev()
                 .take(10)
                 .map(|(id, plan)| {
-                    serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "id": id.to_string(),
                         "objective": plan.objective,
                         "status": format!("{:?}", plan.status),
                         "confidence": plan.confidence,
                         "step_count": plan.steps.len(),
-                    })
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default()
+                    });
+                    // Spec 010 FR-002: a procedure plan's runbook attribution
+                    // rides the entry — additive, absent for provider plans
+                    // (the skip-if-none 008 pattern).
+                    if let Some(runbook) = &plan.runbook
+                        && let Some(object) = entry.as_object_mut()
+                    {
+                        object.insert("runbook".into(), Value::String(runbook.clone()));
+                    }
+                    entry.as_object().cloned().unwrap_or_default()
                 })
                 .collect();
 
@@ -1817,7 +1900,7 @@ impl crate::cloud::SentinelSource for Daemon {
                 .collect();
 
             let last_cycle = self.brain_state.last_cycle().map(|record| {
-                serde_json::json!({
+                let mut entry = serde_json::json!({
                     "cycle_id": record.cycle_id,
                     "evidence": record.evidence,
                     "provider_available": record.provider_available,
@@ -1825,10 +1908,15 @@ impl crate::cloud::SentinelSource for Daemon {
                     "plan": record.plan,
                     "outcome": record.outcome,
                     "at": record.at.to_rfc3339(),
-                })
-                .as_object()
-                .cloned()
-                .unwrap_or_default()
+                });
+                // Spec 010: the cycle's runbook attribution, when the plan was
+                // a procedure plan — additive, absent otherwise.
+                if let Some(runbook) = &record.runbook
+                    && let Some(object) = entry.as_object_mut()
+                {
+                    object.insert("runbook".into(), Value::String(runbook.clone()));
+                }
+                entry.as_object().cloned().unwrap_or_default()
             });
 
             Ok(argus_cloud::protocol::messages::SentinelReportPayload {
@@ -2021,6 +2109,72 @@ mod tests {
         assert!(registry.check(&restart, "nginx.service").is_ok());
     }
 
+    /// Only an ATTEMPTED procedure is an attempt (spec 010 FR-005): a report
+    /// with zero executions — a policy/autonomy refusal — records nothing on
+    /// the runbook, while a failed run that carried executions is real
+    /// unsuccessful history.
+    #[tokio::test]
+    async fn a_refused_procedure_records_nothing_and_an_attempted_failure_records_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("procedure.toml"),
+            r#"
+name = "restart-failed"
+trigger = { symptom = "host-health" }
+allowed_actions = ["host.service.restart"]
+"#,
+        )
+        .unwrap();
+        let config = DaemonConfig {
+            brain: crate::config::BrainConfig {
+                runbooks_dir: Some(dir.path().to_string_lossy().into_owned()),
+                ..crate::config::BrainConfig::default()
+            },
+            ..test_config()
+        };
+        let daemon = Daemon::init(config).await.unwrap();
+        let plan = Plan {
+            objective: "procedure: restart-failed".into(),
+            steps: vec![],
+            preconditions: vec![],
+            expected_outcomes: vec![],
+            blast_radius: BlastRadius::Host,
+            confidence: 0.5,
+            status: argus_domain::PlanStatus::Proposed,
+            runbook: Some("restart-failed".into()),
+        };
+
+        // Refused before anything ran: zero executions, nothing recorded.
+        daemon
+            .note_runbook_outcome(&plan, &ExecutionOutcome::default())
+            .await;
+        let runbook = daemon.runbooks().by_name("restart-failed").unwrap();
+        assert_eq!(
+            runbook.attempts(),
+            0,
+            "a refusal is not an attempt — no invented history"
+        );
+
+        // Attempted and failed: the report carries the failed execution.
+        let mut attempted = ExecutionOutcome {
+            status: argus_domain::PlanStatus::Failed,
+            ..ExecutionOutcome::default()
+        };
+        attempted.executions.push(argus_domain::Execution {
+            action: argus_domain::Action {
+                capability: CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap(),
+                resource: None,
+                arguments: serde_json::json!({ "unit": "argus-test.service" }),
+            },
+            status: argus_domain::ExecutionStatus::Failed,
+            evidence: serde_json::json!({ "error": "the host refused the restart" }),
+        });
+        daemon.note_runbook_outcome(&plan, &attempted).await;
+        let runbook = daemon.runbooks().by_name("restart-failed").unwrap();
+        assert_eq!(runbook.attempts(), 1);
+        assert_eq!(runbook.historical_success_rate(), Some(0.0));
+    }
+
     #[test]
     fn pending_approvals_are_keyed_by_token() {
         let store = PendingApprovals::new();
@@ -2034,10 +2188,12 @@ mod tests {
                 blast_radius: BlastRadius::Host,
                 confidence: 0.9,
                 status: argus_domain::PlanStatus::AwaitingApproval,
+                runbook: None,
             },
             token,
             context_hash: "hash-a".into(),
             executed: vec![],
+            dedup_key: None,
         };
 
         store.store(pending);

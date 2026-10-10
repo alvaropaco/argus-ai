@@ -519,6 +519,7 @@ mod tests {
             blast_radius: argus_domain::BlastRadius::Host,
             confidence: 0.9,
             status: argus_domain::PlanStatus::Proposed,
+            runbook: None,
         };
         let first = uuid::Uuid::new_v4();
         repo.put_plan(first, &plan).await.unwrap();

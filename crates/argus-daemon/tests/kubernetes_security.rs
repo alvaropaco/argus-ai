@@ -285,6 +285,7 @@ fn plan(steps: Vec<Action>) -> Plan {
         blast_radius: BlastRadius::Environment,
         confidence: 0.9,
         status: PlanStatus::Proposed,
+        runbook: None,
     }
 }
 

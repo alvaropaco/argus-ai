@@ -123,6 +123,7 @@ pub fn propose_plan(
         blast_radius: BlastRadius::Host,
         confidence,
         status: PlanStatus::Proposed,
+        runbook: None,
     })
 }
 

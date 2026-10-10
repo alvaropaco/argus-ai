@@ -9,15 +9,16 @@
 //!   with cloud provenance. A malformed delivery loads nothing. A
 //!   re-delivery of the same name supersedes the previous candidate.
 //! - **Gates are earned locally, from evidence that already exists**:
-//!   [`evaluation_evidence`] checks the runbook's trigger against recorded
-//!   episodes (deterministic, fail-closed on an empty history), and
-//!   [`simulation_evidence`] simulates every allowed action through the risk
-//!   engine (Infeasible rollback or Destructive risk fails). Validation is
-//!   recorded only when the procedure actually runs and validates in
-//!   operation ([`RunbookManager::on_procedure_validated`]); policy follows
-//!   it, in ladder order. No gate is ever recorded out of order or without
-//!   its evidence — the ladder's own [`argus_runbooks::GateError`] has the
-//!   final say.
+//!   [`evaluation_evidence`] checks the runbook's trigger — and, per spec
+//!   010, its name linkage — against recorded episodes (deterministic,
+//!   fail-closed on an empty history), and [`simulation_evidence`] simulates
+//!   every allowed action through the risk engine (Infeasible rollback or
+//!   Destructive risk fails). Validation is recorded only when a plan
+//!   attributed to the runbook — the procedure built from it, by construction
+//!   ([`RunbookManager::on_attributed_plan_validated`]) — actually ran and
+//!   validated in operation; policy follows it, in ladder order. No gate is
+//!   ever recorded out of order or without its evidence — the ladder's own
+//!   [`argus_runbooks::GateError`] has the final say.
 //! - **Approval and promotion are operator acts**: [`RunbookManager::decide`]
 //!   crosses the decision (cloud control message or CLI) into the local
 //!   ladder, whose existing errors reject out-of-order decisions.
@@ -33,10 +34,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use argus_domain::{AuthorizationRequest, CapabilityDescriptor, PolicyOutcome};
-use argus_memory::Episode;
+use argus_memory::{Episode, EpisodeOutcome};
 use argus_policy::PolicyEvaluator;
 use argus_runbooks::{
-    DeliveredRunbook, Gate, Runbook, RunbookLibrary, RunbookStatus, RunbookTrigger, parse_runbook,
+    DeliveredRunbook, Gate, Runbook, RunbookLibrary, RunbookTrigger, parse_runbook,
 };
 use argus_state::DomainRepository;
 use chrono::{DateTime, Utc};
@@ -427,75 +428,62 @@ impl RunbookManager {
         }
     }
 
-    /// The opportunistic Validation/Policy hook (spec 009 FR-003, AC-003):
-    /// called when the brain's remediation *for this trigger* executed and
-    /// validated (the caller passes only completed runs — the evidence).
-    /// Delivered candidates matching the trigger earn the validation gate,
-    /// then the policy gate, in ladder order. Attribution is the author's
-    /// own contract: a candidate that declares no `[[validation]]` criteria
-    /// cannot be attributed a validated run and is left alone. A candidate
-    /// missing earlier gates is rejected by the ladder and waits — never
-    /// guessed. Only delivered candidates participate: directory-loaded
-    /// runbooks keep their unchanged spec-004 behavior (spec 009
-    /// out-of-scope note).
-    pub async fn on_procedure_validated(
+    /// The attributed Validation/Policy hook (spec 010 FR-003, ADR-0042 §2):
+    /// called when a completed plan attributed to `name` — the deterministic
+    /// procedure built *from* that runbook, by construction — executed and
+    /// validated. The run earns its live attempt history, then the Validation
+    /// gate and the Policy gate, in ladder order, for THAT runbook and no
+    /// other: no trigger vocabulary, no text similarity, no guessing. The
+    /// ladder has the final say — a runbook missing earlier gates is rejected
+    /// and waits (logged, never guessed), and one that already reached a gate
+    /// is refused as out-of-order. This replaces spec 009's trigger-vocabulary
+    /// approximation, which validated procedures that never ran.
+    pub async fn on_attributed_plan_validated(
         &self,
-        trigger: &RunbookTrigger,
+        name: &str,
         descriptors: &[CapabilityDescriptor],
         policy: &dyn PolicyEvaluator,
     ) {
-        let names: Vec<String> = {
+        // The attributed run validated in operation: live attempt history,
+        // independent of whether any gate lands.
+        self.record_outcome(name, true).await;
+
+        // Validation: the run just supplied the evidence.
+        self.record_earned_gate(name, Gate::Validation).await;
+
+        // Policy, next on the ladder and only when validation stands: the
+        // runbook's capabilities must pass the policy evaluator.
+        let verdict = {
             let library = self
                 .library
                 .read()
                 .expect("runbook library lock is not poisoned");
-            library
-                .matching(trigger)
-                .into_iter()
-                .filter(|runbook| runbook.status() == RunbookStatus::Candidate)
-                .filter(|runbook| !runbook.validation.is_empty())
-                .filter(|runbook| {
-                    self.delivered
-                        .lock()
-                        .expect("delivered map lock is not poisoned")
-                        .contains_key(&runbook.name)
-                })
-                .map(|runbook| runbook.name.clone())
-                .collect()
-        };
-
-        for name in names {
-            // The run validated in operation: live attempt history for this
-            // candidate, independent of whether any gate lands.
-            self.record_outcome(&name, true).await;
-
-            // Validation: the run just supplied the evidence.
-            self.record_earned_gate(&name, Gate::Validation).await;
-
-            // Policy, next on the ladder and only when validation stands:
-            // the candidate's capabilities must pass the policy evaluator.
-            let verdict = {
-                let library = self
-                    .library
-                    .read()
-                    .expect("runbook library lock is not poisoned");
-                match library.by_name(&name) {
-                    Some(runbook) if runbook.has_reached(Gate::Validation) => {
-                        Some(policy_compatible(runbook, descriptors, policy).err())
-                    }
-                    _ => None,
+            match library.by_name(name) {
+                Some(runbook) if runbook.has_reached(Gate::Validation) => {
+                    Some(policy_compatible(runbook, descriptors, policy).err())
                 }
-            };
-            match verdict {
-                Some(None) => self.record_earned_gate(&name, Gate::Policy).await,
-                Some(Some(reason)) => tracing::info!(
-                    runbook = %name,
-                    %reason,
-                    "policy gate withheld: the candidate capabilities are not policy-compatible"
-                ),
-                None => {}
+                _ => None,
             }
+        };
+        match verdict {
+            Some(None) => self.record_earned_gate(name, Gate::Policy).await,
+            Some(Some(reason)) => tracing::info!(
+                runbook = %name,
+                %reason,
+                "policy gate withheld: the runbook capabilities are not policy-compatible"
+            ),
+            None => {}
         }
+    }
+
+    /// Records an attributed procedure outcome without touching the ladder
+    /// (spec 010 FR-005, ADR-0042 §3): a failed or rolled-back procedure
+    /// lands `record_outcome(false)` — the runbook's success rate falls, the
+    /// honest signal the operator revokes on — while the gates stand still.
+    /// No automatic demotion: that stays the operator's decision (ADR-0040
+    /// discipline).
+    pub async fn note_procedure_outcome(&self, name: &str, success: bool) {
+        self.record_outcome(name, success).await;
     }
 
     /// Records one validated run into a delivered candidate's attempt history
@@ -651,16 +639,19 @@ impl Decision {
     }
 }
 
-/// The Evaluation gate's evidence check (spec 009 FR-003): the host's
-/// recorded episode history corroborates the procedure. Deterministic and
-/// fail-closed — a host with no episodes fails honestly, a trigger with no
-/// matching resolved episode fails honestly, and nothing is ever inferred.
+/// The Evaluation gate's evidence check (spec 009 FR-003, name-linkage per
+/// spec 010 FR-004): the host's recorded episode history corroborates the
+/// procedure. Deterministic and fail-closed — a host with no episodes fails
+/// honestly, a trigger with no matching resolved episode fails honestly, and
+/// nothing is ever inferred.
 ///
 /// The deterministic match: the runbook's trigger signature equals an
 /// episode's recorded symptom, that episode ended `Resolved`, and it carries
-/// the remediation that resolved it. That is "steps against recorded episodes
-/// via the runbooks criterion" without inventing a connection the memory
-/// layer does not hold.
+/// the remediation that resolved it — or, the content linkage, the episode
+/// ended `Resolved` and its remediation is exactly the runbook's recorded
+/// procedure signature `procedure: <name>` (what a procedure plan writes as
+/// its remediation), so an attributed run corroborates its runbook at any
+/// trigger. Exact comparisons both — a name is never a substring guess.
 pub fn evaluation_evidence(runbook: &Runbook, episodes: &[Episode]) -> Result<(), String> {
     if episodes.is_empty() {
         return Err(
@@ -679,20 +670,35 @@ pub fn evaluation_evidence(runbook: &Runbook, episodes: &[Episode]) -> Result<()
             );
         }
     };
+    let name = runbook.name.trim().to_lowercase();
+    // The exact remediation signature a procedure plan records (spec 010
+    // FR-004) — an exact comparison, never a substring: a runbook named
+    // `restart` must not be corroborated by another runbook's
+    // `procedure: restart-failed` episode.
+    let procedure_signature = format!("procedure: {name}");
 
     let corroborating = episodes
         .iter()
         .filter(|episode| {
-            episode.symptom.trim().to_lowercase() == signature
-                && episode.outcome == argus_memory::EpisodeOutcome::Resolved
-                && episode.remediation.is_some()
+            let resolved_with_remediation =
+                episode.outcome == EpisodeOutcome::Resolved && episode.remediation.is_some();
+            let trigger_match = episode.symptom.trim().to_lowercase() == signature;
+            // Spec 010 FR-004: an episode whose remediation is exactly the
+            // runbook's procedure signature is the record of a procedure that
+            // actually ran — accepted alongside the trigger match.
+            let name_match = episode.remediation.as_deref().is_some_and(|remediation| {
+                remediation
+                    .trim()
+                    .eq_ignore_ascii_case(&procedure_signature)
+            });
+            resolved_with_remediation && (trigger_match || name_match)
         })
         .count();
 
     if corroborating == 0 {
         return Err(format!(
-            "no recorded episode with symptom '{signature}' ended resolved with a remediation; \
-             the evaluation gate has no local evidence"
+            "no recorded episode with symptom '{signature}' or remediation naming '{name}' ended \
+             resolved with a remediation; the evaluation gate has no local evidence"
         ));
     }
     Ok(())
@@ -810,6 +816,7 @@ mod tests {
     use argus_domain::{BlastRadius, CapabilityId, Reversibility, RiskClass};
     use argus_memory::EpisodeOutcome;
     use argus_policy::BootstrapPolicyEvaluator;
+    use argus_runbooks::RunbookStatus;
     use argus_state::RepositoryError;
     use semver::Version;
 
@@ -967,6 +974,69 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn evaluation_accepts_a_name_linked_resolved_episode_at_any_trigger() {
+        // Spec 010 FR-004 (AC-005): an episode whose remediation is exactly
+        // the runbook's recorded procedure signature — what a procedure plan
+        // writes — counts even when the symptom differs from the runbook's
+        // trigger, so any trigger climbs.
+        let rb = runbook(
+            RunbookTrigger::Symptom("disk-pressure".into()),
+            vec!["host.service.restart"],
+        );
+        let episodes = vec![episode(
+            "host-health",
+            EpisodeOutcome::Resolved,
+            Some("procedure: learned-procedure"),
+        )];
+        assert_eq!(evaluation_evidence(&rb, &episodes), Ok(()));
+    }
+
+    #[test]
+    fn evaluation_name_linkage_is_specific_to_the_runbooks_own_signature() {
+        // A runbook named `restart` must not be corroborated by another
+        // runbook's `procedure: restart-failed` episode: the comparison is
+        // the exact signature, never a substring.
+        let restart = Runbook::candidate(
+            Uuid::new_v4(),
+            "restart",
+            RunbookTrigger::Symptom("disk-pressure".into()),
+            vec![],
+            vec![],
+            vec![],
+            vec![CapabilityId::new("host.service.restart").unwrap()],
+            vec![],
+            vec![],
+        );
+        let other_procedure = vec![episode(
+            "host-health",
+            EpisodeOutcome::Resolved,
+            Some("procedure: restart-failed"),
+        )];
+        assert!(evaluation_evidence(&restart, &other_procedure).is_err());
+
+        let rb = runbook(
+            RunbookTrigger::Symptom("disk-pressure".into()),
+            vec!["host.service.restart"],
+        );
+        // A resolved episode naming a DIFFERENT procedure corroborates
+        // nothing: the linkage is the signature, not "some remediation
+        // happened".
+        let other = vec![episode(
+            "host-health",
+            EpisodeOutcome::Resolved,
+            Some("procedure: some-other-procedure"),
+        )];
+        assert!(evaluation_evidence(&rb, &other).is_err());
+        // An unresolved signature-matched episode corroborates nothing.
+        let unresolved = vec![episode(
+            "host-health",
+            EpisodeOutcome::Unresolved,
+            Some("procedure: learned-procedure"),
+        )];
+        assert!(evaluation_evidence(&rb, &unresolved).is_err());
     }
 
     // --- Simulation evidence ---
@@ -1323,13 +1393,10 @@ rollback = ["host.service.restart"]
         );
 
         // The honest path: validation in operation, then policy, then the
-        // operator's approve → promote.
+        // operator's approve → promote. Spec 010: the attribution is by name
+        // — the procedure built from THIS runbook validated.
         manager
-            .on_procedure_validated(
-                &RunbookTrigger::Symptom("restart-loop".into()),
-                &descriptors,
-                &policy,
-            )
+            .on_attributed_plan_validated("learned-procedure", &descriptors, &policy)
             .await;
         assert_eq!(
             manager.by_name("learned-procedure").unwrap().gates(),
@@ -1416,7 +1483,7 @@ rollback = ["host.service.restart"]
     }
 
     #[tokio::test]
-    async fn the_opportunistic_hook_waits_when_earlier_gates_are_missing() {
+    async fn the_attributed_hook_waits_when_earlier_gates_are_missing() {
         let (manager, _repository) = manager().await;
         // No episodes: the candidate is gateless.
         manager
@@ -1432,8 +1499,8 @@ rollback = ["host.service.restart"]
             .unwrap();
         let descriptors = vec![restart_descriptor()];
         manager
-            .on_procedure_validated(
-                &RunbookTrigger::Symptom("restart-loop".into()),
+            .on_attributed_plan_validated(
+                "gateless",
                 &descriptors,
                 &BootstrapPolicyEvaluator::with_local_remediation(),
             )
@@ -1443,13 +1510,125 @@ rollback = ["host.service.restart"]
             &[],
             "validation without its prerequisites is rejected by the ladder — the gates wait"
         );
+        // The attributed run is still honest history even while its gates
+        // wait (spec 010: the procedure really ran).
+        assert_eq!(manager.by_name("gateless").unwrap().attempts(), 1);
     }
 
     #[tokio::test]
-    async fn the_opportunistic_hook_touches_delivered_candidates_only() {
-        // A directory-loaded runbook at the same trigger.
+    async fn the_attributed_hook_records_for_exactly_the_named_runbook() {
+        let (manager, _repository) = manager().await;
+        let episodes = vec![episode(
+            "restart-loop",
+            EpisodeOutcome::Resolved,
+            Some("restart"),
+        )];
+        let descriptors = vec![restart_descriptor()];
+        for name in ["attributed", "bystander"] {
+            manager
+                .deliver(
+                    &valid_toml(name),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    1,
+                    &episodes,
+                    &descriptors,
+                )
+                .await
+                .unwrap();
+        }
+
+        manager
+            .on_attributed_plan_validated(
+                "attributed",
+                &descriptors,
+                &BootstrapPolicyEvaluator::with_local_remediation(),
+            )
+            .await;
+
+        let attributed = manager.by_name("attributed").unwrap();
+        assert_eq!(
+            attributed.gates(),
+            &[
+                Gate::Evaluation,
+                Gate::Simulation,
+                Gate::Validation,
+                Gate::Policy
+            ],
+            "the attributed runbook climbs"
+        );
+        assert_eq!(attributed.attempts(), 1);
+
+        let bystander = manager.by_name("bystander").unwrap();
+        assert_eq!(
+            bystander.gates(),
+            &[Gate::Evaluation, Gate::Simulation],
+            "a runbook whose procedure did not run is never validated"
+        );
+        assert_eq!(bystander.attempts(), 0, "no invented history");
+    }
+
+    #[tokio::test]
+    async fn a_failed_procedure_records_an_unsuccessful_outcome_and_moves_no_gate() {
+        let (manager, _repository) = manager().await;
+        let episodes = vec![episode(
+            "restart-loop",
+            EpisodeOutcome::Resolved,
+            Some("restart"),
+        )];
+        let descriptors = vec![restart_descriptor()];
+        manager
+            .deliver(
+                &valid_toml("learned-procedure"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                1,
+                &episodes,
+                &descriptors,
+            )
+            .await
+            .unwrap();
+
+        manager
+            .note_procedure_outcome("learned-procedure", false)
+            .await;
+
+        let runbook = manager.by_name("learned-procedure").unwrap();
+        assert_eq!(runbook.attempts(), 1);
+        assert_eq!(runbook.historical_success_rate(), Some(0.0));
+        assert_eq!(
+            runbook.gates(),
+            &[Gate::Evaluation, Gate::Simulation],
+            "gates do not advance on a failed run"
+        );
+        assert_eq!(
+            runbook.status(),
+            RunbookStatus::Candidate,
+            "no automatic demotion, no automatic promotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promoted_runbooks_attributed_run_earns_nothing_twice() {
+        // A file-loaded runbook at the full ladder: the loader replays the
+        // declared gates, so it drives procedures (spec 010).
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("file.toml"), valid_toml("file-loaded")).unwrap();
+        std::fs::write(
+            dir.path().join("promoted.toml"),
+            r#"
+name = "promoted"
+trigger = { symptom = "restart-loop" }
+allowed_actions = ["host.service.restart"]
+rollback = ["host.service.restart"]
+gates = ["evaluation", "simulation", "validation", "policy", "approval", "promotion"]
+
+[[validation]]
+description = "unit active again"
+attribute = "unit.active_state"
+comparison = { equal = "active" }
+"#,
+        )
+        .unwrap();
         let mut config = crate::config::DaemonConfig::default();
         config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
         let repository = Arc::new(argus_state::SqliteRepository::open_in_memory().unwrap());
@@ -1458,31 +1637,27 @@ rollback = ["host.service.restart"]
             Arc::clone(&repository) as Arc<dyn DomainRepository>,
         )
         .await;
+        assert_eq!(
+            manager.by_name("promoted").unwrap().status(),
+            RunbookStatus::Promoted
+        );
 
-        let descriptors = vec![restart_descriptor()];
         manager
-            .on_procedure_validated(
-                &RunbookTrigger::Symptom("restart-loop".into()),
-                &descriptors,
+            .on_attributed_plan_validated(
+                "promoted",
+                &[restart_descriptor()],
                 &BootstrapPolicyEvaluator::with_local_remediation(),
             )
             .await;
+
+        let runbook = manager.by_name("promoted").unwrap();
+        assert_eq!(runbook.attempts(), 1, "the validated run is history");
+        assert_eq!(runbook.historical_success_rate(), Some(1.0));
+        assert_eq!(runbook.status(), RunbookStatus::Promoted);
         assert_eq!(
-            manager.by_name("file-loaded").unwrap().gates(),
-            &[],
-            "directory-loaded runbooks keep their unchanged spec-004 behavior"
-        );
-        // A decision on a file-owned runbook is refused: it would be silently
-        // reverted at the next restart (only delivered runbooks re-persist).
-        let error = manager
-            .decide("file-loaded", Decision::Approve, "uid=0")
-            .await
-            .unwrap_err();
-        assert!(error.contains("file-owned"), "{error}");
-        assert_eq!(
-            manager.by_name("file-loaded").unwrap().status(),
-            RunbookStatus::Candidate,
-            "the refusal left the runbook untouched"
+            runbook.gates().len(),
+            6,
+            "the full ladder stands; nothing re-earns"
         );
     }
 
@@ -1531,14 +1706,44 @@ comparison = { equal = "active" }
     }
 
     #[tokio::test]
-    async fn the_opportunistic_hook_requires_declared_validation_criteria() {
+    async fn a_decision_on_a_file_owned_runbook_is_refused() {
+        // A directory-loaded runbook is file-owned: a decision on it would be
+        // silently reverted at the next restart (only delivered runbooks
+        // re-persist).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.toml"), valid_toml("file-loaded")).unwrap();
+        let mut config = crate::config::DaemonConfig::default();
+        config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+        let repository = Arc::new(argus_state::SqliteRepository::open_in_memory().unwrap());
+        let manager = RunbookManager::load(
+            &config,
+            Arc::clone(&repository) as Arc<dyn DomainRepository>,
+        )
+        .await;
+
+        let error = manager
+            .decide("file-loaded", Decision::Approve, "uid=0")
+            .await
+            .unwrap_err();
+        assert!(error.contains("file-owned"), "{error}");
+        assert_eq!(
+            manager.by_name("file-loaded").unwrap().status(),
+            RunbookStatus::Candidate,
+            "the refusal left the runbook untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn attribution_is_by_construction_not_by_declared_criteria() {
+        // Spec 010 retires the spec-009 approximation: a runbook whose
+        // procedure ran is attributed by construction, so its validated run
+        // records even when the document declares no `[[validation]]`
+        // criteria. The criteria were the old attribution proxy; the name is
+        // the contract now.
         let (manager, _repository) = manager().await;
-        // Validation criteria are the author's own attribution contract: a
-        // candidate that declares none cannot be attributed a validated run.
-        let toml = valid_toml_without_validation("no-criteria");
         manager
             .deliver(
-                &toml,
+                &valid_toml_without_validation("no-criteria"),
                 Uuid::new_v4(),
                 Uuid::new_v4(),
                 1,
@@ -1553,22 +1758,17 @@ comparison = { equal = "active" }
             .unwrap();
         let descriptors = vec![restart_descriptor()];
         manager
-            .on_procedure_validated(
-                &RunbookTrigger::Symptom("restart-loop".into()),
+            .on_attributed_plan_validated(
+                "no-criteria",
                 &descriptors,
                 &BootstrapPolicyEvaluator::with_local_remediation(),
             )
             .await;
         let runbook = manager.by_name("no-criteria").unwrap();
         assert_eq!(
-            runbook.gates(),
-            &[Gate::Evaluation, Gate::Simulation],
-            "no declared validation criteria: no opportunistic gates"
-        );
-        assert_eq!(
             runbook.attempts(),
-            0,
-            "an unattributable candidate invents no history"
+            1,
+            "the attributed run is real history, whatever the document declared"
         );
     }
 
@@ -1699,8 +1899,8 @@ comparison = { equal = "active" }
             .await
             .unwrap();
         manager
-            .on_procedure_validated(
-                &RunbookTrigger::Symptom("restart-loop".into()),
+            .on_attributed_plan_validated(
+                "learned-procedure",
                 &[restart_descriptor()],
                 &BootstrapPolicyEvaluator::with_local_remediation(),
             )
@@ -1723,6 +1923,51 @@ comparison = { equal = "active" }
             manager.by_name("learned-procedure").unwrap().status(),
             RunbookStatus::Approved
         );
+    }
+
+    #[tokio::test]
+    async fn an_attributed_outcome_persistence_failure_degrades_downward() {
+        let sqlite = Arc::new(argus_state::SqliteRepository::open_in_memory().unwrap());
+        let store = Arc::new(FlakyRunbookStore {
+            inner: sqlite as Arc<dyn DomainRepository>,
+            fail_puts: std::sync::atomic::AtomicBool::new(false),
+        });
+        let config = crate::config::DaemonConfig::default();
+        let manager =
+            RunbookManager::load(&config, Arc::clone(&store) as Arc<dyn DomainRepository>).await;
+        let episodes = vec![episode(
+            "restart-loop",
+            EpisodeOutcome::Resolved,
+            Some("restart"),
+        )];
+        manager
+            .deliver(
+                &valid_toml("learned-procedure"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                1,
+                &episodes,
+                &[restart_descriptor()],
+            )
+            .await
+            .unwrap();
+        manager
+            .on_attributed_plan_validated(
+                "learned-procedure",
+                &[restart_descriptor()],
+                &BootstrapPolicyEvaluator::with_local_remediation(),
+            )
+            .await;
+
+        // Break persistence underneath the manager: the attributed runbook
+        // still climbs; the re-persist failure is logged, never raised.
+        store
+            .fail_puts
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        manager
+            .note_procedure_outcome("learned-procedure", false)
+            .await;
+        assert_eq!(manager.by_name("learned-procedure").unwrap().attempts(), 2);
     }
 
     #[tokio::test]

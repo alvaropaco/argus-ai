@@ -261,6 +261,7 @@ pub fn autofix_plan(
         blast_radius: escalation.blast_radius,
         confidence: escalation.confidence as f64,
         status: argus_domain::PlanStatus::Proposed,
+        runbook: None,
     })
 }
 

@@ -89,6 +89,7 @@ fn plan() -> Plan {
         blast_radius: BlastRadius::Host,
         confidence: 0.9,
         status: PlanStatus::Proposed,
+        runbook: None,
     }
 }
 

@@ -178,6 +178,13 @@ pub struct Plan {
     pub blast_radius: BlastRadius,
     pub confidence: f64,
     pub status: PlanStatus,
+    /// The promoted runbook this plan's procedure came from, when the plan is
+    /// a deterministic procedure plan (spec 010 FR-002). Attribution is by
+    /// construction: the plan *is* the runbook's procedure, never an inferred
+    /// link. `None` — absent on the wire — for provider plans, so persisted
+    /// plans, IPC payloads, and cloud snapshots tolerate the field's absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runbook: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for Plan {
@@ -201,6 +208,10 @@ impl<'de> Deserialize<'de> for Plan {
             blast_radius: BlastRadius,
             confidence: f64,
             status: PlanStatus,
+            /// The spec-010 procedure attribution; absent on every plan written
+            /// before it existed.
+            #[serde(default)]
+            runbook: Option<String>,
         }
 
         let wire = PlanWire::deserialize(deserializer)?;
@@ -227,6 +238,7 @@ impl<'de> Deserialize<'de> for Plan {
             blast_radius: wire.blast_radius,
             confidence: wire.confidence,
             status: wire.status,
+            runbook: wire.runbook,
         })
     }
 }
@@ -322,10 +334,43 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         };
         let json = serde_json::to_string(&plan).unwrap();
         let back: Plan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan, back);
+    }
+
+    #[test]
+    fn a_procedure_plans_runbook_attribution_round_trips_and_tolerates_absence() {
+        let mut plan = Plan {
+            objective: "procedure: restart-failed-service".into(),
+            steps: vec![],
+            preconditions: vec![],
+            expected_outcomes: vec![],
+            blast_radius: BlastRadius::Host,
+            confidence: 0.5,
+            status: PlanStatus::Proposed,
+            runbook: Some("restart-failed-service".into()),
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("restart-failed-service"),
+            "the attribution rides the wire: {json}"
+        );
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(plan, back);
+
+        // A plan persisted before the field existed — no `runbook` key —
+        // deserializes with the attribution absent (serde default).
+        plan.runbook = None;
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !json.contains("runbook"),
+            "an unattributed plan emits no runbook key: {json}"
+        );
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runbook, None);
     }
 
     #[test]
@@ -389,6 +434,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         };
         let json = serde_json::to_value(&plan).unwrap();
         assert!(json.get("steps").is_some(), "serialized with `steps`");
@@ -429,6 +475,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         };
         let proposed = plan_context_hash(&plan);
 
@@ -438,6 +485,12 @@ mod tests {
 
         // A content change must.
         plan.objective = "restart postgres".into();
+        assert_ne!(proposed, plan_context_hash(&plan));
+
+        // Attribution is content: an attributed plan binds differently than
+        // the same procedure without the runbook.
+        plan.objective = "restore nginx".into();
+        plan.runbook = Some("restart-failed-service".into());
         assert_ne!(proposed, plan_context_hash(&plan));
     }
 

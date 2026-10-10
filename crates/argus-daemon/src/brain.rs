@@ -15,7 +15,7 @@ use tokio::time::Duration;
 
 use argus_ai_core::decision::adapters::{DeepSeekProvider, LayaHttpProvider};
 use argus_ai_core::decision::provider::DecisionProvider;
-use argus_domain::{BrainTraceRecord, ResourceId, TokenUsageRecord};
+use argus_domain::{Action, BrainTraceRecord, Plan, PlanStep, ResourceId, TokenUsageRecord};
 use argus_memory::{Episode, EpisodeOutcome, ProcedureRecord, ProcedureStatus};
 use uuid::Uuid;
 
@@ -95,6 +95,10 @@ pub struct BrainCycle {
     pub decision: Option<String>,
     /// The plan the brain proposed, when the decision passed the gates.
     pub plan_objective: Option<String>,
+    /// The promoted runbook whose procedure ran, when the plan was a
+    /// deterministic procedure plan (spec 010 FR-002). `None` for provider
+    /// plans.
+    pub runbook: Option<String>,
     /// The plan's step capabilities, so the cycle trace carries the step list
     /// (FR-002) without re-reading the plan.
     pub steps: Vec<String>,
@@ -213,7 +217,7 @@ async fn run_cycle(
     };
     let mut evidence = argus_ai_core::decision::context::ContextBuilder::new();
     let host = ResourceId::new("host", "local").expect("valid host resource id");
-    for (unit, state) in subjects {
+    for (unit, state) in &subjects {
         evidence.evidence(host.as_str(), "unit", serde_json::json!(unit));
         evidence.evidence(host.as_str(), "service.state", serde_json::json!(state));
         record.evidence.push(format!("{unit}: {state}"));
@@ -225,89 +229,259 @@ async fn run_cycle(
     }
     record.provider_available = daemon.provider().is_some();
 
-    // 2. Reason: decide-only (dedup → structured decisions → confidence
-    //    gate → typed plan). The plan comes back UNEXECUTED — the brain's
-    //    action path is the modern run boundary, not the dispatch port.
-    let Some(provider) = daemon.provider() else {
-        tracing::info!("brain cycle: no provider configured; observe-only");
-        return record;
-    };
+    // 2. Reason — procedure plans first (spec 010 FR-001, ADR-0042 §1): when
+    //    the cycle's situation matches a promoted runbook's trigger, the
+    //    runbook's own deterministic procedure crosses the ordinary boundary
+    //    below and the provider is never consulted — a procedure plan is not
+    //    AI output at all. No matching promoted runbook — or any construction
+    //    failure, fail-closed — and the provider path runs byte-identically
+    //    (AC-002).
     let events = argus_events::LocalEventBus::new(16);
     let threshold = brain.confidence_threshold;
-    // The provider is metered (spec 007 FR-003): every call lands a usage
-    // record correlated to this cycle through the ledger context.
-    let metered = MeteredProvider::new(provider.clone(), daemon.ledger());
-    match daemon
-        .propose_once(metered.as_ref(), evidence, threshold, &events)
-        .await
-    {
-        Ok(Some((plan, dedup_key))) => {
-            record.decision = Some("provider decision passed the confidence gate".into());
-            record.plan_objective = Some(plan.objective.clone());
-            record.steps = plan
-                .steps
-                .iter()
-                .map(|step| step.action.capability.as_str().to_string())
-                .collect();
-            // Persist the reasoning history so `plan.list` shows the brain's
-            // work (FR-008).
-            let correlation = uuid::Uuid::new_v4();
-            let _ = daemon.repository().put_plan(correlation, &plan).await;
-            // 3. Act — through the ordinary boundary, at the *effective*
-            // level (spec 008 FR-003): min(managed ceiling, earned rung).
-            // The ceiling is the operator's "how far may this instance
-            // grow", never a command to act at that level now.
-            let effective = daemon.autonomy().effective(brain.autonomy).await;
-            let outcome = daemon.run_remediation(&plan, effective, &events).await;
-            match outcome {
-                crate::control::RunOutcome::Finished(report) => {
-                    let resolved = report.status == argus_domain::PlanStatus::Completed;
-                    record.validation_failed = argus_domain::is_validation_failure(report.status);
-                    for (index, execution) in report.executions.iter().enumerate() {
-                        let _ = daemon
-                            .repository()
-                            .put_execution(
-                                format!("{correlation}:{index}")
-                                    .parse()
-                                    .unwrap_or_else(|_| uuid::Uuid::new_v4()),
-                                execution,
-                            )
-                            .await;
-                    }
-                    record.outcome = Some(format!("{:?}", report.status));
-                    remember(daemon, &record, resolved).await;
-                    if resolved {
-                        // Spec 009 FR-003 (AC-003): the run validated in
-                        // operation — the opportunistic Validation/Policy
-                        // evidence for delivered candidates at this trigger.
-                        // An unresolved run validated nothing.
-                        record_runbook_gates(daemon).await;
-                        // The situation is resolved; the dedup key stays
-                        // claimed.
-                    } else {
-                        // The situation persists: allow the next cycle to
-                        // reason about it again.
-                        daemon.release_dedup(&dedup_key).await;
-                    }
-                }
-                crate::control::RunOutcome::Pending(pending) => {
-                    // Paused for an operator approval — stored on the daemon
-                    // for `approval.grant`; the dedup key stays claimed so
-                    // the loop does not pile up duplicates while a human
-                    // decides.
-                    record.outcome = Some(format!("awaiting approval {}", pending.token));
-                    remember(daemon, &record, false).await;
-                }
+    let attributed = match promoted_runbook(daemon) {
+        Some(runbook) => match daemon
+            .propose_procedure(&runbook, &evidence, &subjects)
+            .await
+        {
+            Ok(attributed) => attributed,
+            Err(error) => {
+                tracing::warn!(
+                    runbook = %runbook.name,
+                    %error,
+                    "procedure plan attempt failed; falling through to the provider"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    let (plan, dedup_key) = if let Some((plan, dedup_key)) = attributed {
+        record.decision = Some(format!(
+            "procedure plan from promoted runbook '{}'",
+            plan.runbook.as_deref().unwrap_or_default()
+        ));
+        (plan, dedup_key)
+    } else {
+        let Some(provider) = daemon.provider() else {
+            tracing::info!("brain cycle: no provider configured; observe-only");
+            return record;
+        };
+        // The provider is metered (spec 007 FR-003): every call lands a usage
+        // record correlated to this cycle through the ledger context.
+        let metered = MeteredProvider::new(provider.clone(), daemon.ledger());
+        match daemon
+            .propose_once(metered.as_ref(), evidence, threshold, &events)
+            .await
+        {
+            Ok(Some((plan, dedup_key))) => {
+                record.decision = Some("provider decision passed the confidence gate".into());
+                (plan, dedup_key)
+            }
+            Ok(None) => {
+                record.decision = Some("no actionable decision this cycle".into());
+                return record;
+            }
+            Err(error) => {
+                record.decision = Some(format!("decision failed: {error}"));
+                return record;
             }
         }
-        Ok(None) => {
-            record.decision = Some("no actionable decision this cycle".into());
+    };
+
+    record.plan_objective = Some(plan.objective.clone());
+    record.runbook = plan.runbook.clone();
+    record.steps = plan
+        .steps
+        .iter()
+        .map(|step| step.action.capability.as_str().to_string())
+        .collect();
+    // Persist the reasoning history so `plan.list` shows the brain's
+    // work (FR-008).
+    let correlation = uuid::Uuid::new_v4();
+    let _ = daemon.repository().put_plan(correlation, &plan).await;
+    // 3. Act — through the ordinary boundary, at the *effective*
+    // level (spec 008 FR-003): min(managed ceiling, earned rung).
+    // The ceiling is the operator's "how far may this instance
+    // grow", never a command to act at that level now.
+    let effective = daemon.autonomy().effective(brain.autonomy).await;
+    let outcome = daemon.run_remediation(&plan, effective, &events).await;
+    match outcome {
+        crate::control::RunOutcome::Finished(report) => {
+            let resolved = report.status == argus_domain::PlanStatus::Completed;
+            record.validation_failed = argus_domain::is_validation_failure(report.status);
+            for (index, execution) in report.executions.iter().enumerate() {
+                let _ = daemon
+                    .repository()
+                    .put_execution(
+                        format!("{correlation}:{index}")
+                            .parse()
+                            .unwrap_or_else(|_| uuid::Uuid::new_v4()),
+                        execution,
+                    )
+                    .await;
+            }
+            record.outcome = Some(format!("{:?}", report.status));
+            remember(daemon, &record, resolved).await;
+            // Spec 010 FR-003/FR-004: the terminal outcome flows to the
+            // attributed runbook — Validation → Policy plus a successful
+            // history entry when the run completed, an unsuccessful entry
+            // when it was attempted and failed. A refusal (no executions)
+            // records nothing: a procedure that never ran is not an attempt.
+            // Plans without attribution (the provider path) are untouched;
+            // the spec-009 trigger-vocabulary fallback is retired.
+            daemon.note_runbook_outcome(&plan, &report).await;
+            if resolved {
+                // The situation is resolved; the dedup key stays claimed.
+            } else {
+                // The situation persists: allow the next cycle to
+                // reason about it again.
+                daemon.release_dedup(&dedup_key).await;
+            }
         }
-        Err(error) => {
-            record.decision = Some(format!("decision failed: {error}"));
+        crate::control::RunOutcome::Pending(pending) => {
+            // Paused for an operator approval — stored on the daemon
+            // for `approval.grant`; the dedup key stays claimed so
+            // the loop does not pile up duplicates while a human
+            // decides. On the grant, the same attributed plan resumes
+            // and its outcome flows to the runbook (spec 010 AC-006);
+            // an attributed plan carries its dedup key so a resumed
+            // failure releases the situation (AC-004). Provider plans
+            // keep their unchanged pause behavior.
+            let mut pending = pending;
+            let token = pending.token;
+            if plan.runbook.is_some() {
+                pending.dedup_key = Some(dedup_key);
+                daemon.store_pending(pending);
+            }
+            record.outcome = Some(format!("awaiting approval {token}"));
+            remember(daemon, &record, false).await;
         }
     }
     record
+}
+
+/// The cycle's situation signature: the brain's normalized symptom for its
+/// cycles — the same vocabulary [`remember`] records episodes under, and the
+/// only situation vocabulary today. Other triggers climb the moment their
+/// situations exist: the mechanism is trigger-agnostic (spec 010 §6).
+fn cycle_signature() -> argus_runbooks::RunbookTrigger {
+    argus_runbooks::RunbookTrigger::Symptom("host-health".into())
+}
+
+/// The first promoted runbook (name-ordered) whose trigger matches the
+/// cycle's situation — the runbook whose procedure this cycle would run.
+/// Candidates and approved-but-unpromoted runbooks never drive procedures
+/// (ADR-0036 §3).
+fn promoted_runbook(daemon: &Daemon) -> Option<argus_runbooks::Runbook> {
+    let trigger = cycle_signature();
+    daemon.runbooks().list().into_iter().find(|runbook| {
+        runbook.status() == argus_runbooks::RunbookStatus::Promoted
+            && runbook.matches_trigger(&trigger)
+    })
+}
+
+/// Builds the deterministic procedure plan from a promoted runbook (spec 010
+/// FR-001): objective `procedure: <name>`, one step per allowed action
+/// targeting the situation's subject (the failed unit) with the runbook's
+/// declared rollback entry paired where present, blast radius the worst of
+/// its actions' registered descriptors, confidence the runbook's historical
+/// success rate when known (else a conservative 0.5).
+///
+/// Every step validates against its capability's registered input schema at
+/// construction ([`argus_domain::input_matches`]): a non-conforming step is
+/// skipped, an unregistered capability is non-conforming by definition (a
+/// procedure plan widens nothing), and a runbook whose actions cannot express
+/// the situation yields no plan at all — the caller falls through to the
+/// provider honestly. Attribution rides the plan ([`Plan::runbook`]): the
+/// plan *is* the runbook's procedure, never an inferred link.
+pub fn procedure_plan(
+    runbook: &argus_runbooks::Runbook,
+    subjects: &[(String, String)],
+    descriptors: &[argus_domain::CapabilityDescriptor],
+) -> Option<Plan> {
+    // The situation's subject: the brain's host-health vocabulary reasons
+    // about exactly one failed unit.
+    let (unit, _state) = subjects.first()?;
+    let arguments = serde_json::json!({ "unit": unit });
+
+    let mut steps = Vec::new();
+    let mut blast_radius = argus_domain::BlastRadius::None;
+    for (index, capability) in runbook.allowed_actions.iter().enumerate() {
+        let Some(descriptor) = descriptors.iter().find(|d| d.id() == capability) else {
+            tracing::debug!(
+                runbook = %runbook.name,
+                capability = %capability.as_str(),
+                "procedure step skipped: capability not registered"
+            );
+            continue;
+        };
+        if !argus_domain::input_matches(descriptor.input_schema(), &arguments) {
+            tracing::debug!(
+                runbook = %runbook.name,
+                capability = %capability.as_str(),
+                "procedure step skipped: the situation's subject does not satisfy the capability schema"
+            );
+            continue;
+        }
+        // The runbook's declared rollback entry for this action, paired only
+        // when it too can take the situation's arguments — never invented.
+        let rollback = runbook.rollback.get(index).and_then(|rollback| {
+            let conforming = descriptors
+                .iter()
+                .find(|d| d.id() == rollback)
+                .is_some_and(|d| argus_domain::input_matches(d.input_schema(), &arguments));
+            conforming.then_some(Action {
+                capability: rollback.clone(),
+                resource: None,
+                arguments: arguments.clone(),
+            })
+        });
+        steps.push(PlanStep {
+            action: Action {
+                capability: capability.clone(),
+                resource: None,
+                arguments: arguments.clone(),
+            },
+            rollback,
+        });
+        blast_radius = worst_blast_radius(blast_radius, descriptor.effective_blast_radius());
+    }
+    if steps.is_empty() {
+        tracing::info!(
+            runbook = %runbook.name,
+            "procedure plan has no schema-valid steps for this situation; the provider path runs"
+        );
+        return None;
+    }
+    Some(Plan {
+        objective: format!("procedure: {}", runbook.name),
+        steps,
+        preconditions: Vec::new(),
+        expected_outcomes: Vec::new(),
+        blast_radius,
+        confidence: runbook
+            .historical_success_rate()
+            .map(f64::from)
+            .unwrap_or(0.5),
+        status: argus_domain::PlanStatus::Proposed,
+        runbook: Some(runbook.name.clone()),
+    })
+}
+
+/// The wider of two blast radii — a procedure plan's radius is the worst of
+/// its actions' registered descriptors (spec 010 FR-001).
+fn worst_blast_radius(
+    a: argus_domain::BlastRadius,
+    b: argus_domain::BlastRadius,
+) -> argus_domain::BlastRadius {
+    use argus_domain::BlastRadius::{Environment, Fleet, Host, None as NoRadius};
+    match (a, b) {
+        (Fleet, _) | (_, Fleet) => Fleet,
+        (Environment, _) | (_, Environment) => Environment,
+        (Host, _) | (_, Host) => Host,
+        _ => NoRadius,
+    }
 }
 
 /// Record what happened into the memory layers (FR-003): one episode per
@@ -363,31 +537,6 @@ async fn remember(daemon: &Daemon, record: &BrainCycle, resolved: bool) {
     if let Err(error) = daemon.repository().put_procedure(id, &procedure).await {
         tracing::warn!(%error, "failed to persist the brain procedure outcome");
     }
-}
-
-/// The opportunistic runbook gate hook (spec 009 FR-003, AC-003): the
-/// cycle's remediation just executed and validated, so delivered candidates
-/// attributable to this situation earn their Validation gate — and then the
-/// Policy gate, in ladder order.
-///
-/// Attribution is by trigger, never guessed (spec 009 Design Notes): the
-/// brain's normalized symptom for its cycles is `host-health` — the same
-/// vocabulary [`remember`] records episodes under — so a runbook whose
-/// trigger matches that signature declares itself applicable to this
-/// situation. A plan the brain cannot attribute to a matching trigger simply
-/// waits; directory-loaded runbooks are never touched.
-async fn record_runbook_gates(daemon: &Daemon) {
-    let descriptors: Vec<argus_domain::CapabilityDescriptor> =
-        daemon.registry().list().cloned().collect();
-    let policy = argus_policy::BootstrapPolicyEvaluator::with_local_remediation();
-    daemon
-        .runbooks()
-        .on_procedure_validated(
-            &argus_runbooks::RunbookTrigger::Symptom("host-health".into()),
-            &descriptors,
-            &policy,
-        )
-        .await;
 }
 
 /// Failed systemd units from live state, as `(unit, state)` pairs, plus
@@ -458,6 +607,7 @@ pub fn spawn(
                         provider_available: record.provider_available,
                         decision: record.decision.clone(),
                         plan: record.plan_objective.clone(),
+                        runbook: record.runbook.clone(),
                         outcome: record.outcome.clone(),
                         at: chrono::Utc::now(),
                     });
@@ -513,4 +663,188 @@ pub fn spawn(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argus_domain::{BlastRadius, CapabilityDescriptor, CapabilityId, Reversibility, RiskClass};
+    use argus_runbooks::{Runbook, RunbookTrigger};
+    use semver::Version;
+
+    /// The bootstrap service schema (runtime.rs `bootstrap_descriptors`): a
+    /// unit name is required and nothing else is permitted.
+    fn service_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["unit"],
+            "properties": { "unit": { "type": "string" } },
+            "additionalProperties": false,
+        })
+    }
+
+    fn restart_descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor::new(
+            CapabilityId::new("host.service.restart").unwrap(),
+            "argusd",
+            "host.service.restart",
+            RiskClass::LowRisk,
+            Version::new(0, 1, 0),
+            service_schema(),
+            serde_json::json!({}),
+            Reversibility::Reversible,
+        )
+        .with_blast_radius(BlastRadius::Host)
+    }
+
+    /// A pod restart targets pods by `name` — a vocabulary the host-health
+    /// situation (a failed systemd unit) cannot express.
+    fn pod_restart_descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor::new(
+            CapabilityId::new("k8s.pod.restart").unwrap(),
+            "argusd",
+            "k8s.pod.restart",
+            RiskClass::Controlled,
+            Version::new(0, 1, 0),
+            serde_json::json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": { "name": { "type": "string" } },
+                "additionalProperties": false,
+            }),
+            serde_json::json!({}),
+            Reversibility::Reversible,
+        )
+        .with_blast_radius(BlastRadius::Environment)
+    }
+
+    fn runbook(name: &str, actions: Vec<&str>, rollback: Vec<&str>) -> Runbook {
+        Runbook::candidate(
+            Uuid::new_v4(),
+            name,
+            RunbookTrigger::Symptom("host-health".into()),
+            vec![],
+            vec![],
+            vec![],
+            actions
+                .into_iter()
+                .map(|action| CapabilityId::new(action).unwrap())
+                .collect(),
+            rollback
+                .into_iter()
+                .map(|action| CapabilityId::new(action).unwrap())
+                .collect(),
+            vec![],
+        )
+    }
+
+    fn subjects() -> Vec<(String, String)> {
+        vec![("argus-test.service".into(), "failed failed".into())]
+    }
+
+    #[test]
+    fn a_matching_runbook_builds_an_attributed_procedure_plan() {
+        let rb = runbook(
+            "restart-failed",
+            vec!["host.service.restart"],
+            vec!["host.service.restart"],
+        );
+        let plan = procedure_plan(&rb, &subjects(), &[restart_descriptor()]).expect("a plan");
+
+        // Attribution by construction: the plan carries the runbook's name,
+        // both in the field and in the objective approvals read.
+        assert_eq!(plan.runbook.as_deref(), Some("restart-failed"));
+        assert_eq!(plan.objective, "procedure: restart-failed");
+
+        // One step per allowed action, targeting the situation's subject,
+        // with the runbook's rollback entry paired.
+        assert_eq!(plan.steps.len(), 1);
+        let step = &plan.steps[0];
+        assert_eq!(step.action.capability.as_str(), "host.service.restart");
+        assert_eq!(
+            step.action.arguments,
+            serde_json::json!({ "unit": "argus-test.service" })
+        );
+        let rollback = step.rollback.as_ref().expect("the declared rollback pairs");
+        assert_eq!(rollback.capability.as_str(), "host.service.restart");
+        assert_eq!(
+            rollback.arguments,
+            serde_json::json!({ "unit": "argus-test.service" })
+        );
+
+        // Blast radius from the registered descriptor; confidence the
+        // conservative 0.5 while the runbook has no history.
+        assert_eq!(plan.blast_radius, BlastRadius::Host);
+        assert_eq!(plan.confidence, 0.5);
+        assert_eq!(plan.status, argus_domain::PlanStatus::Proposed);
+    }
+
+    #[test]
+    fn non_conforming_and_unregistered_steps_are_skipped() {
+        // The pod action's schema wants `name`, which the situation (a failed
+        // unit) cannot supply; the cordon capability is not registered at all.
+        let rb = runbook(
+            "mixed-procedure",
+            vec!["k8s.pod.restart", "host.service.restart", "k8s.node.cordon"],
+            vec![],
+        );
+        let plan = procedure_plan(
+            &rb,
+            &subjects(),
+            &[restart_descriptor(), pod_restart_descriptor()],
+        )
+        .expect("the conforming step survives");
+
+        assert_eq!(plan.steps.len(), 1, "only the schema-valid step remains");
+        assert_eq!(
+            plan.steps[0].action.capability.as_str(),
+            "host.service.restart"
+        );
+        assert!(plan.steps[0].rollback.is_none(), "no rollback is invented");
+        // The worst registered descriptor of the surviving steps.
+        assert_eq!(plan.blast_radius, BlastRadius::Host);
+    }
+
+    #[test]
+    fn a_runbook_that_cannot_express_the_situation_yields_no_plan() {
+        let rb = runbook("pod-procedure", vec!["k8s.pod.restart"], vec![]);
+        assert!(
+            procedure_plan(&rb, &subjects(), &[pod_restart_descriptor()]).is_none(),
+            "zero valid steps falls through to the provider honestly"
+        );
+        // No subject at all: nothing to target, no plan.
+        let rb = runbook("restart-failed", vec!["host.service.restart"], vec![]);
+        assert!(procedure_plan(&rb, &[], &[restart_descriptor()]).is_none());
+    }
+
+    #[test]
+    fn confidence_is_the_runbooks_history_and_blast_radius_its_worst_descriptor() {
+        let mut rb = runbook(
+            "widespread-procedure",
+            vec!["host.service.restart", "k8s.pod.restart"],
+            vec![],
+        );
+        rb.record_outcome(true);
+        rb.record_outcome(false);
+        let plan = procedure_plan(
+            &rb,
+            &subjects(),
+            &[restart_descriptor(), pod_restart_descriptor()],
+        )
+        .expect("the service step survives");
+        assert_eq!(plan.steps.len(), 1);
+        assert!(
+            (plan.confidence - 0.5).abs() < f64::EPSILON,
+            "historical success rate 1/2, not the fixed default: {}",
+            plan.confidence
+        );
+        // The surviving step is the Host-radius restart; a fleet-radius
+        // action would widen it — covered by the pairing of worst_blast_radius.
+        assert_eq!(plan.blast_radius, BlastRadius::Host);
+        use argus_domain::BlastRadius::{Environment, Fleet, Host, None as NoRadius};
+        assert_eq!(worst_blast_radius(NoRadius, Host), Host);
+        assert_eq!(worst_blast_radius(Host, Environment), Environment);
+        assert_eq!(worst_blast_radius(Environment, Fleet), Fleet);
+        assert_eq!(worst_blast_radius(NoRadius, NoRadius), NoRadius);
+    }
 }

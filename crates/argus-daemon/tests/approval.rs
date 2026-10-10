@@ -26,10 +26,12 @@ fn pending(token: Uuid) -> PendingPlan {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::AwaitingApproval,
+            runbook: None,
         },
         token,
         context_hash: "hash-a".into(),
         executed: vec![],
+        dedup_key: None,
     }
 }
 

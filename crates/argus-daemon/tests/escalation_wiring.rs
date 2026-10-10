@@ -100,6 +100,7 @@ fn plan_with_confidence(confidence: f64, rollback: bool) -> Plan {
         blast_radius: BlastRadius::Host,
         confidence,
         status: PlanStatus::Proposed,
+        runbook: None,
     }
 }
 

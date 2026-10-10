@@ -1592,6 +1592,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence,
             status: argus_domain::PlanStatus::Proposed,
+            runbook: None,
         }
     }
 

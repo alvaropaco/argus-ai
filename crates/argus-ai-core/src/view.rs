@@ -267,6 +267,7 @@ mod tests {
             blast_radius: BlastRadius::Host,
             confidence: 0.9,
             status: PlanStatus::Proposed,
+            runbook: None,
         }
     }
 
@@ -279,6 +280,7 @@ mod tests {
             blast_radius: BlastRadius::None,
             confidence: 0.0,
             status: PlanStatus::Proposed,
+            runbook: None,
         }
     }
 
