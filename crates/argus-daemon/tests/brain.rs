@@ -49,6 +49,7 @@ async fn a_cycle_without_a_provider_observes_only() {
         &daemon,
         &BrainConfig::default(),
         vec![("argus-test.service".into(), "failed failed".into())],
+        true,
     )
     .await;
 
@@ -76,6 +77,7 @@ async fn at_l0_the_brain_proposes_but_executes_nothing() {
         &daemon,
         &BrainConfig::default(), // autonomy = l0_observe
         vec![("argus-test.service".into(), "failed failed".into())],
+        true,
     )
     .await;
 
@@ -100,6 +102,7 @@ async fn a_cycle_records_episode_and_procedure_history() {
         &daemon,
         &BrainConfig::default(),
         vec![("argus-test.service".into(), "failed failed".into())],
+        true,
     )
     .await;
 
@@ -123,6 +126,7 @@ async fn a_cycle_records_episode_and_procedure_history() {
         &daemon,
         &BrainConfig::default(),
         vec![("argus-test2.service".into(), "failed failed".into())],
+        true,
     )
     .await;
     assert!(
@@ -158,6 +162,7 @@ async fn a_low_confidence_decision_proposes_nothing() {
         &daemon,
         &BrainConfig::default(),
         vec![("argus-test.service".into(), "failed failed".into())],
+        true,
     )
     .await;
 

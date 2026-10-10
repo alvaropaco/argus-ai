@@ -83,6 +83,10 @@ pub fn build_provider(
 pub struct BrainCycle {
     /// The cycle's id (spec 007 FR-002).
     pub cycle_id: Option<Uuid>,
+    /// Whether the cycle consulted live environment state — the systemd read
+    /// succeeded (spec 008's honest MAP-gate signal: a quiet-but-healthy host
+    /// consulted; an unavailable bus did not).
+    pub consulted_live: bool,
     /// The evidence keys the cycle gathered (e.g. `unit:<name> state=failed`).
     pub evidence: Vec<String>,
     /// Whether a provider was available to reason with.
@@ -151,8 +155,9 @@ impl DecisionProvider for MeteredProvider {
 pub async fn cycle(daemon: &Daemon, brain: &BrainConfig) -> BrainCycle {
     // Evidence from live state: the first failed systemd unit is the
     // cycle's subject (the host-health skill reasons about one service).
-    let subjects: Vec<(String, String)> = failed_units().await.into_iter().take(1).collect();
-    cycle_with_evidence(daemon, brain, subjects).await
+    let (subjects, consulted_live) = failed_units().await;
+    let subjects: Vec<(String, String)> = subjects.into_iter().take(1).collect();
+    cycle_with_evidence(daemon, brain, subjects, consulted_live).await
 }
 
 /// The cycle over injected subjects — the seam tests use so a brain cycle
@@ -161,13 +166,14 @@ pub async fn cycle_with_evidence(
     daemon: &Daemon,
     brain: &BrainConfig,
     subjects: Vec<(String, String)>,
+    consulted_live: bool,
 ) -> BrainCycle {
     // Spec 007 FR-002: every cycle carries an id, minted at entry, that its
     // trace, usage records, and action events share.
     let cycle_id = Uuid::new_v4();
     let ledger = daemon.ledger();
     ledger.enter_cycle(cycle_id).await;
-    let record = run_cycle(daemon, brain, subjects, cycle_id).await;
+    let record = run_cycle(daemon, brain, subjects, cycle_id, consulted_live).await;
     let plan_ids = ledger.exit_cycle(cycle_id).await;
 
     // One bounded trace per cycle (FR-002): evidence referenced by summary,
@@ -198,9 +204,11 @@ async fn run_cycle(
     brain: &BrainConfig,
     subjects: Vec<(String, String)>,
     cycle_id: Uuid,
+    consulted_live: bool,
 ) -> BrainCycle {
     let _ = cycle_id; // carried by the ledger context; kept for traceability
     let mut record = BrainCycle::default();
+    record.consulted_live = consulted_live;
     let mut evidence = argus_ai_core::decision::context::ContextBuilder::new();
     let host = ResourceId::new("host", "local").expect("valid host resource id");
     for (unit, state) in subjects {
@@ -347,15 +355,16 @@ async fn remember(daemon: &Daemon, record: &BrainCycle, resolved: bool) {
     }
 }
 
-/// Failed systemd units from live state, as `(unit, state)` pairs. An
-/// unavailable systemd (no system bus) contributes nothing — the cycle
-/// simply finds no evidence.
-async fn failed_units() -> Vec<(String, String)> {
+/// Failed systemd units from live state, as `(unit, state)` pairs, plus
+/// whether the live read succeeded — a healthy host reads empty *and*
+/// consulted (spec 008's MAP gate); an unavailable systemd neither reads
+/// nor consults.
+async fn failed_units() -> (Vec<(String, String)>, bool) {
     let Ok(client) = argus_systemd::SystemdClient::connect().await else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let Ok(units) = client.list_units().await else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     // Sorted by name so the cycle's subject is deterministic no matter what
     // order systemd enumerates units in.
@@ -365,7 +374,7 @@ async fn failed_units() -> Vec<(String, String)> {
         .map(|u| (u.name, format!("{} {}", u.active_state, u.sub_state)))
         .collect();
     failed.sort_by(|a, b| a.0.cmp(&b.0));
-    failed
+    (failed, true)
 }
 
 /// Spawns the periodic brain loop (FR-003). Failures tick-to-tick warn and
