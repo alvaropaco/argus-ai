@@ -94,9 +94,11 @@ pub struct Daemon {
     /// and future reconfiguration.
     provider:
         std::sync::RwLock<Option<Arc<dyn argus_ai_core::decision::provider::DecisionProvider>>>,
-    /// Runbooks loaded at startup from the configured directory (spec 005
-    /// FR-005); empty when no directory is configured.
-    runbooks: argus_runbooks::RunbookLibrary,
+    /// The runbook library behind a lock (spec 005 FR-005 for the
+    /// directory-loaded half; spec 009 adds the delivered half): delivery,
+    /// opportunistic gates, and operator decisions mutate it through the
+    /// manager, which also persists the delivered candidates.
+    runbooks: Arc<crate::runbooks::RunbookManager>,
     /// The live Kubernetes cluster bridge and its typed executor, when the
     /// `kubernetes` feature is compiled in AND `[kubernetes] enabled = true`
     /// AND the kubeconfig loads (ADR-0037: degrade, never require).
@@ -266,18 +268,15 @@ fn connect_cluster(
     }
 }
 
-/// Load the runbook library from the configured directory (spec 005
-/// FR-005); no directory or an unreadable one yields an empty library with
-/// the reasons logged — runbooks are never load-bearing for startup.
-fn load_runbooks(config: &DaemonConfig) -> argus_runbooks::RunbookLibrary {
-    match &config.brain.runbooks_dir {
-        Some(dir) => {
-            let result = argus_runbooks::load_runbooks(std::path::Path::new(dir));
-            tracing::info!("{}", result.summary());
-            result.library
-        }
-        None => argus_runbooks::RunbookLibrary::default(),
-    }
+/// The runbook library at startup (spec 005 FR-005 for directory-loaded
+/// runbooks, spec 009 FR-002 for the persisted deliveries merged over them).
+/// Both halves are fail-soft: a missing directory or an unreadable store is
+/// logged, never load-bearing for startup.
+async fn load_runbooks(
+    config: &DaemonConfig,
+    repository: Arc<dyn DomainRepository>,
+) -> Arc<crate::runbooks::RunbookManager> {
+    crate::runbooks::RunbookManager::load(config, repository).await
 }
 
 impl Daemon {
@@ -348,7 +347,7 @@ impl Daemon {
         .await;
         let (cluster, kubernetes_executor) = connect_cluster(&config);
         let decision_provider = crate::brain::build_provider(&config, &secret_store);
-        let runbooks = load_runbooks(&config);
+        let runbooks = load_runbooks(&config, Arc::clone(&repository)).await;
         let (brain_state, brain_control) = {
             use crate::brain_state::{BrainControl, BrainControlHandle, BrainState};
             let control = BrainControlHandle::new(BrainControl {
@@ -832,6 +831,7 @@ impl Daemon {
             self_health: self.selfobs.snapshot(),
             situation: None,
             autonomy_view: Some(autonomy_view),
+            runbooks_view: self.runbooks.view(),
         };
         crate::sentinel::sentinel_evaluate(&inputs, Utc::now()).view
     }
@@ -861,9 +861,10 @@ impl Daemon {
             .expect("provider lock is not poisoned") = provider;
     }
 
-    /// The runbooks loaded at startup (spec 005 FR-005).
-    pub fn runbooks(&self) -> &argus_runbooks::RunbookLibrary {
-        &self.runbooks
+    /// The runbook manager: the library the delivery channel, the
+    /// opportunistic gate hook, and the operator decisions share (spec 009).
+    pub fn runbooks(&self) -> Arc<crate::runbooks::RunbookManager> {
+        Arc::clone(&self.runbooks)
     }
 
     /// The brain's shared cycle record (spec 006 FR-001).

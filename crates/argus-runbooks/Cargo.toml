@@ -8,6 +8,7 @@ description = "ARGUS declarative runbooks with gated promotion (ADR-0036): candi
 
 [dependencies]
 argus-domain = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

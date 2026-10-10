@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// The protocol version spoken by this implementation.
 ///
 /// Adding an operation is a MINOR bump; removing or renaming one is MAJOR.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 7, 0);
+pub const PROTOCOL_VERSION: Version = Version::new(0, 8, 0);
 
 /// A typed IPC operation id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +34,8 @@ pub enum Operation {
     ReportGenerate,
     BrainDiagnose,
     RunbooksList,
+    RunbooksApprove,
+    RunbooksPromote,
 }
 
 impl Operation {
@@ -57,6 +59,8 @@ impl Operation {
             Operation::ReportGenerate => "report.generate",
             Operation::BrainDiagnose => "brain.diagnose",
             Operation::RunbooksList => "runbooks.list",
+            Operation::RunbooksApprove => "runbooks.approve",
+            Operation::RunbooksPromote => "runbooks.promote",
         }
     }
 }
@@ -96,6 +100,8 @@ impl FromStr for Operation {
             "report.generate" => Ok(Operation::ReportGenerate),
             "brain.diagnose" => Ok(Operation::BrainDiagnose),
             "runbooks.list" => Ok(Operation::RunbooksList),
+            "runbooks.approve" => Ok(Operation::RunbooksApprove),
+            "runbooks.promote" => Ok(Operation::RunbooksPromote),
             _ => Err(UnknownOperationError),
         }
     }
@@ -223,6 +229,9 @@ mod tests {
             Operation::ApprovalDeny,
             Operation::PlanList,
             Operation::AuditList,
+            Operation::RunbooksList,
+            Operation::RunbooksApprove,
+            Operation::RunbooksPromote,
         ] {
             assert_eq!(op.as_str().parse::<Operation>().ok(), Some(op));
         }

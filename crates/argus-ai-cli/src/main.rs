@@ -52,8 +52,28 @@ enum Command {
     Diagnose,
     /// List the recorded reasoning history (plans and their outcomes).
     Plans,
-    /// List the runbooks loaded at startup.
-    Runbooks,
+    /// Manage runbook candidates and the promotion ladder (spec 009).
+    #[command(name = "runbook", alias = "runbooks")]
+    Runbook {
+        #[command(subcommand)]
+        command: RunbookCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunbookCommand {
+    /// List the runbook library with each candidate's gate progress.
+    List,
+    /// Approve a candidate that reached the policy gate (Candidate → Approved).
+    Approve {
+        /// The runbook name shown by `argus runbook list`.
+        name: String,
+    },
+    /// Promote an approved runbook to driving procedures (Approved → Promoted).
+    Promote {
+        /// The runbook name shown by `argus runbook list`.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -114,9 +134,9 @@ async fn main() -> Result<()> {
         Some(Command::Upgrade) => run_upgrade(),
         Some(Command::Cloud { command }) => run_cloud(&cli.socket, command).await,
         Some(Command::Approval { command }) => run_approval(&cli.socket, command).await,
+        Some(Command::Runbook { command }) => run_runbook(&cli.socket, command).await,
         Some(Command::Diagnose) => run_query(&cli.socket, Command::Diagnose).await,
         Some(Command::Plans) => run_query(&cli.socket, Command::Plans).await,
-        Some(Command::Runbooks) => run_query(&cli.socket, Command::Runbooks).await,
         Some(cmd) => run_query(&cli.socket, cmd).await,
     }
 }
@@ -207,6 +227,25 @@ async fn run_approval(socket: &PathBuf, command: ApprovalCommand) -> Result<()> 
     report(response)
 }
 
+/// Runbook ladder commands (spec 009 FR-004): the same local machinery the
+/// dashboard's decisions cross — the ladder's errors come back verbatim.
+async fn run_runbook(socket: &PathBuf, command: RunbookCommand) -> Result<()> {
+    let mut client = cloud_client(socket).await?;
+    let (operation, payload) = match command {
+        RunbookCommand::List => (argus_ipc::Operation::RunbooksList, serde_json::json!({})),
+        RunbookCommand::Approve { name } => (
+            argus_ipc::Operation::RunbooksApprove,
+            serde_json::json!({ "name": name }),
+        ),
+        RunbookCommand::Promote { name } => (
+            argus_ipc::Operation::RunbooksPromote,
+            serde_json::json!({ "name": name }),
+        ),
+    };
+    let response = client.request(operation, Uuid::new_v4(), payload).await?;
+    report(response)
+}
+
 fn report(response: argus_ipc::Response) -> Result<()> {
     if response.ok {
         if let Some(result) = response.result {
@@ -283,10 +322,11 @@ async fn run_query(socket: &PathBuf, cmd: Command) -> Result<()> {
         Command::Config => argus_ipc::Operation::ConfigGet,
         Command::Diagnose => argus_ipc::Operation::BrainDiagnose,
         Command::Plans => argus_ipc::Operation::PlanList,
-        Command::Runbooks => argus_ipc::Operation::RunbooksList,
-        Command::Init | Command::Upgrade | Command::Cloud { .. } | Command::Approval { .. } => {
-            unreachable!("handled before run_query")
-        }
+        Command::Init
+        | Command::Upgrade
+        | Command::Cloud { .. }
+        | Command::Approval { .. }
+        | Command::Runbook { .. } => unreachable!("handled before run_query"),
     };
 
     let response = client

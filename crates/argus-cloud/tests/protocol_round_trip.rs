@@ -27,18 +27,30 @@ fn all_message_types() -> Vec<MessageType> {
         EventsReport,
         ActivitiesReport,
         CapabilitiesPublish,
+        SentinelReport,
+        ActionEvent,
+        BrainTrace,
+        TokenUsage,
         TelemetryAck,
         HealthAck,
         EventsAck,
         ActivitiesAck,
         CapabilitiesAck,
         IngestAck,
+        ActionEventAck,
+        BrainTraceAck,
+        TokenUsageAck,
+        SentinelAck,
         ConfigResult,
         CommandResult,
         ConfigState,
         ConfigApply,
         CommandInvoke,
         ConfigPullRequest,
+        ApprovalDecision,
+        ApprovalResult,
+        RunbookDecision,
+        RunbookResult,
         Ping,
         Pong,
         StreamThrottle,
@@ -122,6 +134,8 @@ fn directions_match_the_contract() {
         ConfigApply,
         CommandInvoke,
         ConfigPullRequest,
+        ApprovalDecision,
+        RunbookDecision,
         Ping,
         Pong,
         StreamThrottle,
@@ -137,9 +151,12 @@ fn directions_match_the_contract() {
         EventsReport,
         ActivitiesReport,
         CapabilitiesPublish,
+        SentinelReport,
         ConfigResult,
         CommandResult,
         ConfigState,
+        ApprovalResult,
+        RunbookResult,
     ] {
         assert_eq!(ty.direction(), Direction::InstallationToCloud, "{ty:?}");
     }
@@ -316,7 +333,7 @@ fn telemetry_bound_is_the_documented_value() {
 
 #[test]
 fn version_negotiation_uses_the_supported_set() {
-    assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &["1.1.0", "1.0.0"]);
+    assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &["1.2.0", "1.1.0", "1.0.0"]);
     assert!(negotiate(&["1.0.0".to_string()]).is_some());
     assert!(negotiate(&["9.9.9".to_string()]).is_none());
 }

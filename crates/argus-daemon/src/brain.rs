@@ -207,8 +207,10 @@ async fn run_cycle(
     consulted_live: bool,
 ) -> BrainCycle {
     let _ = cycle_id; // carried by the ledger context; kept for traceability
-    let mut record = BrainCycle::default();
-    record.consulted_live = consulted_live;
+    let mut record = BrainCycle {
+        consulted_live,
+        ..BrainCycle::default()
+    };
     let mut evidence = argus_ai_core::decision::context::ContextBuilder::new();
     let host = ResourceId::new("host", "local").expect("valid host resource id");
     for (unit, state) in subjects {
@@ -274,7 +276,15 @@ async fn run_cycle(
                     }
                     record.outcome = Some(format!("{:?}", report.status));
                     remember(daemon, &record, resolved).await;
-                    if !resolved {
+                    if resolved {
+                        // Spec 009 FR-003 (AC-003): the run validated in
+                        // operation — the opportunistic Validation/Policy
+                        // evidence for delivered candidates at this trigger.
+                        // An unresolved run validated nothing.
+                        record_runbook_gates(daemon).await;
+                        // The situation is resolved; the dedup key stays
+                        // claimed.
+                    } else {
                         // The situation persists: allow the next cycle to
                         // reason about it again.
                         daemon.release_dedup(&dedup_key).await;
@@ -353,6 +363,31 @@ async fn remember(daemon: &Daemon, record: &BrainCycle, resolved: bool) {
     if let Err(error) = daemon.repository().put_procedure(id, &procedure).await {
         tracing::warn!(%error, "failed to persist the brain procedure outcome");
     }
+}
+
+/// The opportunistic runbook gate hook (spec 009 FR-003, AC-003): the
+/// cycle's remediation just executed and validated, so delivered candidates
+/// attributable to this situation earn their Validation gate — and then the
+/// Policy gate, in ladder order.
+///
+/// Attribution is by trigger, never guessed (spec 009 Design Notes): the
+/// brain's normalized symptom for its cycles is `host-health` — the same
+/// vocabulary [`remember`] records episodes under — so a runbook whose
+/// trigger matches that signature declares itself applicable to this
+/// situation. A plan the brain cannot attribute to a matching trigger simply
+/// waits; directory-loaded runbooks are never touched.
+async fn record_runbook_gates(daemon: &Daemon) {
+    let descriptors: Vec<argus_domain::CapabilityDescriptor> =
+        daemon.registry().list().cloned().collect();
+    let policy = argus_policy::BootstrapPolicyEvaluator::with_local_remediation();
+    daemon
+        .runbooks()
+        .on_procedure_validated(
+            &argus_runbooks::RunbookTrigger::Symptom("host-health".into()),
+            &descriptors,
+            &policy,
+        )
+        .await;
 }
 
 /// Failed systemd units from live state, as `(unit, state)` pairs, plus

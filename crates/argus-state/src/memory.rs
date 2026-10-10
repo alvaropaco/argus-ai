@@ -30,6 +30,8 @@ struct Inner {
     /// The graduated-autonomy state (spec 008): one row per environment,
     /// re-put supersedes.
     autonomy: Option<AutonomyState>,
+    /// Delivered runbooks (spec 009): keyed by name, re-put supersedes.
+    runbooks: Vec<argus_runbooks::DeliveredRunbook>,
 }
 
 /// A [`DomainRepository`] backed by process memory. Deterministic and
@@ -407,6 +409,33 @@ impl DomainRepository for InMemoryRepository {
             .autonomy
             .clone())
     }
+
+    async fn put_runbook(
+        &self,
+        runbook: &argus_runbooks::DeliveredRunbook,
+    ) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        inner
+            .runbooks
+            .retain(|existing| existing.name() != runbook.name());
+        inner.runbooks.push(runbook.clone());
+        inner.runbooks.sort_by(|a, b| a.name().cmp(b.name()));
+        Ok(())
+    }
+
+    async fn list_runbooks(
+        &self,
+    ) -> Result<Vec<argus_runbooks::DeliveredRunbook>, RepositoryError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?
+            .runbooks
+            .clone())
+    }
 }
 
 #[cfg(test)]
@@ -634,5 +663,37 @@ mod tests {
             Some(state),
             "one row per environment: the re-put supersedes"
         );
+    }
+
+    #[tokio::test]
+    async fn the_delivered_runbooks_supersede_their_row() {
+        let repo = InMemoryRepository::new();
+        assert!(repo.list_runbooks().await.unwrap().is_empty());
+
+        let delivered = argus_runbooks::DeliveredRunbook {
+            runbook: argus_runbooks::Runbook::candidate(
+                uuid::Uuid::new_v4(),
+                "learned-procedure",
+                argus_runbooks::RunbookTrigger::Symptom("restart-loop".into()),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ),
+            configuration_id: uuid::Uuid::new_v4(),
+            version_id: uuid::Uuid::new_v4(),
+            version_number: 2,
+            delivered_at: chrono::Utc::now(),
+        };
+        repo.put_runbook(&delivered).await.unwrap();
+        assert_eq!(repo.list_runbooks().await.unwrap(), vec![delivered.clone()]);
+
+        let mut superseding = delivered.clone();
+        superseding.version_number = 3;
+        repo.put_runbook(&superseding).await.unwrap();
+        let listed = repo.list_runbooks().await.unwrap();
+        assert_eq!(listed, vec![superseding], "re-put supersedes by name");
     }
 }

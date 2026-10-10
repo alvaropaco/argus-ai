@@ -47,6 +47,7 @@ argus-risk = { workspace = true }
 argus-correlate = { workspace = true }
 argus-incidents = { workspace = true }
 argus-investigate = { workspace = true }
+tempfile = "3"
 
 [features]
 # The live Kubernetes backend (kube-rs + the cluster bridge). Off by default

@@ -111,6 +111,7 @@ fn spawn_cloud_supervisor(
         managed_settings: Arc::new(daemon.managed_settings().clone()),
         sentinel,
         decisions,
+        runbooks: daemon.runbooks(),
         brain_control: daemon.brain_control(),
         environment_id: daemon.environment_id(),
         policy: daemon.cloud_policy(),

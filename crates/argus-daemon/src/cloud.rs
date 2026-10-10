@@ -34,7 +34,8 @@ use argus_cloud::protocol::messages::{
     ApprovalDecisionPayload, ApprovalResultPayload, CommandInvokePayload, CommandResultPayload,
     CommandResultStatus, ConfigApplyPayload, ConfigResultPayload, ConfigResultStatus,
     ConfigStatePayload, ConfigurationStateEntry, HealthStateWire, IngestAckPayload,
-    SentinelReportPayload, SessionRotatePayload, StreamThrottlePayload,
+    RunbookDecisionPayload, RunbookResultPayload, SentinelReportPayload, SessionRotatePayload,
+    StreamThrottlePayload,
 };
 use argus_cloud::protocol::{Envelope, MessageType};
 use argus_cloud::state::{ConnectivityTracker, EnrolledIdentity};
@@ -604,6 +605,9 @@ pub struct SupervisorDeps {
     pub brain_control: Arc<crate::brain_state::BrainControlHandle>,
     /// Where an operator's approval decision is applied (spec 006 FR-003).
     pub decisions: Arc<dyn ApprovalSink>,
+    /// The runbook library behind delivery and operator decisions (spec 009):
+    /// `runbook` configurations apply here and `runbook.decision` lands here.
+    pub runbooks: Arc<crate::runbooks::RunbookManager>,
     /// The action ledger (spec 007): the supervisor drains its upstream
     /// buffer each session tick, so events reach the cloud within ~1 s of
     /// occurring and ride the same ack discipline as the reports.
@@ -980,6 +984,16 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
         return;
     }
 
+    // A runbook delivery is its own discipline (spec 009 FR-001): the content
+    // is a document, not dotted settings, so its validation path is the
+    // runbook loader — never the settings clamps. It rides the same
+    // held-version monotonicity guard as every other kind: a replayed older
+    // config.apply must not supersede a newer candidate.
+    if kind == crate::config::KIND_RUNBOOK {
+        apply_runbook_delivery(deps, transport, correlation, payload, version_id).await;
+        return;
+    }
+
     let (settings, credential) = match split_provider_content(&payload.content) {
         Ok(parts) => parts,
         Err(reason) => {
@@ -1085,6 +1099,119 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
         None,
     )
     .await;
+}
+
+/// Applies a delivered `runbook` configuration (spec 009 FR-001/FR-002, AC-001).
+///
+/// The content carries the runbook's TOML as its `toml` member; the daemon
+/// parses it with the ordinary loader and enters it as a Candidate with cloud
+/// provenance, records the technical gates that pass delivery review, and
+/// persists the delivery. A malformed document loads nothing and replies
+/// `failed` with the loader's reason — fail-closed. A re-delivery of the same
+/// name supersedes the previous candidate version.
+async fn apply_runbook_delivery(
+    deps: &SupervisorDeps,
+    transport: &dyn Transport,
+    correlation: Option<Uuid>,
+    payload: ConfigApplyPayload,
+    version_id: Uuid,
+) {
+    let Some(text) = payload.content.get("toml").and_then(Value::as_str) else {
+        reply_config_result(
+            transport,
+            correlation,
+            version_id,
+            ConfigResultStatus::Failed,
+            Some(
+                "a runbook configuration carries its document as the string member 'toml'"
+                    .to_string(),
+            ),
+        )
+        .await;
+        return;
+    };
+
+    // The local evidence the technical gates are honest about — read at
+    // review time from this host's real state, never assumed.
+    let episodes: Vec<argus_memory::Episode> = deps
+        .repository
+        .list_episodes()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, episode)| episode)
+        .collect();
+
+    match deps
+        .runbooks
+        .deliver(
+            text,
+            payload.configuration_id,
+            version_id,
+            payload.version_number,
+            &episodes,
+            deps.capabilities.as_slice(),
+        )
+        .await
+    {
+        Ok(report) => {
+            let applied_at = Utc::now();
+
+            let _ = deps
+                .repository
+                .save_managed_configuration(&ManagedConfiguration {
+                    configuration_id: payload.configuration_id,
+                    kind: crate::config::KIND_RUNBOOK.to_string(),
+                    current_version_id: Some(version_id),
+                    current_version_number: payload.version_number,
+                    content_hash: Some(payload.content_hash.clone()),
+                    applied_at: Some(applied_at),
+                    apply_status: ApplyStatus::Applied,
+                    apply_reason: None,
+                })
+                .await;
+
+            let _ = deps
+                .repository
+                .save_applied_configuration(&AppliedConfigurationState {
+                    configuration_id: payload.configuration_id,
+                    applied_version_id: Some(version_id),
+                    applied_version_number: payload.version_number,
+                    content_hash: Some(payload.content_hash.clone()),
+                    updated_at: applied_at,
+                })
+                .await;
+
+            // Withheld gates were already logged with their reasons by the
+            // manager; the applied verdict says the candidate landed, and the
+            // sentinel report is where its gate progress shows.
+            tracing::info!(
+                runbook = %report.name,
+                recorded = ?report.recorded,
+                withheld = report.withheld.len(),
+                "runbook configuration applied"
+            );
+
+            reply_config_result(
+                transport,
+                correlation,
+                version_id,
+                ConfigResultStatus::Applied,
+                None,
+            )
+            .await;
+        }
+        Err(reason) => {
+            reply_config_result(
+                transport,
+                correlation,
+                version_id,
+                ConfigResultStatus::Failed,
+                Some(reason),
+            )
+            .await;
+        }
+    }
 }
 
 async fn reply_config_result(
@@ -1961,6 +2088,101 @@ async fn reply_approval_result(
     }
 }
 
+/// Handles `runbook.decision` (spec 009 FR-004): the operator's approve or
+/// promote crosses into the local promotion ladder — the same round-trip
+/// discipline as `approval.decision`. The ladder's own errors are the
+/// validation: an out-of-order or repeated decision is refused with its
+/// reason and reported, never coerced. The decision is audited either way.
+async fn handle_runbook_decision(
+    deps: &SupervisorDeps,
+    transport: &dyn Transport,
+    frame: &Envelope,
+) {
+    let correlation = frame.correlation_id.or(Some(frame.message_id));
+
+    let Ok(payload) = serde_json::from_value::<RunbookDecisionPayload>(frame.payload.clone())
+    else {
+        reply_runbook_result(
+            transport,
+            correlation,
+            String::new(),
+            false,
+            None,
+            Some("the runbook decision was malformed".to_string()),
+        )
+        .await;
+        return;
+    };
+
+    let Some(decision) = crate::runbooks::Decision::parse(&payload.decision) else {
+        reply_runbook_result(
+            transport,
+            correlation,
+            payload.name,
+            false,
+            None,
+            Some(format!("unknown decision '{}'", payload.decision)),
+        )
+        .await;
+        return;
+    };
+
+    match deps
+        .runbooks
+        .decide(&payload.name, decision, &payload.decided_by)
+        .await
+    {
+        Ok(status) => {
+            reply_runbook_result(
+                transport,
+                correlation,
+                payload.name,
+                true,
+                Some(status.to_string()),
+                None,
+            )
+            .await;
+        }
+        Err(reason) => {
+            reply_runbook_result(
+                transport,
+                correlation,
+                payload.name,
+                false,
+                None,
+                Some(reason),
+            )
+            .await;
+        }
+    }
+}
+
+async fn reply_runbook_result(
+    transport: &dyn Transport,
+    correlation: Option<Uuid>,
+    name: String,
+    accepted: bool,
+    outcome: Option<String>,
+    reason: Option<String>,
+) {
+    let payload = RunbookResultPayload {
+        name,
+        accepted,
+        outcome,
+        reason,
+    };
+    if let Err(error) = transport
+        .send(&Envelope::new(
+            MessageType::RunbookResult,
+            serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            correlation,
+        ))
+        .await
+    {
+        tracing::warn!(%error, "could not deliver the runbook result");
+    }
+}
+
 fn message_type_for(kind: ReportKind) -> MessageType {
     match kind {
         ReportKind::Telemetry => MessageType::TelemetryReport,
@@ -2075,6 +2297,9 @@ async fn handle_inbound(
         }
         Some(MessageType::ApprovalDecision) => {
             handle_approval_decision(deps, transport, &frame).await;
+        }
+        Some(MessageType::RunbookDecision) => {
+            handle_runbook_decision(deps, transport, &frame).await;
         }
         Some(ty) if is_report_ack(ty) => {
             let Ok(ack) = serde_json::from_value::<IngestAckPayload>(frame.payload.clone()) else {
@@ -2737,6 +2962,10 @@ mod tests {
             config.allow_privileged_execution,
         ));
         let ledger_repository = Arc::clone(&repository);
+        let runbooks = Arc::new(crate::runbooks::RunbookManager::new(
+            argus_runbooks::RunbookLibrary::default(),
+            Arc::clone(&repository) as Arc<dyn DomainRepository>,
+        ));
         SupervisorDeps {
             config,
             secrets,
@@ -2749,6 +2978,7 @@ mod tests {
             capabilities: Arc::new(Vec::new()),
             sentinel: Arc::new(NullSentinel),
             decisions: Arc::new(NullDecisions),
+            runbooks,
             brain_control: Arc::new(crate::brain_state::BrainControlHandle::default()),
             managed_settings: Arc::new(ManagedSettingsStore::new(std::env::temp_dir().join(
                 format!("argus-cloud-settings-{}.toml", uuid::Uuid::new_v4()),
@@ -3966,6 +4196,132 @@ mod tests {
             let result = apply_and_read_result(&deps, malformed).await;
 
             assert_eq!(result["status"], "failed");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        // --- Runbook delivery (spec 009 FR-001, AC-001) ---
+
+        fn runbook_content(toml: &str) -> serde_json::Value {
+            serde_json::json!({ "kind": "runbook", "toml": toml })
+        }
+
+        fn runbook_toml(name: &str) -> String {
+            format!(
+                r#"
+name = "{name}"
+trigger = {{ symptom = "restart-loop" }}
+allowed_actions = ["host.service.restart"]
+rollback = ["host.service.restart"]
+
+[[validation]]
+description = "unit active again"
+attribute = "unit.active_state"
+comparison = {{ equal = "active" }}
+"#
+            )
+        }
+
+        #[tokio::test]
+        async fn a_runbook_configuration_is_applied_and_lands_a_candidate() {
+            let (deps, dir) = deps_and_transport().await;
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(Uuid::new_v4(), 1, runbook_content(&runbook_toml("learned"))),
+            )
+            .await;
+
+            assert_eq!(result["status"], "applied", "{result}");
+            // The candidate is in the library, gateless (this host holds no
+            // recorded episodes, so the technical gates honestly fail) and
+            // carrying the delivery's provenance.
+            let delivered = deps.runbooks.by_name("learned").expect("delivered");
+            assert_eq!(delivered.status(), argus_runbooks::RunbookStatus::Candidate);
+            assert!(delivered.gates().is_empty());
+            let provenance = deps.runbooks.provenance("learned").expect("provenance");
+            assert_eq!(provenance.version_number, 1);
+
+            // The applied version is recorded for reconciliation like any
+            // other applied configuration.
+            let applied = deps.repository.list_applied_configurations().await.unwrap();
+            assert_eq!(applied.len(), 1);
+
+            // The candidate rides the additive sentinel field.
+            let view = deps.runbooks.view().expect("runbook view");
+            assert_eq!(view["count"], 1);
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_malformed_runbook_delivery_fails_and_loads_nothing() {
+            let (deps, dir) = deps_and_transport().await;
+
+            let result =
+                apply_and_read_result(&deps, frame(Uuid::new_v4(), 1, runbook_content("name = ")))
+                    .await;
+
+            assert_eq!(result["status"], "failed", "{result}");
+            assert!(
+                result["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("invalid runbook file"),
+                "the loader's reason is the reply: {result}"
+            );
+            assert!(deps.runbooks.by_name("learned").is_none(), "nothing loaded");
+            let applied = deps.repository.list_applied_configurations().await.unwrap();
+            assert!(applied.is_empty(), "a failed delivery is not applied");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_runbook_delivery_without_its_document_is_failed() {
+            let (deps, dir) = deps_and_transport().await;
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(Uuid::new_v4(), 1, serde_json::json!({ "kind": "runbook" })),
+            )
+            .await;
+
+            assert_eq!(result["status"], "failed", "{result}");
+            assert!(
+                result["reason"].as_str().unwrap().contains("toml"),
+                "{result}"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_stale_runbook_delivery_is_rejected_rather_than_reapplied() {
+            let (deps, dir) = deps_and_transport().await;
+            let id = Uuid::new_v4();
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(id, 5, runbook_content(&runbook_toml("learned"))),
+            )
+            .await;
+            assert_eq!(result["status"], "applied", "{result}");
+
+            // A replayed older config.apply must not supersede the newer
+            // candidate — the same monotonicity the settings kinds enforce.
+            let result = apply_and_read_result(
+                &deps,
+                frame(id, 4, runbook_content(&runbook_toml("learned"))),
+            )
+            .await;
+            assert_eq!(result["status"], "rejected", "{result}");
+            assert!(result["reason"].as_str().unwrap().contains("not newer"));
+            assert_eq!(
+                deps.runbooks.provenance("learned").unwrap().version_number,
+                5,
+                "the newer candidate stands"
+            );
 
             fs::remove_dir_all(&dir).ok();
         }

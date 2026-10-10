@@ -333,6 +333,26 @@ pub trait DomainRepository: Send + Sync {
     async fn get_autonomy_state(&self) -> Result<Option<AutonomyState>, RepositoryError> {
         Err(autonomy_unsupported("get_autonomy_state"))
     }
+
+    // --- Delivered runbooks (spec 009): cloud content, locally earned gates ---
+
+    /// Persists one delivered runbook keyed by its name (spec 009 FR-002),
+    /// replacing any previous row for that name — a re-delivery supersedes.
+    /// The row carries the candidate's earned gates, so progress survives a
+    /// restart.
+    async fn put_runbook(
+        &self,
+        _runbook: &argus_runbooks::DeliveredRunbook,
+    ) -> Result<(), RepositoryError> {
+        Err(runbook_unsupported("put_runbook"))
+    }
+
+    /// Every persisted delivered runbook, ordered by name.
+    async fn list_runbooks(
+        &self,
+    ) -> Result<Vec<argus_runbooks::DeliveredRunbook>, RepositoryError> {
+        Err(runbook_unsupported("list_runbooks"))
+    }
 }
 
 const CLOUD_STATE: &str = "cloud state";
@@ -379,5 +399,14 @@ fn ledger_unsupported(operation: &'static str) -> RepositoryError {
 fn autonomy_unsupported(operation: &'static str) -> RepositoryError {
     RepositoryError::Unavailable(format!(
         "autonomy state is not supported by this backend (operation: {operation})"
+    ))
+}
+
+/// Delivered runbooks (spec 009) follow the same rule: a backend that cannot
+/// persist them must say so — a silently dropped delivery would vanish at the
+/// next restart while the cloud still reports it applied.
+fn runbook_unsupported(operation: &'static str) -> RepositoryError {
+    RepositoryError::Unavailable(format!(
+        "delivered runbooks are not supported by this backend (operation: {operation})"
     ))
 }

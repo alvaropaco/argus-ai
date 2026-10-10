@@ -396,6 +396,20 @@ pub struct ApprovalDecisionPayload {
     pub decided_by: String,
 }
 
+/// `runbook.decision` (cloud → daemon): an operator's approve/promote
+/// decision on a delivered runbook candidate (spec 009 FR-004). The daemon
+/// applies it through the local promotion ladder — the cloud commands, the
+/// ladder decides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunbookDecisionPayload {
+    /// The runbook's stable name, as listed in the sentinel report.
+    pub name: String,
+    /// `approve` (Candidate → Approved, requires the four technical gates)
+    /// or `promote` (Approved → Promoted).
+    pub decision: String,
+    pub decided_by: String,
+}
+
 // --- Ledger payloads (spec 007 FR-005) ---
 //
 // The redacted, bounded projections of the local ledger records. Raw
@@ -493,6 +507,20 @@ pub struct ApprovalResultPayload {
     pub accepted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `runbook.result` (daemon → cloud): what the runbook decision did — the
+/// ladder's own outcome, never an invented success (spec 009 FR-004).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunbookResultPayload {
+    pub name: String,
+    pub accepted: bool,
+    /// The resulting status (`approved` / `promoted`) on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The ladder's rejection reason on failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

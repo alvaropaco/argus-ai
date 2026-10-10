@@ -126,6 +126,11 @@ CREATE TABLE IF NOT EXISTS autonomy_state (
     id   TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runbooks (
+    -- Keyed by the runbook's stable name: a re-delivery supersedes (spec 009 FR-001).
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
 "#;
 
 const SINGLETON: &str = "cloud";
@@ -824,6 +829,27 @@ impl DomainRepository for SqliteRepository {
             .map(|data| Self::decode(&data))
             .transpose()
     }
+
+    async fn put_runbook(
+        &self,
+        runbook: &argus_runbooks::DeliveredRunbook,
+    ) -> Result<(), RepositoryError> {
+        // Keyed by the runbook's stable name; a re-delivery replaces the row
+        // (spec 009 FR-001 supersede, FR-002 persistence).
+        self.put_json("runbooks", runbook.name(), &Self::encode(runbook)?)
+    }
+
+    async fn list_runbooks(
+        &self,
+    ) -> Result<Vec<argus_runbooks::DeliveredRunbook>, RepositoryError> {
+        let mut out: Vec<argus_runbooks::DeliveredRunbook> = self
+            .list_json("runbooks")?
+            .iter()
+            .map(|data| Self::decode(data))
+            .collect::<Result<Vec<_>, _>>()?;
+        out.sort_by(|a, b| a.name().cmp(b.name()));
+        Ok(out)
+    }
 }
 
 /// The wrapper row for `ledger_traces`, whose extracted columns live beside
@@ -1067,6 +1093,69 @@ mod tests {
         assert_eq!(loaded, state);
         assert_eq!(loaded.shadow_clean_cycles, 7);
         assert_eq!(loaded.budget.low_risk_hour, Some((12_345, 4)));
+    }
+
+    #[tokio::test]
+    async fn delivered_runbooks_persist_by_name_and_supersede() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        assert!(repo.list_runbooks().await.unwrap().is_empty());
+
+        let delivered = delivered_runbook("learned-procedure", 3);
+        repo.put_runbook(&delivered).await.unwrap();
+        let listed = repo.list_runbooks().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0], delivered);
+
+        // A re-delivery of the same name supersedes (spec 009 FR-001); gate
+        // progress rides the serialized candidate (FR-002).
+        let mut superseding = delivered_runbook("learned-procedure", 4);
+        superseding
+            .runbook
+            .record_gate(argus_runbooks::Gate::Evaluation)
+            .unwrap();
+        repo.put_runbook(&superseding).await.unwrap();
+
+        // A different name is a separate row.
+        repo.put_runbook(&delivered_runbook("other-procedure", 1))
+            .await
+            .unwrap();
+
+        let listed = repo.list_runbooks().await.unwrap();
+        assert_eq!(listed.len(), 2, "one row per name");
+        let learned = listed
+            .iter()
+            .find(|r| r.name() == "learned-procedure")
+            .unwrap();
+        assert_eq!(learned.version_number, 4);
+        assert_eq!(
+            learned.runbook.gates(),
+            [argus_runbooks::Gate::Evaluation],
+            "the superseding row carries the newer gate progress"
+        );
+        // Deterministic order.
+        assert_eq!(listed[0].name(), "learned-procedure");
+        assert_eq!(listed[1].name(), "other-procedure");
+    }
+
+    fn delivered_runbook(name: &str, version_number: i64) -> argus_runbooks::DeliveredRunbook {
+        let runbook = argus_runbooks::Runbook::candidate(
+            uuid::Uuid::new_v4(),
+            name,
+            argus_runbooks::RunbookTrigger::Symptom("restart-loop".into()),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        argus_runbooks::DeliveredRunbook {
+            runbook,
+            configuration_id: uuid::Uuid::new_v4(),
+            version_id: uuid::Uuid::new_v4(),
+            version_number,
+            delivered_at: Utc::now(),
+        }
     }
 
     #[tokio::test]

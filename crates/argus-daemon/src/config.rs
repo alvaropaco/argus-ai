@@ -409,6 +409,10 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
 pub const KIND_PROVIDER: &str = "provider";
 /// Brain-loop settings (spec 006): the managed lever for the running brain.
 pub const KIND_BRAIN: &str = "brain";
+/// Runbook distribution (spec 009): the content is the runbook's TOML
+/// document. Applied through the runbook loader as a Candidate with cloud
+/// provenance — delivery is data, never promotion (ADR-0041).
+pub const KIND_RUNBOOK: &str = "runbook";
 /// Agent-team configuration: recognised, but nothing local consumes it yet.
 pub const KIND_AGENT_TEAM: &str = "agent_team";
 /// Orchestration configuration: same deferral as the agent team.
@@ -445,7 +449,7 @@ impl ConfigDisposition {
 
 pub fn disposition(kind: &str) -> ConfigDisposition {
     match kind {
-        KIND_PROVIDER | KIND_BRAIN => ConfigDisposition::Apply,
+        KIND_PROVIDER | KIND_BRAIN | KIND_RUNBOOK => ConfigDisposition::Apply,
         KIND_AGENT_TEAM | KIND_ORCHESTRATION => ConfigDisposition::Deferred,
         _ => ConfigDisposition::Unknown,
     }
@@ -496,6 +500,14 @@ mod tests {
     fn the_provider_kind_is_applied() {
         assert_eq!(disposition(KIND_PROVIDER), ConfigDisposition::Apply);
         assert_eq!(disposition(KIND_PROVIDER).refusal_reason(), None);
+    }
+
+    #[test]
+    fn the_runbook_kind_is_applied_not_deferred() {
+        // Spec 009 FR-001: the runbook kind is applied in this release — its
+        // refusal reason would be a lie.
+        assert_eq!(disposition(KIND_RUNBOOK), ConfigDisposition::Apply);
+        assert_eq!(disposition(KIND_RUNBOOK).refusal_reason(), None);
     }
 
     #[test]

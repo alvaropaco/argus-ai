@@ -36,6 +36,26 @@ impl RunbookLibrary {
         self.runbooks.get(&id)
     }
 
+    /// The runbook with this exact name, if any (names are unique across ids).
+    pub fn by_name(&self, name: &str) -> Option<&Runbook> {
+        self.runbooks.values().find(|r| r.name == name)
+    }
+
+    /// Removes the runbook named `name` (supersede support, spec 009 FR-001:
+    /// a re-delivery replaces the previous candidate). Returns whether one
+    /// was removed.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let id = self
+            .runbooks
+            .values()
+            .find(|r| r.name == name)
+            .map(|r| r.id);
+        match id {
+            Some(id) => self.runbooks.remove(&id).is_some(),
+            None => false,
+        }
+    }
+
     /// All runbooks, ordered by name (deterministic).
     pub fn list(&self) -> Vec<&Runbook> {
         let mut out: Vec<&Runbook> = self.runbooks.values().collect();
@@ -45,6 +65,12 @@ impl RunbookLibrary {
 
     pub fn get_mut(&mut self, id: Uuid) -> Option<&mut Runbook> {
         self.runbooks.get_mut(&id)
+    }
+
+    /// The mutable runbook with this exact name, if any (the promotion
+    /// ladder's entry point for named candidates).
+    pub fn by_name_mut(&mut self, name: &str) -> Option<&mut Runbook> {
+        self.runbooks.values_mut().find(|r| r.name == name)
     }
 
     /// Runbooks whose trigger matches, ordered by name.

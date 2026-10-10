@@ -8,6 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::cloud::EnrollmentError;
+use crate::runbooks::Decision;
 use crate::runtime::Daemon;
 
 /// Handles a single decoded request, enforcing authorization and dispatch.
@@ -61,6 +62,12 @@ pub async fn handle(daemon: &Daemon, principal: Principal, request: Request) -> 
         Operation::ReportGenerate => return report_generate(daemon, &request).await,
         Operation::BrainDiagnose => return brain_diagnose(daemon, &request).await,
         Operation::RunbooksList => return runbooks_list(daemon, request.correlation_id),
+        Operation::RunbooksApprove => {
+            return runbook_decision(daemon, &principal, &request, Decision::Approve).await;
+        }
+        Operation::RunbooksPromote => {
+            return runbook_decision(daemon, &principal, &request, Decision::Promote).await;
+        }
     };
 
     Response::ok(request.correlation_id, result)
@@ -456,20 +463,68 @@ async fn brain_diagnose(daemon: &Daemon, request: &Request) -> Response {
     }
 }
 
-/// `runbooks.list`: the runbooks loaded at startup (spec 005 FR-005).
+/// `runbooks.list`: the runbook library (spec 005 FR-005, gates since spec
+/// 009 FR-004) — name, status, gate progress, and cloud provenance per entry.
 fn runbooks_list(daemon: &Daemon, correlation_id: Uuid) -> Response {
     let runbooks: Vec<serde_json::Value> = daemon
         .runbooks()
         .list()
         .into_iter()
         .map(|rb| {
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": rb.name,
-                "status": format!("{:?}", rb.status()),
+                // The serde spelling ("candidate"), matching the sentinel
+                // view and the web — never the Rust Debug casing.
+                "status": rb.status(),
+                "gates": rb.gates(),
                 "attempts": rb.attempts(),
                 "success_rate": rb.historical_success_rate(),
-            })
+            });
+            if let Some(provenance) = daemon.runbooks().provenance(&rb.name)
+                && let Some(object) = entry.as_object_mut()
+            {
+                object.insert(
+                    "provenance".into(),
+                    serde_json::json!({
+                        "configuration_id": provenance.configuration_id.to_string(),
+                        "version_id": provenance.version_id.to_string(),
+                        "version_number": provenance.version_number,
+                        "delivered_at": provenance.delivered_at.to_rfc3339(),
+                    }),
+                );
+            }
+            entry
         })
         .collect();
     Response::ok(correlation_id, serde_json::json!({ "runbooks": runbooks }))
+}
+
+/// `runbooks.approve` / `runbooks.promote`: the operator's decision crossing
+/// into the local promotion ladder (spec 009 FR-004). The ladder's own errors
+/// come back as the failure reason — the CLI shows what the ladder said.
+async fn runbook_decision(
+    daemon: &Daemon,
+    principal: &Principal,
+    request: &Request,
+    decision: Decision,
+) -> Response {
+    let Some(name) = request.payload.get("name").and_then(Value::as_str) else {
+        return Response::err(
+            request.correlation_id,
+            ErrorCode::Malformed,
+            "runbooks.approve/promote require a 'name' in the payload",
+        );
+    };
+
+    match daemon
+        .runbooks()
+        .decide(name, decision, &granted_by(principal))
+        .await
+    {
+        Ok(status) => Response::ok(
+            request.correlation_id,
+            serde_json::json!({ "name": name, "state": status }),
+        ),
+        Err(error) => Response::err(request.correlation_id, ErrorCode::Denied, error),
+    }
 }

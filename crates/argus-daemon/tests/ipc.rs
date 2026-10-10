@@ -276,3 +276,50 @@ async fn report_generate_renders_known_kinds_and_rejects_unknown_ones() {
     assert_eq!(bad.error.expect("error").code, ErrorCode::Malformed);
     cleanup(&path);
 }
+
+/// Runbook ladder operations over IPC (spec 009 FR-004): the list carries
+/// gate progress, and a decision on an unknown runbook is refused with the
+/// ladder's wording rather than coerced.
+#[tokio::test]
+async fn runbook_list_and_decisions_round_trip() {
+    let config = test_config("runbooks-ladder");
+    let path = spawn_server(config).await;
+    let mut client = Client::connect(&path).await.expect("connect");
+
+    let response = client
+        .request(Operation::RunbooksList, Uuid::new_v4(), json!({}))
+        .await
+        .expect("round trip");
+    assert!(response.ok, "{:?}", response.error);
+    let runbooks = response.result.expect("result")["runbooks"]
+        .as_array()
+        .expect("runbook array")
+        .clone();
+    assert!(runbooks.is_empty(), "a fresh daemon holds no runbooks");
+
+    let unknown = client
+        .request(
+            Operation::RunbooksApprove,
+            Uuid::new_v4(),
+            json!({ "name": "no-such-runbook" }),
+        )
+        .await
+        .expect("round trip");
+    assert!(!unknown.ok);
+    let error = unknown.error.expect("error body");
+    assert_eq!(error.code, ErrorCode::Denied);
+    // Only delivered runbooks participate in the ladder — an unknown name is
+    // not a delivered one, so the refusal says exactly that.
+    assert!(error.message.contains("file-owned"), "{error:?}");
+
+    let malformed = client
+        .request(Operation::RunbooksPromote, Uuid::new_v4(), json!({}))
+        .await
+        .expect("round trip");
+    assert!(!malformed.ok);
+    assert_eq!(
+        malformed.error.expect("error body").code,
+        ErrorCode::Malformed
+    );
+    cleanup(&path);
+}

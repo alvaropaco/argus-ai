@@ -111,8 +111,16 @@ pub fn load_runbooks(dir: &Path) -> LoadResult {
 
 fn load_one(path: &Path) -> Result<Runbook, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("unreadable: {e}"))?;
+    parse_runbook(&text)
+}
+
+/// Parse one runbook from its TOML text — the same discipline as the file
+/// loader, exposed so a delivered document (spec 009 FR-001) walks the exact
+/// same path: `deny_unknown_fields`, capability parsing, and gate replay
+/// through the real ladder. A delivered file can never grant unearned status.
+pub fn parse_runbook(text: &str) -> Result<Runbook, String> {
     let file: RunbookFile =
-        toml::from_str(&text).map_err(|e| format!("invalid runbook file: {e}"))?;
+        toml::from_str(text).map_err(|e| format!("invalid runbook file: {e}"))?;
 
     if file.name.trim().is_empty() {
         return Err("name must be non-empty".to_string());

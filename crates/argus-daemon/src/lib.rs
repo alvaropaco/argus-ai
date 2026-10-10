@@ -13,6 +13,7 @@ pub mod handler;
 pub mod ledger;
 pub mod observe;
 pub mod privileged;
+pub mod runbooks;
 pub mod runtime;
 pub mod sentinel;
 

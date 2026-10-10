@@ -54,6 +54,11 @@ pub struct SentinelView {
     /// exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<Map<String, Value>>,
+    /// The runbook table (spec 009 FR-005): name, status, gates, provenance
+    /// per candidate. Additive and skip-if-none like the autonomy line — a
+    /// snapshot from a host with no runbooks renders exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runbooks: Option<Map<String, Value>>,
 }
 
 /// One resource-pressure signal in the view.
@@ -101,6 +106,9 @@ pub struct SentinelInputs {
     /// carried through to the view verbatim — the sentinel adds nothing.
     /// (Named apart from `autonomy`, which is the escalation's level input.)
     pub autonomy_view: Option<Map<String, Value>>,
+    /// The runbook table (spec 009 FR-005), when the library is non-empty;
+    /// carried through to the view verbatim — the sentinel adds nothing.
+    pub runbooks_view: Option<Map<String, Value>>,
 }
 
 /// One sentinel evaluation's outcome: the surfaced view and the decision.
@@ -161,6 +169,7 @@ pub fn sentinel_evaluate(inputs: &SentinelInputs, now: DateTime<Utc>) -> Sentine
         pressure,
         generated_at: now,
         autonomy: inputs.autonomy_view.clone(),
+        runbooks: inputs.runbooks_view.clone(),
     };
 
     // In a safe mode the escalation degrades: stale inputs or suspended
@@ -319,6 +328,7 @@ mod tests {
                 PolicyOutcome::Allow,
             )),
             autonomy_view: None,
+            runbooks_view: None,
         }
     }
 
@@ -462,6 +472,41 @@ mod tests {
         assert_eq!(json["autonomy"]["phase"], "shadow");
         assert_eq!(json["autonomy"]["phase_progress"]["cycles"], 7);
         assert_eq!(json["autonomy"]["effective"], "l0_observe");
+        // And the shape round-trips for the cloud (loose validation upstream).
+        let back: SentinelView = serde_json::from_value(json).unwrap();
+        assert_eq!(back, d.view);
+    }
+
+    #[test]
+    fn the_runbook_table_is_additive_and_skip_if_none() {
+        // Without a library the view renders exactly as before: the field is
+        // absent from the payload, and old readers see no change (spec 009
+        // FR-005, the lean build's unchanged behavior).
+        let d = sentinel_evaluate(&inputs(), Utc::now());
+        let json = serde_json::to_value(&d.view).unwrap();
+        assert!(json.get("runbooks").is_none(), "skip-if-none");
+
+        // With one, the table rides verbatim — the sentinel adds nothing.
+        let mut inputs = inputs();
+        inputs.runbooks_view = Some(
+            serde_json::json!({
+                "count": 1,
+                "items": [{
+                    "name": "learned-procedure",
+                    "status": "candidate",
+                    "gates": ["evaluation", "simulation"],
+                    "provenance": { "version_number": 9 },
+                }],
+            })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        );
+        let d = sentinel_evaluate(&inputs, Utc::now());
+        let json = serde_json::to_value(&d.view).unwrap();
+        assert_eq!(json["runbooks"]["count"], 1);
+        assert_eq!(json["runbooks"]["items"][0]["name"], "learned-procedure");
+        assert_eq!(json["runbooks"]["items"][0]["status"], "candidate");
         // And the shape round-trips for the cloud (loose validation upstream).
         let back: SentinelView = serde_json::from_value(json).unwrap();
         assert_eq!(back, d.view);

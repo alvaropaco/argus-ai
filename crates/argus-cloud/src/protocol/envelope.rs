@@ -91,6 +91,8 @@ pub enum MessageType {
     ConfigPullRequest,
     ApprovalDecision,
     ApprovalResult,
+    RunbookDecision,
+    RunbookResult,
     SentinelAck,
     // connection management
     Ping,
@@ -122,6 +124,8 @@ impl MessageType {
             Self::SentinelAck => "sentinel.ack",
             Self::ApprovalDecision => "approval.decision",
             Self::ApprovalResult => "approval.result",
+            Self::RunbookDecision => "runbook.decision",
+            Self::RunbookResult => "runbook.result",
             Self::TelemetryAck => "telemetry.ack",
             Self::HealthAck => "health.ack",
             Self::EventsAck => "events.ack",
@@ -196,6 +200,8 @@ impl std::str::FromStr for MessageType {
             "sentinel.ack" => Self::SentinelAck,
             "approval.decision" => Self::ApprovalDecision,
             "approval.result" => Self::ApprovalResult,
+            "runbook.decision" => Self::RunbookDecision,
+            "runbook.result" => Self::RunbookResult,
             "ping" => Self::Ping,
             "pong" => Self::Pong,
             "stream.throttle" => Self::StreamThrottle,
@@ -241,6 +247,7 @@ impl MessageType {
             | Self::CommandInvoke
             | Self::ConfigPullRequest
             | Self::ApprovalDecision
+            | Self::RunbookDecision
             | Self::Ping
             | Self::Pong
             | Self::StreamThrottle
@@ -257,6 +264,7 @@ impl MessageType {
             | Self::BrainTrace
             | Self::TokenUsage
             | Self::ApprovalResult
+            | Self::RunbookResult
             | Self::ConfigResult
             | Self::CommandResult
             | Self::ConfigState => Direction::InstallationToCloud,
@@ -270,6 +278,8 @@ mod tests {
 
     #[test]
     fn message_type_round_trips_for_every_type() {
+        // Exhaustive: every variant of `MessageType`, so a type added without
+        // its wire spelling (or its direction) fails here first.
         let all = [
             MessageType::HandshakeHello,
             MessageType::HandshakeAuthenticate,
@@ -283,6 +293,7 @@ mod tests {
             MessageType::EventsReport,
             MessageType::ActivitiesReport,
             MessageType::CapabilitiesPublish,
+            MessageType::SentinelReport,
             MessageType::ActionEvent,
             MessageType::BrainTrace,
             MessageType::TokenUsage,
@@ -295,18 +306,23 @@ mod tests {
             MessageType::ActionEventAck,
             MessageType::BrainTraceAck,
             MessageType::TokenUsageAck,
+            MessageType::SentinelAck,
             MessageType::ConfigResult,
             MessageType::CommandResult,
             MessageType::ConfigState,
             MessageType::ConfigApply,
             MessageType::CommandInvoke,
             MessageType::ConfigPullRequest,
+            MessageType::ApprovalDecision,
+            MessageType::ApprovalResult,
+            MessageType::RunbookDecision,
+            MessageType::RunbookResult,
             MessageType::Ping,
             MessageType::Pong,
             MessageType::StreamThrottle,
             MessageType::SessionRotate,
         ];
-        assert_eq!(all.len(), 34);
+        assert_eq!(all.len(), 40);
         for ty in all {
             assert_eq!(ty.as_str().parse::<MessageType>(), Ok(ty), "{ty:?}");
         }

@@ -219,15 +219,19 @@ comparison = { equal = "active" }
     config.brain.runbooks_dir = Some(dir.to_string_lossy().into_owned());
     let daemon = Daemon::init(config).await.unwrap();
 
-    let names: Vec<&str> = daemon
+    let names: Vec<String> = daemon
         .runbooks()
         .list()
         .into_iter()
-        .map(|rb| rb.name.as_str())
+        .map(|rb| rb.name.clone())
         .collect();
     assert_eq!(names, ["restart-failed"]);
     assert_eq!(
-        daemon.runbooks().list()[0].status(),
+        daemon
+            .runbooks()
+            .by_name("restart-failed")
+            .unwrap()
+            .status(),
         argus_runbooks::RunbookStatus::Candidate
     );
     let _ = AutonomyMode::L0Observe;
