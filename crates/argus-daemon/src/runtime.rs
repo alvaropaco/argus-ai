@@ -888,15 +888,21 @@ impl Daemon {
         Arc::clone(&self.autonomy)
     }
 
-    /// Whether the cloud pairing is alive (spec 008 gate signal): the shared
-    /// connectivity tracker reads connected — degraded counts, because the
-    /// pairing itself is up.
+    /// Whether the cloud pairing is alive (spec 008 gate signal). Connected
+    /// or degraded reads directly; between sessions — the gateway recycles
+    /// them — an enrolled installation whose last exchange is recent is
+    /// still paired: the pairing is the relationship, not this instant's
+    /// handshake. Not-configured, revoked, and suspended are unpaired.
     pub async fn cloud_paired(&self) -> bool {
         use argus_domain::CloudConnectivityState;
-        matches!(
-            self.tracker.lock().await.state(),
-            CloudConnectivityState::Connected | CloudConnectivityState::Degraded
-        )
+        let tracker = self.tracker.lock().await;
+        match tracker.state() {
+            CloudConnectivityState::Connected | CloudConnectivityState::Degraded => true,
+            CloudConnectivityState::Disconnected => tracker
+                .last_exchange_at()
+                .is_some_and(|at| Utc::now() - at < chrono::Duration::minutes(5)),
+            _ => false,
+        }
     }
 
     /// The live Kubernetes cluster bridge, when connected (ADR-0037);

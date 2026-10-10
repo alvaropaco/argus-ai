@@ -448,6 +448,16 @@ pub fn spawn(
                         // site — never a string match on the outcome.
                         failed_validation: record.validation_failed,
                     };
+                    tracing::info!(
+                        clean = signals.clean(),
+                        live = signals.live_environment,
+                        provider = signals.provider_ready,
+                        paired = signals.cloud_paired,
+                        safe = signals.safe_mode_active,
+                        incidents = signals.open_critical_incidents,
+                        failed_validation = signals.failed_validation,
+                        "autonomy tick signals"
+                    );
                     daemon.autonomy().on_cycle(signals).await;
                     if !record.evidence.is_empty() {
                         tracing::info!(

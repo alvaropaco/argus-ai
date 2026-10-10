@@ -61,7 +61,7 @@ impl CycleSignals {
     /// The gate evidence one clean cycle must show (FR-002): provider
     /// healthy, cloud paired, no SafeMode, no unresolved critical incident,
     /// no failed validation.
-    fn clean(&self) -> bool {
+    pub fn clean(&self) -> bool {
         self.provider_ready
             && self.cloud_paired
             && !self.safe_mode_active
