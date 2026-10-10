@@ -63,7 +63,7 @@ deferred: []
 - [ ] `crates/argus-daemon/src/brain.rs` (+ runbooks.rs) — procedure-plan construction before the provider path (promoted match, schema-validated steps from the situation's subject, dedup parity, fall-through), attribution set
 - [ ] `crates/argus-daemon/src/runbooks.rs` — attribution-based gate recording (replaces the trigger hook), `note_procedure_outcome`, evaluation name-linkage
 - [ ] surfaces — sentinel plan entries carry `runbook` (additive); optional web badge
-- [ ] both repos — full verification; deploy CLOUD FIRST then daemon; live AC checks
+- [x] both repos — full verification; DEPLOYED 2026-10-10 cloud-first: app-platform `524c742` (procedure badge), argus-ai `ec4641b` (daemon built on the VPS, binary-swapped). **Live-proven (AC-002)**: with no promoted runbook in the library (the delivered candidate is honestly gateless), the daemon reconnects, the provider path runs unchanged (zero procedure-plan log lines), the delivered candidate is restored from persistence again, and the autonomy ladder holds `earned · l2_recommend` across the swap. Not yet live: AC-001/003-006 need a promoted runbook, which honestly requires earned gates, which require real validated work — the ladder is doing its job.
 
 **Acceptance Criteria:**
 - Given a promoted runbook whose trigger matches the cycle's situation, when the brain cycles, then an attributed procedure plan is proposed (objective `procedure: <name>`) without consulting the provider (AC-001).
