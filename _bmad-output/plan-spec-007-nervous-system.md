@@ -80,7 +80,7 @@ deferred: []
 - [x] app-platform gateway — ingest handlers + acks + `publishRealtime` + lastSeenAt.
 - [x] app-platform api — GET actions / traces / usage rollup routes + realtime unions.
 - [x] app-platform web — ActivityPanel (live tail, filters, expandable detail with trace+usage), usage summary, silence badge (instance + list).
-- [ ] both repos — tests done (argus-ai 1053 passed/clippy/fmt clean; app-platform 12/12 tasks incl. new @argus/web vitest); VPS deploy deferred until after review.
+- [x] both repos — tests done (argus-ai 1053 passed/clippy/fmt clean; app-platform 12/12 tasks incl. new @argus/web vitest); DEPLOYED 2026-10-10: cloud at `52887ad` (deploy service rebuilt + restarted; 0006 applied on api boot — first CD run crashed the api: the three ledger routes had been appended at module scope where `app` is undefined, esbuild does not typecheck; fixed by moving them inside `registerInstanceDetailRoutes`), daemon built on the VPS at `/root/argus-ai` (rsync + warm `cargo build --release --features argus-daemon/kubernetes`, 1 min) and binary-swapped per procedure. Live-proven: daemon reconnects, `brain.trace` streams accepted (13+ rows in `brain_traces`, 33 local), api ledger routes mounted (401 unauth), migration applied. Not yet live-proven (waits for first real activity): `action.event` rows (healthy host, L0, no actions), `token.usage` rows (no provider call yet — usage metering is unit-tested only), dashboard Activity tab rendering with real data.
 
 **Acceptance Criteria:**
 - Given a paired instance with the dashboard open, when the brain executes a remediation step, then the action appears in the Activity live tail within ~2 s with kind/target/verdict/outcome/duration, and its detail shows the cycle trace and token usage.
