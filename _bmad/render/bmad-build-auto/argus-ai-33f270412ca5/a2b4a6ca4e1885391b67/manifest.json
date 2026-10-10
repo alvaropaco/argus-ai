@@ -1,0 +1,56 @@
+{
+  "generation_hash": "a2b4a6ca4e1885391b67",
+  "inputs": {
+    "jinja2_version": "3.1.6",
+    "project_root": "/Users/alvaropaco/Github/argus-project/argus-ai",
+    "renderer_sha256": "a622fd5d9f633690323bdecf6cc9dc28625ef0d7b9d971fcc3cd101ed271fa19",
+    "resolved_values": {
+      "config.core.output_folder": "/Users/alvaropaco/Github/argus-project/argus-ai/_bmad-output",
+      "customization.workflow.activation_steps_append": [],
+      "customization.workflow.activation_steps_prepend": [],
+      "customization.workflow.implementation_handoff": "Launch a subagent with no prior conversation context, with this prompt:\n\n> Read {plan_file} fully and implement it — the plan is the sole source of truth. Load every file listed in its frontmatter `context:` before you start.\n>\n> When done, report what you changed, how you verified it, and anything left incomplete or risky.\n",
+      "customization.workflow.on_complete": "",
+      "customization.workflow.persistent_facts": [],
+      "customization.workflow.quick_lenses": [
+        {
+          "id": "quick",
+          "instruction": "Launch a context-free subagent with this prompt:\n\nRead `{plan_file}` — the plan holding the acceptance criteria and intent — and the files its frontmatter `context:` lists. Read the agent instruction files (`AGENTS.md`, `CLAUDE.md`, or equivalents) at the repository root and in the directories the diff touches; those are the rules. Then read the unified diff at `{diff_file}` — it is the change under review.\n\nReport unmet acceptance criteria, broken rules, and bugs. Each finding: the location, what goes wrong, and evidence checked against the surrounding code. Output a Markdown list of findings only — no severity, priority, or ranking.\n\nDo not invoke any skill, and do not spawn subagents of your own — you are the reviewer. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.\n\n",
+          "name": "Quick"
+        }
+      ],
+      "customization.workflow.review": "quick",
+      "customization.workflow.route": "auto",
+      "customization.workflow.route_selection": "Decide whether to use a coding subagent (full) or implement directly (oneshot).\nUsing the information already gathered, with no further reading and minimal\nextra reasoning, estimate the lines of code to add or modify.\n100 lines or fewer: oneshot. Otherwise: full.\nIf the change touches more than five files and is not simple or mechanical,\nconsider upgrading to full.\n"
+    },
+    "skill_root": "/Users/alvaropaco/.zcode/skills/bmad-build-auto",
+    "source_sha256": {
+      "plan-template.md": "a78743deccaa62261c5df9e3954d7a49e5d2309c88c2970a496fd669c9adbf8e",
+      "references/claims-check.md": "6cb20a86d819b95272876bca0dffef59ca07ba6a373d804295066751043867c0",
+      "references/deletion-check.md": "0f1f124e4e957147e89164a272b10bedc694ad0d9ad2618c8610ac74ee9cb0da",
+      "review-prompts/edge-case-hunter.md": "b909fe0ec8e4daaf2550d0ec783618c5146261d0dbc0e054698ce00d0905a3d1",
+      "review-prompts/verification-gap.md": "45ab0b8c4c56c5c055c97a293a8591a67e256d0b1a2058ce1f093cd866be8d03",
+      "step-01-clarify-and-route.md": "3288dc68b5769b637049e917f95ada290e9551bd7f84d6e71dd3b88f22d70111",
+      "step-02-plan.md": "fec5f5448d2c60d79660c7e501d930238ecf42426e1a8cb7a333db375fe324eb",
+      "step-03-implement.md": "bbe36d05e0ad30e1398c4ece55705f0eb74fdd7feccf68415c45d29435a45089",
+      "step-04-review.md": "4232a58fe4f8e706c9be9e7db4dda7a313b9e40a7b3c9b1a650dfb26eb79a32f",
+      "workflow.md": "ae1841a70272e22835ef55b703675d14a49b81e93fe256beb308a58ec447fb46"
+    }
+  },
+  "outputs": {
+    "plan-template.md": "a78743deccaa62261c5df9e3954d7a49e5d2309c88c2970a496fd669c9adbf8e",
+    "references/claims-check.md": "6cb20a86d819b95272876bca0dffef59ca07ba6a373d804295066751043867c0",
+    "references/deletion-check.md": "0f1f124e4e957147e89164a272b10bedc694ad0d9ad2618c8610ac74ee9cb0da",
+    "review-prompts/edge-case-hunter.md": "b909fe0ec8e4daaf2550d0ec783618c5146261d0dbc0e054698ce00d0905a3d1",
+    "review-prompts/verification-gap.md": "45ab0b8c4c56c5c055c97a293a8591a67e256d0b1a2058ce1f093cd866be8d03",
+    "step-01-clarify-and-route.md": "aad19f0170adbb6c611c936aab27c1f34d4cf8a617cfc7e842d781393d9422b5",
+    "step-02-plan.md": "fcefade4569196bf64a30ad39bb4a51d94c601ab439ebee70fa5d4b2ea4db19d",
+    "step-03-implement.md": "18f17a8a8aa1359d6067ad9d758b1b5c530418a707d23a9e91cc2a950121b724",
+    "step-04-review.md": "a37a2a67890a5f52ec61b7dcb431ec329863711d7fed3250219b89d02cea8216",
+    "workflow.md": "57d02759c8e15c7bd6ed5812c4ccf50c79761ed75c6346b7a06f56cc870a56b2"
+  },
+  "project_root": "/Users/alvaropaco/Github/argus-project/argus-ai",
+  "project_slug": "argus-ai",
+  "root_hash": "33f270412ca5",
+  "schema_version": 1,
+  "skill": "bmad-build-auto"
+}
