@@ -24,6 +24,7 @@ argus-domain = { workspace = true }
 argus-ai-core = { workspace = true }
 argus-cloud = { workspace = true }
 argus-mcp = { workspace = true }
+rustls = { workspace = true }
 toml = { workspace = true }
 argus-ipc = { workspace = true }
 argus-observability = { workspace = true }

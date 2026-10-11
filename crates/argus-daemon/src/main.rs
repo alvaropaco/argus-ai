@@ -20,6 +20,11 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Spec 014 brought a second rustls crypto provider into the tree (rmcp's
+    // reqwest stack); rustls 0.23 panics at builder time when the process
+    // provider is ambiguous. Install ring explicitly, once, before anything
+    // dials TLS — the cloud socket, or an MCP server's HTTP transport.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let config = parse_config()?;
     init(config.log_format, config.otel_endpoint.as_deref())
         .context("failed to initialize tracing")?;
