@@ -40,7 +40,7 @@ pub use cloud::{
     AppliedConfigurationState, ApplyStatus, ApprovalState, CapabilityPublication, CloudCommand,
     CloudCommandStatus, CloudConnection, CloudConnectivityState, CloudEnrollment, DecisionOutcome,
     EffectiveSource, ExecutionApproval, ExecutionDecision, ManagedConfiguration, ManagedSetting,
-    RefusalReason, ReportBuffer, TrustState, TrustStatus,
+    McpDeliveryRecord, RefusalReason, ReportBuffer, TrustState, TrustStatus,
 };
 pub use context::{Principal, RequestContext};
 pub use error::DomainError;

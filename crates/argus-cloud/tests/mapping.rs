@@ -351,6 +351,8 @@ fn config_state_sends_an_explicit_null_because_the_cloud_requires_it() {
         configurations: vec![ConfigurationStateEntry {
             configuration_id: Uuid::nil(),
             applied_version_id: None,
+            token_set: None,
+            mcp_servers: None,
         }],
     };
     let value = serde_json::to_value(&payload).unwrap();

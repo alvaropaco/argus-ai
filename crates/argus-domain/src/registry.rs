@@ -65,6 +65,25 @@ impl CapabilityRegistry {
         Ok(())
     }
 
+    /// Forgets every capability of one MCP server's namespace
+    /// (`mcp.<server>.*`) and returns the removed ids (spec 015 FR-002: a
+    /// removed or changed server's tools leave the authorization surface, so
+    /// the published capability surface stays truthful without a restart).
+    /// The bootstrap set and other servers' tools are untouched.
+    pub fn unregister_server(&mut self, server: &str) -> Vec<CapabilityId> {
+        let prefix = format!("mcp.{server}.");
+        let removed: Vec<CapabilityId> = self
+            .descriptors
+            .keys()
+            .filter(|id| id.as_str().starts_with(&prefix))
+            .cloned()
+            .collect();
+        for id in &removed {
+            self.descriptors.remove(id);
+        }
+        removed
+    }
+
     pub fn get(&self, id: &CapabilityId) -> Option<&CapabilityDescriptor> {
         self.descriptors.get(id)
     }
@@ -195,6 +214,28 @@ mod tests {
                 .get(&CapabilityId::new("host.service.restart").unwrap())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn unregister_server_removes_only_that_servers_namespace() {
+        // Spec 015 FR-002: a removed mcp server's tools leave the registry,
+        // and nothing else — not another server's tools, not the bootstrap set.
+        let mut registry = CapabilityRegistry::new();
+        let bootstrap = descriptor("argus.health.read");
+        registry.register(bootstrap).unwrap();
+        let alpha_tool = descriptor("mcp.alpha.probe");
+        let other_tool = descriptor("mcp.other.probe");
+        registry.register(alpha_tool).unwrap();
+        registry.register(other_tool).unwrap();
+
+        let removed = registry.unregister_server("alpha");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].as_str(), "mcp.alpha.probe");
+        assert!(!registry.contains(&CapabilityId::new("mcp.alpha.probe").unwrap()));
+        assert!(registry.contains(&CapabilityId::new("mcp.other.probe").unwrap()));
+        assert!(registry.contains(&CapabilityId::new("argus.health.read").unwrap()));
+        // Removing an absent server is a no-op.
+        assert!(registry.unregister_server("absent").is_empty());
     }
 
     #[test]

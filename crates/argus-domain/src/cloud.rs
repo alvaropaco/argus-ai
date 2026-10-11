@@ -377,6 +377,23 @@ impl ManagedConfiguration {
     }
 }
 
+/// The delivered `mcp` servers document (spec 015 FR-005): the applied
+/// version's content, persisted so a restart re-seeds the topology beside the
+/// file-declared servers — cloud supersedes file on name conflict. The
+/// content is kept exactly as delivered (the `servers` document, JSON); the
+/// daemon parses it with its ordinary config rules, so this type stays
+/// vocabulary-neutral.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpDeliveryRecord {
+    pub configuration_id: Uuid,
+    pub version_id: Uuid,
+    pub version_number: i64,
+    pub delivered_at: DateTime<Utc>,
+    /// The delivered content, `kind` member included — parsed (and `kind`
+    /// ignored) by the daemon's `McpConfig` rules at re-seed time.
+    pub content: Value,
+}
+
 /// Where the effective value of a managed setting came from.
 ///
 /// Precedence is `Default < File < Cloud < Flag`; the CLI flag ranks above the

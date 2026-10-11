@@ -11,8 +11,8 @@ use argus_domain::{
     ActionEventFilter, ActionEventRecord, AppliedConfigurationState, AutonomyState,
     BrainTraceRecord, CapabilityPublication, CloudCommand, CloudConnection, CloudEnrollment,
     DEFAULT_ACTION_EVENT_LIMIT, DomainEvent, EnvironmentId, Execution, ExecutionApproval,
-    ExecutionDecision, HealthStatus, Hypothesis, ManagedConfiguration, Observation, Plan,
-    ReportBuffer, TokenUsageRecord,
+    ExecutionDecision, HealthStatus, Hypothesis, ManagedConfiguration, McpDeliveryRecord,
+    Observation, Plan, ReportBuffer, TokenUsageRecord,
 };
 use argus_memory::{Episode, Fact, ProcedureRecord};
 use async_trait::async_trait;
@@ -131,6 +131,12 @@ CREATE TABLE IF NOT EXISTS runbooks (
     id   TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mcp_delivery (
+    -- One keyed row: the delivered servers document, a re-delivery supersedes
+    -- (spec 015 FR-005).
+    id   TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
 "#;
 
 const SINGLETON: &str = "cloud";
@@ -149,6 +155,9 @@ const CLOUD_TABLES: &[&str] = &[
     "cloud_managed_configurations",
     "cloud_applied_configurations",
     "cloud_report_buffer",
+    // The delivered servers document is pure cloud-derived configuration — a
+    // forgotten enrollment must not leave cloud servers running (spec 015).
+    "mcp_delivery",
 ];
 
 /// A [`DomainRepository`] backed by SQLite.
@@ -850,6 +859,18 @@ impl DomainRepository for SqliteRepository {
         out.sort_by(|a, b| a.name().cmp(b.name()));
         Ok(out)
     }
+
+    async fn put_mcp_delivery(&self, delivery: &McpDeliveryRecord) -> Result<(), RepositoryError> {
+        // One keyed row: a re-delivery supersedes the whole document (spec
+        // 015 FR-005 persistence).
+        self.put_json("mcp_delivery", SINGLETON, &Self::encode(delivery)?)
+    }
+
+    async fn get_mcp_delivery(&self) -> Result<Option<McpDeliveryRecord>, RepositoryError> {
+        self.get_json("mcp_delivery", SINGLETON)?
+            .map(|data| Self::decode(&data))
+            .transpose()
+    }
 }
 
 /// The wrapper row for `ledger_traces`, whose extracted columns live beside
@@ -1093,6 +1114,42 @@ mod tests {
         assert_eq!(loaded, state);
         assert_eq!(loaded.shadow_clean_cycles, 7);
         assert_eq!(loaded.budget.low_risk_hour, Some((12_345, 4)));
+    }
+
+    #[tokio::test]
+    async fn the_delivered_mcp_document_persists_as_one_superseding_row() {
+        // Spec 015 FR-005: the re-seed source survives restarts; a re-delivery
+        // replaces the whole document; forget-enrollment clears it.
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        assert_eq!(repo.get_mcp_delivery().await.unwrap(), None);
+
+        let record = McpDeliveryRecord {
+            configuration_id: Uuid::new_v4(),
+            version_id: Uuid::new_v4(),
+            version_number: 1,
+            delivered_at: Utc::now(),
+            content: serde_json::json!({
+                "kind": "mcp",
+                "servers": [{ "name": "alpha", "enabled": true,
+                              "transport": { "type": "stdio", "command": "/bin/alpha" } }],
+            }),
+        };
+        repo.put_mcp_delivery(&record).await.unwrap();
+        assert_eq!(repo.get_mcp_delivery().await.unwrap(), Some(record.clone()));
+
+        let mut superseding = record.clone();
+        superseding.version_number = 2;
+        superseding.version_id = Uuid::new_v4();
+        repo.put_mcp_delivery(&superseding).await.unwrap();
+        let loaded = repo.get_mcp_delivery().await.unwrap().unwrap();
+        assert_eq!(loaded.version_number, 2, "a re-delivery supersedes");
+
+        repo.clear_cloud_state().await.unwrap();
+        assert_eq!(
+            repo.get_mcp_delivery().await.unwrap(),
+            None,
+            "cloud-derived configuration leaves with the enrollment"
+        );
     }
 
     #[tokio::test]

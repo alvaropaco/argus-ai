@@ -353,6 +353,27 @@ pub trait DomainRepository: Send + Sync {
     ) -> Result<Vec<argus_runbooks::DeliveredRunbook>, RepositoryError> {
         Err(runbook_unsupported("list_runbooks"))
     }
+
+    // --- Delivered MCP topology (spec 015): cloud content, live reconcile ---
+
+    /// Persists the delivered `mcp` servers document (spec 015 FR-005),
+    /// replacing any previous row — a re-delivery supersedes. The restart
+    /// re-seed reads this row beside the file-declared servers (cloud
+    /// supersedes file on name conflict).
+    async fn put_mcp_delivery(
+        &self,
+        _delivery: &argus_domain::McpDeliveryRecord,
+    ) -> Result<(), RepositoryError> {
+        Err(cloud_state_unsupported("put_mcp_delivery"))
+    }
+
+    /// The persisted delivered `mcp` servers document, or `None` before the
+    /// first delivery.
+    async fn get_mcp_delivery(
+        &self,
+    ) -> Result<Option<argus_domain::McpDeliveryRecord>, RepositoryError> {
+        Err(cloud_state_unsupported("get_mcp_delivery"))
+    }
 }
 
 const CLOUD_STATE: &str = "cloud state";

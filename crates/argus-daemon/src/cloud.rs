@@ -34,8 +34,8 @@ use argus_cloud::protocol::messages::{
     ApprovalDecisionPayload, ApprovalResultPayload, CommandInvokePayload, CommandResultPayload,
     CommandResultStatus, ConfigApplyPayload, ConfigResultPayload, ConfigResultStatus,
     ConfigStatePayload, ConfigurationStateEntry, HealthStateWire, IngestAckPayload,
-    RunbookDecisionPayload, RunbookResultPayload, SentinelReportPayload, SessionRotatePayload,
-    StreamThrottlePayload,
+    McpServerStateEntry, RunbookDecisionPayload, RunbookResultPayload, SentinelReportPayload,
+    SessionRotatePayload, StreamThrottlePayload,
 };
 use argus_cloud::protocol::{Envelope, MessageType};
 use argus_cloud::state::{ConnectivityTracker, EnrolledIdentity};
@@ -607,6 +607,12 @@ pub struct SupervisorDeps {
     /// The runbook library behind delivery and operator decisions (spec 009):
     /// `runbook` configurations apply here and `runbook.decision` lands here.
     pub runbooks: Arc<crate::runbooks::RunbookManager>,
+    /// Where a delivered `mcp` servers document reconciles the live topology
+    /// (spec 015): the daemon's wiring + registry, behind this port.
+    pub mcp: Option<Arc<dyn McpServerApplier>>,
+    /// Rebuilds the decision provider when a provider-kind delivery carries
+    /// settings (spec 015): the live consumer for `model`/`base_url`/…
+    pub provider_rebuild: Option<Arc<dyn ProviderRebuilder>>,
     /// The action ledger (spec 007): the supervisor drains its upstream
     /// buffer each session tick, so events reach the cloud within ~1 s of
     /// occurring and ride the same ack discipline as the reports.
@@ -636,6 +642,87 @@ pub trait ApprovalSink: Send + Sync {
         grant: bool,
         decided_by: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>;
+}
+
+/// Applies a delivered `mcp` servers document to the live topology (spec 015
+/// FR-001/FR-002) — the runbook manager's seam, for the wiring: the daemon
+/// owns the capability registry the reconcile registers into, so the cloud
+/// session sees only this port. `Err` is a structural refusal (the daemon
+/// holds no wiring); a server that fails to connect is NOT an error — it
+/// lands in the report and the lifecycle retries it.
+pub trait McpServerApplier: Send + Sync {
+    fn apply_servers<'a>(
+        &'a self,
+        servers: Vec<crate::config::McpServerConfig>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::mcp::McpReconcileReport, String>>
+                + Send
+                + 'a,
+        >,
+    >;
+
+    /// The wiring's live per-server state (spec 015 FR-004): name, coarse
+    /// state, and the adopted tool count — what config-state reports for the
+    /// `mcp` kind so a failing server's retry state is visible.
+    fn server_states<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<crate::mcp::McpServerRuntimeState>> + Send + 'a>,
+    > {
+        Box::pin(async { Vec::new() })
+    }
+}
+
+/// Rebuilds the decision provider from the effective configuration — the
+/// file's `[model]` with the managed provider settings merged over — and
+/// swaps it in live (spec 015 AC-005's provider half: delivered provider
+/// settings have a consumer, at apply time and after a restart). Never
+/// fails the caller: an unbuildable provider degrades to observe-only,
+/// logged.
+pub trait ProviderRebuilder: Send + Sync {
+    fn rebuild_provider(&self);
+}
+
+/// Merges the managed provider settings over a `[model]` section, key by
+/// key (spec 015): a delivered key wins, an absent key leaves the file's
+/// value standing. The managed keys are exactly
+/// [`MANAGED_PROVIDER_SETTINGS`] — the token never appears here (it lives
+/// in the secret store, which `build_provider` reads separately).
+pub fn apply_managed_model_settings(
+    model: &mut argus_ai_core::model::ModelProviderConfig,
+    settings: &toml::Table,
+) {
+    for (key, value) in settings {
+        match key.as_str() {
+            "provider" => {
+                if let Some(text) = value.as_str() {
+                    model.provider = text.to_string();
+                }
+            }
+            "model" => {
+                if let Some(text) = value.as_str() {
+                    model.model = text.to_string();
+                }
+            }
+            "base_url" => {
+                if let Some(text) = value.as_str() {
+                    model.base_url = Some(text.to_string());
+                }
+            }
+            "fallback_models" => {
+                if let Some(list) = value.as_array() {
+                    model.fallback_models = list
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect();
+                }
+            }
+            // Brain levers ride the same settings table; they are consumed
+            // by the brain control handle, not here.
+            _ => {}
+        }
+    }
 }
 
 /// Reported as the negotiated version until a session supplies the real one.
@@ -1053,6 +1140,15 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
         return;
     }
 
+    // The same is true of an `mcp` delivery (spec 015 FR-001, ADR-0045 §3):
+    // the content is the servers document — the `[mcp]` file grammar — and
+    // its effect is the wiring's live reconcile. Configuration, never
+    // execution.
+    if kind == crate::config::KIND_MCP {
+        apply_mcp_delivery(deps, transport, correlation, payload, version_id).await;
+        return;
+    }
+
     let (settings, credential) = match split_provider_content(&payload.content) {
         Ok(parts) => parts,
         Err(reason) => {
@@ -1121,6 +1217,18 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
             keys = ?applied_brain.iter().map(|(k, _)| k).collect::<Vec<_>>(),
             "brain configuration applied live"
         );
+    }
+
+    // A provider delivery that carries SETTINGS (not just the token) has a
+    // live consumer since spec 015: the decision provider is rebuilt from the
+    // effective configuration — managed provider settings merged over the
+    // file's [model] — and swapped in, no restart (AC-005's provider half).
+    if MANAGED_PROVIDER_SETTINGS
+        .iter()
+        .any(|key| settings.contains_key(*key))
+        && let Some(rebuilder) = &deps.provider_rebuild
+    {
+        rebuilder.rebuild_provider();
     }
 
     let applied_at = Utc::now();
@@ -1294,6 +1402,151 @@ async fn reply_config_result(
     let _ = transport.send(&envelope).await;
 }
 
+/// Applies a delivered `mcp` configuration (spec 015 FR-001/FR-002, ADR-0045
+/// §3) — the runbook delivery's skeleton with the validator and the live
+/// effect swapped.
+///
+/// The content IS the servers document (the same grammar as the `[mcp]` file
+/// section): the daemon parses it with the ordinary config rules — a
+/// malformed document replies `failed` with the validation reason and the
+/// running topology is untouched (fail-closed) — persists the applied
+/// document (the restart re-seed, FR-005), and reconciles the wiring live:
+/// added servers connect, removed or changed ones disconnect, unchanged ones
+/// are untouched. A server that fails to connect does not fail the delivery:
+/// it sits in retry state (visible) while the rest go live.
+async fn apply_mcp_delivery(
+    deps: &SupervisorDeps,
+    transport: &dyn Transport,
+    correlation: Option<Uuid>,
+    payload: ConfigApplyPayload,
+    version_id: Uuid,
+) {
+    let document: crate::config::McpConfig =
+        match serde_json::from_value(serde_json::Value::Object(payload.content.clone())) {
+            Ok(document) => document,
+            Err(error) => {
+                reply_config_result(
+                    transport,
+                    correlation,
+                    version_id,
+                    ConfigResultStatus::Failed,
+                    Some(format!("the servers document is malformed: {error}")),
+                )
+                .await;
+                return;
+            }
+        };
+
+    // Validation entirely precedes any effect: a declaration the runtime
+    // could not honor rejects the document whole (fail-closed).
+    if let Err(error) = document.validate() {
+        reply_config_result(
+            transport,
+            correlation,
+            version_id,
+            ConfigResultStatus::Failed,
+            Some(error.to_string()),
+        )
+        .await;
+        return;
+    }
+
+    let Some(applier) = &deps.mcp else {
+        reply_config_result(
+            transport,
+            correlation,
+            version_id,
+            ConfigResultStatus::Failed,
+            Some("no MCP runtime is running".to_string()),
+        )
+        .await;
+        return;
+    };
+
+    // Persist before reconciling (the runbook discipline: an undurable
+    // delivery is not an applied one) — the restart re-seed reads this row.
+    let record = argus_domain::McpDeliveryRecord {
+        configuration_id: payload.configuration_id,
+        version_id,
+        version_number: payload.version_number,
+        delivered_at: Utc::now(),
+        content: serde_json::Value::Object(payload.content.clone()),
+    };
+    if let Err(error) = deps.repository.put_mcp_delivery(&record).await {
+        reply_config_result(
+            transport,
+            correlation,
+            version_id,
+            ConfigResultStatus::Failed,
+            Some(format!(
+                "could not persist the delivered servers document: {error}"
+            )),
+        )
+        .await;
+        return;
+    }
+
+    let report = match applier.apply_servers(document.servers).await {
+        Ok(report) => report,
+        Err(reason) => {
+            tracing::warn!(mcp_delivery = %reason, "mcp delivery refused");
+            reply_config_result(
+                transport,
+                correlation,
+                version_id,
+                ConfigResultStatus::Failed,
+                Some(reason),
+            )
+            .await;
+            return;
+        }
+    };
+    // A per-server connect failure is not a delivery failure: the document is
+    // applied, that server retries with backoff, and the others are live.
+    tracing::info!(
+        connected = ?report.connected,
+        removed = ?report.removed,
+        failed = ?report.failed,
+        "mcp configuration applied live"
+    );
+
+    let applied_at = Utc::now();
+
+    let _ = deps
+        .repository
+        .save_managed_configuration(&ManagedConfiguration {
+            configuration_id: payload.configuration_id,
+            kind: crate::config::KIND_MCP.to_string(),
+            current_version_id: Some(version_id),
+            current_version_number: payload.version_number,
+            content_hash: Some(payload.content_hash.clone()),
+            applied_at: Some(applied_at),
+            apply_status: ApplyStatus::Applied,
+            apply_reason: None,
+        })
+        .await;
+
+    let _ = deps
+        .repository
+        .save_applied_configuration(&AppliedConfigurationState {
+            configuration_id: payload.configuration_id,
+            applied_version_id: Some(version_id),
+            applied_version_number: payload.version_number,
+            content_hash: Some(payload.content_hash.clone()),
+            updated_at: applied_at,
+        })
+        .await;
+
+    reply_config_result(
+        transport,
+        correlation,
+        version_id,
+        ConfigResultStatus::Applied,
+        None,
+    )
+    .await;
+}
+
 /// Adopts a credential the cloud rotated.
 ///
 /// The store replaces the previous credential atomically and never appends, so
@@ -1372,6 +1625,10 @@ async fn publish_capabilities(
 /// (FR-029, FR-032). A configuration with nothing applied is reported with a
 /// null version rather than omitted, so "nothing" is distinguishable from
 /// "unknown".
+///
+/// The `provider` kind additionally reports token PRESENCE — set/unset only
+/// (spec 015 FR-003, ADR-0045 §2). The value itself never crosses a read
+/// surface: a regression there is a security defect, not a bug.
 async fn send_config_state(
     deps: &SupervisorDeps,
     transport: &dyn Transport,
@@ -1383,13 +1640,51 @@ async fn send_config_state(
         .await
         .unwrap_or_default();
 
-    let configurations = applied
-        .into_iter()
-        .map(|state| ConfigurationStateEntry {
+    let mut configurations = Vec::new();
+    for state in applied {
+        // The kind lives on the managed-configuration row; a row that cannot
+        // be resolved simply reports no kind-specific extras (skip-if-none).
+        let kind = deps
+            .repository
+            .get_managed_configuration(state.configuration_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|held| held.kind);
+        let token_set = (kind.as_deref() == Some(crate::config::KIND_PROVIDER)).then(|| {
+            deps.secrets
+                .read_provider_credential()
+                .is_ok_and(|held| held.is_some())
+        });
+        // FR-004: the `mcp` entry carries the wiring's live per-server state
+        // — connected/retrying/connecting plus the adopted tool count — so a
+        // failing server's retry state is visible while the delivery reads
+        // applied. Skip-if-none: no wiring or no servers reports nothing.
+        let mcp_servers = if kind.as_deref() == Some(crate::config::KIND_MCP) {
+            let states = match &deps.mcp {
+                Some(applier) => applier.server_states().await,
+                None => Vec::new(),
+            };
+            Some(
+                states
+                    .into_iter()
+                    .map(|server| McpServerStateEntry {
+                        name: server.name,
+                        state: server.state.to_string(),
+                        tools: server.tools as u32,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        configurations.push(ConfigurationStateEntry {
             configuration_id: state.configuration_id,
             applied_version_id: state.applied_version_id,
-        })
-        .collect();
+            token_set,
+            mcp_servers,
+        });
+    }
 
     let payload = ConfigStatePayload { configurations };
     let Ok(value) = serde_json::to_value(&payload) else {
@@ -2533,6 +2828,44 @@ mod tests {
         assert!(error.contains("nope"), "error names the field: {error}");
     }
 
+    #[test]
+    fn managed_provider_settings_merge_over_the_file_model_key_by_key() {
+        // Spec 015: the effective [model] the provider builds from — a
+        // delivered key wins, an absent key leaves the file's standing.
+        let mut model = argus_ai_core::model::ModelProviderConfig {
+            provider: "deepseek".to_string(),
+            model: "file-model".to_string(),
+            fallback_models: vec!["file-fallback".to_string()],
+            base_url: Some("https://file.example.com".to_string()),
+            credential_ref: None,
+        };
+        let settings: toml::Table = toml::from_str(
+            r#"
+model = "managed-model"
+base_url = "https://managed.example.com"
+fallback_models = ["managed-a", "managed-b"]
+"#,
+        )
+        .unwrap();
+        apply_managed_model_settings(&mut model, &settings);
+        assert_eq!(model.provider, "deepseek", "an absent key is untouched");
+        assert_eq!(model.model, "managed-model");
+        assert_eq!(
+            model.base_url.as_deref(),
+            Some("https://managed.example.com")
+        );
+        assert_eq!(model.fallback_models, vec!["managed-a", "managed-b"]);
+
+        // Brain levers ride the same table and are not model keys.
+        let brain_only: toml::Table = toml::from_str("brain.autonomy = \"l3_assisted\"\n").unwrap();
+        let mut untouched = argus_ai_core::model::ModelProviderConfig::default();
+        apply_managed_model_settings(&mut untouched, &brain_only);
+        assert_eq!(
+            untouched,
+            argus_ai_core::model::ModelProviderConfig::default()
+        );
+    }
+
     /// A no-op sentinel source for supervisor tests: the honest empty state.
     struct NullSentinel;
     impl SentinelSource for NullSentinel {
@@ -3054,6 +3387,8 @@ mod tests {
             sentinel: Arc::new(NullSentinel),
             decisions: Arc::new(NullDecisions),
             runbooks,
+            mcp: None,
+            provider_rebuild: None,
             brain_control: Arc::new(crate::brain_state::BrainControlHandle::default()),
             managed_settings: Arc::new(ManagedSettingsStore::new(std::env::temp_dir().join(
                 format!("argus-cloud-settings-{}.toml", uuid::Uuid::new_v4()),
@@ -4397,6 +4732,415 @@ comparison = {{ equal = "active" }}
                 5,
                 "the newer candidate stands"
             );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        // --- MCP delivery (spec 015 FR-001/FR-002, ADR-0045 §3) ---
+
+        /// Records the servers documents a delivery reconciles — the live
+        /// wiring's stand-in, no subprocess.
+        struct RecordingApplier(std::sync::Mutex<Vec<Vec<crate::config::McpServerConfig>>>);
+
+        impl RecordingApplier {
+            fn new() -> Arc<Self> {
+                Arc::new(Self(std::sync::Mutex::new(Vec::new())))
+            }
+
+            fn applied(&self) -> Vec<Vec<crate::config::McpServerConfig>> {
+                self.0.lock().expect("recording applier").clone()
+            }
+        }
+
+        impl McpServerApplier for RecordingApplier {
+            fn apply_servers<'a>(
+                &'a self,
+                servers: Vec<crate::config::McpServerConfig>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<crate::mcp::McpReconcileReport, String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    let connected = servers
+                        .iter()
+                        .map(|server| server.name.clone())
+                        .collect::<Vec<_>>();
+                    self.0.lock().expect("recording applier").push(servers);
+                    Ok(crate::mcp::McpReconcileReport {
+                        connected,
+                        removed: Vec::new(),
+                        failed: Vec::new(),
+                    })
+                })
+            }
+
+            fn server_states<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Vec<crate::mcp::McpServerRuntimeState>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    self.0
+                        .lock()
+                        .expect("recording applier")
+                        .last()
+                        .map(|servers| {
+                            servers
+                                .iter()
+                                .map(|server| crate::mcp::McpServerRuntimeState {
+                                    name: server.name.clone(),
+                                    state: "connected",
+                                    tools: 2,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+            }
+        }
+
+        /// Records whether a provider delivery triggered a live provider
+        /// rebuild — the daemon-side consumer's stand-in.
+        struct RecordingRebuilder(std::sync::Mutex<usize>);
+
+        impl RecordingRebuilder {
+            fn new() -> Arc<Self> {
+                Arc::new(Self(std::sync::Mutex::new(0)))
+            }
+
+            fn count(&self) -> usize {
+                *self.0.lock().expect("recording rebuilder")
+            }
+        }
+
+        impl ProviderRebuilder for RecordingRebuilder {
+            fn rebuild_provider(&self) {
+                *self.0.lock().expect("recording rebuilder") += 1;
+            }
+        }
+
+        fn mcp_content(servers: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({ "kind": "mcp", "servers": servers })
+        }
+
+        fn server_entry(name: &str, command: &str) -> serde_json::Value {
+            serde_json::json!({
+                "name": name,
+                "enabled": true,
+                "transport": { "type": "stdio", "command": command }
+            })
+        }
+
+        async fn deps_with_applier() -> (SupervisorDeps, Arc<RecordingApplier>, PathBuf) {
+            let (deps, dir) = deps_and_transport().await;
+            let applier = RecordingApplier::new();
+            let deps = SupervisorDeps {
+                mcp: Some(applier.clone()),
+                ..deps
+            };
+            (deps, applier, dir)
+        }
+
+        #[tokio::test]
+        async fn an_mcp_delivery_reconciles_live_and_records_the_applied_version() {
+            let (deps, applier, dir) = deps_with_applier().await;
+            let id = Uuid::new_v4();
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    id,
+                    1,
+                    mcp_content(serde_json::json!([server_entry("alpha", "/bin/alpha")])),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "applied", "{result}");
+            let applied = applier.applied();
+            assert_eq!(applied.len(), 1, "the document reached the wiring once");
+            assert_eq!(
+                applied[0]
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["alpha"],
+                "the wiring reconciles toward the delivered topology"
+            );
+
+            // The applied version is recorded for reconciliation like any
+            // other applied configuration, and the delivery persists for the
+            // restart re-seed (FR-005).
+            let held = deps
+                .repository
+                .get_managed_configuration(id)
+                .await
+                .unwrap()
+                .expect("recorded");
+            assert_eq!(held.kind, crate::config::KIND_MCP);
+            assert_eq!(held.apply_status, ApplyStatus::Applied);
+            let applied_rows = deps.repository.list_applied_configurations().await.unwrap();
+            assert_eq!(applied_rows.len(), 1);
+            let delivery = deps.repository.get_mcp_delivery().await.unwrap();
+            assert!(delivery.is_some(), "the re-seed source is persisted");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_malformed_mcp_document_fails_and_the_topology_is_untouched() {
+            // AC-003: a server without its transport is a parse failure —
+            // nothing reconciles, nothing applies.
+            let (deps, applier, dir) = deps_with_applier().await;
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    Uuid::new_v4(),
+                    1,
+                    mcp_content(serde_json::json!([{ "name": "alpha" }])),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "failed", "{result}");
+            assert!(
+                result["reason"].as_str().unwrap().contains("transport"),
+                "the validation reason is the reply: {result}"
+            );
+            assert!(
+                applier.applied().is_empty(),
+                "the running topology is untouched"
+            );
+            assert!(deps.repository.get_mcp_delivery().await.unwrap().is_none());
+            let applied = deps.repository.list_applied_configurations().await.unwrap();
+            assert!(applied.is_empty(), "a failed delivery is not applied");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn an_mcp_document_that_fails_validation_fails_with_the_reason() {
+            // Duplicate server names are the loader's own fail-closed rule.
+            let (deps, applier, dir) = deps_with_applier().await;
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    Uuid::new_v4(),
+                    1,
+                    mcp_content(serde_json::json!([
+                        server_entry("alpha", "/bin/alpha"),
+                        server_entry("alpha", "/bin/again")
+                    ])),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "failed", "{result}");
+            let reason = result["reason"].as_str().unwrap();
+            assert!(
+                reason.contains("duplicate mcp server name"),
+                "the loader's reason is the reply: {result}"
+            );
+            assert!(applier.applied().is_empty());
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn an_mcp_delivery_without_a_runtime_is_failed_not_faked() {
+            // A build with no live wiring must say so rather than report an
+            // apply that reconciled nothing.
+            let (deps, dir) = deps_and_transport().await;
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    Uuid::new_v4(),
+                    1,
+                    mcp_content(serde_json::json!([server_entry("alpha", "/bin/alpha")])),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "failed", "{result}");
+            assert!(
+                result["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no MCP runtime"),
+                "{result}"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn config_state_reports_token_presence_and_never_the_value() {
+            // AC-004/FR-003: the provider entry carries set/unset only; the
+            // value appears nowhere on the read surface.
+            let (deps, _applier, dir) = deps_with_applier().await;
+            let token = "sk-value-nobody-may-read-back";
+            deps.secrets
+                .store_provider_credential(&ProviderCredential::new(token))
+                .unwrap();
+
+            let provider_id = Uuid::new_v4();
+            apply_and_read_result(
+                &deps,
+                frame(provider_id, 1, provider_content(serde_json::json!({}))),
+            )
+            .await;
+            let mcp_id = Uuid::new_v4();
+            apply_and_read_result(&deps, frame(mcp_id, 1, mcp_content(serde_json::json!([]))))
+                .await;
+
+            let transport = FakeTransport::new();
+            send_config_state(&deps, &transport, None).await;
+            let sent = transport.sent_of_type(MessageType::ConfigState);
+            assert_eq!(sent.len(), 1, "one config.state per pull request");
+            let payload = &sent[0].payload;
+            let entries = payload["configurations"].as_array().unwrap();
+            assert_eq!(entries.len(), 2);
+
+            let provider_entry = entries
+                .iter()
+                .find(|entry| entry["configuration_id"] == provider_id.to_string())
+                .expect("the provider row is reported");
+            assert_eq!(
+                provider_entry["token_set"], true,
+                "presence, set: the operator can verify the token landed"
+            );
+            let mcp_entry = entries
+                .iter()
+                .find(|entry| entry["configuration_id"] == mcp_id.to_string())
+                .expect("the mcp row is reported");
+            assert!(
+                mcp_entry.get("token_set").is_none(),
+                "a non-provider entry carries no token field at all (skip-if-none)"
+            );
+            let rendered = serde_json::to_string(payload).unwrap();
+            assert!(
+                !rendered.contains(token),
+                "the value itself never crosses a read surface: {rendered}"
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn the_mcp_config_state_entry_carries_live_server_state() {
+            // FR-004: a delivery reads applied while a server may be down —
+            // the mcp entry therefore reports the wiring's per-server state
+            // (name, state, tool count) so the retry is visible.
+            let (deps, _applier, dir) = deps_with_applier().await;
+            let mcp_id = Uuid::new_v4();
+            apply_and_read_result(
+                &deps,
+                frame(
+                    mcp_id,
+                    1,
+                    mcp_content(serde_json::json!([server_entry("alpha", "/bin/alpha")])),
+                ),
+            )
+            .await;
+
+            let transport = FakeTransport::new();
+            send_config_state(&deps, &transport, None).await;
+            let entries =
+                transport.sent_of_type(MessageType::ConfigState)[0].payload["configurations"]
+                    .as_array()
+                    .unwrap()
+                    .clone();
+            let mcp_entry = entries
+                .iter()
+                .find(|entry| entry["configuration_id"] == mcp_id.to_string())
+                .expect("the mcp row is reported");
+            let servers = mcp_entry["mcp_servers"].as_array().expect("state rides");
+            assert_eq!(servers.len(), 1);
+            assert_eq!(servers[0]["name"], "alpha");
+            assert_eq!(servers[0]["state"], "connected");
+            assert_eq!(servers[0]["tools"], 2);
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_provider_delivery_with_settings_rebuilds_the_provider_live() {
+            // AC-005's provider half: delivered provider SETTINGS have a
+            // live consumer — the rebuilder fires once the settings are
+            // persisted.
+            let (deps, dir) = deps_and_transport().await;
+            let rebuilder = RecordingRebuilder::new();
+            let deps = SupervisorDeps {
+                provider_rebuild: Some(rebuilder.clone()),
+                ..deps
+            };
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    Uuid::new_v4(),
+                    1,
+                    provider_content(
+                        serde_json::json!({ "base_url": "https://managed.example.com" }),
+                    ),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "applied", "{result}");
+            assert_eq!(rebuilder.count(), 1, "settings changed: rebuild fires");
+            let settings = deps.managed_settings.read().unwrap().expect("written");
+            assert_eq!(
+                settings["base_url"].as_str(),
+                Some("https://managed.example.com")
+            );
+
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_token_only_delivery_does_not_rebuild_the_provider() {
+            // A token is not a settings change: the credential lands in the
+            // 0600 store and the running provider keeps its configuration.
+            let (deps, dir) = deps_and_transport().await;
+            let rebuilder = RecordingRebuilder::new();
+            let deps = SupervisorDeps {
+                provider_rebuild: Some(rebuilder.clone()),
+                ..deps
+            };
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    Uuid::new_v4(),
+                    1,
+                    serde_json::json!({ "kind": "provider", "api_token": "sk-only-the-token" }),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "applied", "{result}");
+            assert_eq!(
+                rebuilder.count(),
+                0,
+                "no settings key: the running provider stands"
+            );
+            let stored = deps
+                .secrets
+                .read_provider_credential()
+                .unwrap()
+                .expect("stored");
+            assert_eq!(stored.expose(), "sk-only-the-token");
 
             fs::remove_dir_all(&dir).ok();
         }

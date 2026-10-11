@@ -450,6 +450,36 @@ impl McpConfig {
         self.servers.iter().filter(|server| server.enabled)
     }
 
+    /// Merges a cloud-delivered servers document over the file-declared one
+    /// (spec 015 FR-005, ADR-0045 §4): a delivered server replaces the file's
+    /// same-named one — managed supersedes file — while file-only servers keep
+    /// working and delivered-only servers are appended in their document
+    /// order. Neither side is validated here; the caller validates the merged
+    /// result exactly as the loader validates the file.
+    pub fn merged_over(&self, delivered: &McpConfig) -> McpConfig {
+        let mut merged: Vec<McpServerConfig> = self
+            .servers
+            .iter()
+            .map(|file_server| {
+                delivered
+                    .servers
+                    .iter()
+                    .find(|delivered_server| delivered_server.name == file_server.name)
+                    .cloned()
+                    .unwrap_or_else(|| file_server.clone())
+            })
+            .collect();
+        for delivered_server in &delivered.servers {
+            if !merged
+                .iter()
+                .any(|server| server.name == delivered_server.name)
+            {
+                merged.push(delivered_server.clone());
+            }
+        }
+        McpConfig { servers: merged }
+    }
+
     /// Fails closed on a declaration the runtime could not honor: duplicate
     /// or malformed names, a transport missing its endpoint, or an override
     /// naming an unrepresentable tool. Called at load, so a typo fails the
@@ -720,6 +750,11 @@ pub const KIND_BRAIN: &str = "brain";
 /// document. Applied through the runbook loader as a Candidate with cloud
 /// provenance — delivery is data, never promotion (ADR-0041).
 pub const KIND_RUNBOOK: &str = "runbook";
+/// MCP server topology (spec 015, ADR-0045 §3): the content is the servers
+/// document — the same grammar as the `[mcp]` file section. Applied live
+/// through the MCP wiring's reconcile: declaring a server is configuration,
+/// never execution.
+pub const KIND_MCP: &str = "mcp";
 /// Agent-team configuration: recognised, but nothing local consumes it yet.
 pub const KIND_AGENT_TEAM: &str = "agent_team";
 /// Orchestration configuration: same deferral as the agent team.
@@ -756,7 +791,7 @@ impl ConfigDisposition {
 
 pub fn disposition(kind: &str) -> ConfigDisposition {
     match kind {
-        KIND_PROVIDER | KIND_BRAIN | KIND_RUNBOOK => ConfigDisposition::Apply,
+        KIND_PROVIDER | KIND_BRAIN | KIND_RUNBOOK | KIND_MCP => ConfigDisposition::Apply,
         KIND_AGENT_TEAM | KIND_ORCHESTRATION => ConfigDisposition::Deferred,
         _ => ConfigDisposition::Unknown,
     }
@@ -815,6 +850,74 @@ mod tests {
         // refusal reason would be a lie.
         assert_eq!(disposition(KIND_RUNBOOK), ConfigDisposition::Apply);
         assert_eq!(disposition(KIND_RUNBOOK).refusal_reason(), None);
+    }
+
+    #[test]
+    fn the_mcp_kind_is_applied_not_deferred() {
+        // Spec 015 FR-001: the mcp kind is applied in this release through the
+        // wiring's live reconcile — a "coming soon" refusal would be a lie.
+        assert_eq!(disposition(KIND_MCP), ConfigDisposition::Apply);
+        assert_eq!(disposition(KIND_MCP).refusal_reason(), None);
+    }
+
+    #[test]
+    fn a_delivered_mcp_document_supersedes_the_file_on_name_conflict_only() {
+        // Spec 015 FR-005 / ADR-0045 §4: cloud wins per server NAME; file-only
+        // servers keep working; delivered-only servers are appended.
+        let file_server = |name: &str, command: &str| McpServerConfig {
+            name: name.to_string(),
+            transport: crate::config::McpTransportConfig::Stdio {
+                command: command.to_string(),
+                args: Vec::new(),
+            },
+            enabled: true,
+            timeout_seconds: 30,
+            tools: None,
+            overrides: Vec::new(),
+        };
+        let file = McpConfig {
+            servers: vec![
+                file_server("shared", "/bin/file-version"),
+                file_server("file-only", "/bin/file-only"),
+            ],
+        };
+        let mut cloud_shared = file_server("shared", "/bin/cloud-version");
+        cloud_shared.timeout_seconds = 42;
+        let delivered = McpConfig {
+            servers: vec![cloud_shared, file_server("cloud-only", "/bin/cloud-only")],
+        };
+
+        let merged = file.merged_over(&delivered);
+        let names: Vec<&str> = merged.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["shared", "file-only", "cloud-only"]);
+        let shared = merged.servers.iter().find(|s| s.name == "shared").unwrap();
+        assert!(
+            matches!(&shared.transport, McpTransportConfig::Stdio { command, .. } if command == "/bin/cloud-version"),
+            "the delivered server replaces the file's same-named one"
+        );
+        assert_eq!(shared.timeout_seconds, 42);
+        assert!(merged.validate().is_ok(), "the merged set is coherent");
+    }
+
+    #[test]
+    fn a_delivered_mcp_document_alone_reseeds_exactly_itself() {
+        // An empty file section means the delivered document is the whole
+        // topology (spec 015: the dashboard can introduce servers to a host
+        // whose argus.toml declares none).
+        let file = McpConfig::default();
+        let delivered: McpConfig = toml::from_str(
+            r#"
+            [[servers]]
+            name = "cloud-only"
+            enabled = true
+            transport = { type = "stdio", command = "/bin/cloud-only" }
+            "#,
+        )
+        .expect("a delivered servers document parses with the ordinary rules");
+        let merged = file.merged_over(&delivered);
+        assert_eq!(merged.servers.len(), 1);
+        assert_eq!(merged.servers[0].name, "cloud-only");
+        assert!(merged.validate().is_ok());
     }
 
     #[test]

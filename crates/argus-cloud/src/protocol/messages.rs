@@ -565,6 +565,18 @@ pub struct CommandResultPayload {
     pub reason: Option<String>,
 }
 
+/// One MCP server's live runtime state (spec 015 FR-004), carried on the
+/// `mcp` kind's config-state entry: name, coarse state, and the adopted
+/// tool count — presence and counts, never tool payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerStateEntry {
+    pub name: String,
+    /// `connected` | `retrying` | `connecting` — a desired server without a
+    /// live slot is on the lifecycle's retry path.
+    pub state: String,
+    pub tools: u32,
+}
+
 /// One entry in the applied-configuration report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigurationStateEntry {
@@ -572,6 +584,15 @@ pub struct ConfigurationStateEntry {
     /// `None` means nothing is applied, and must be reported as such rather than
     /// omitted.
     pub applied_version_id: Option<Uuid>,
+    /// Token PRESENCE for the `provider` kind (spec 015 FR-003, ADR-0045 §2):
+    /// set/unset only — the value itself never crosses a read surface. Absent
+    /// for every other kind (skip-if-none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_set: Option<bool>,
+    /// The live per-server state for the `mcp` kind (spec 015 FR-004).
+    /// Absent for every other kind (skip-if-none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<McpServerStateEntry>>,
 }
 
 /// `config.state`.
@@ -727,9 +748,56 @@ mod tests {
             configurations: vec![ConfigurationStateEntry {
                 configuration_id: Uuid::nil(),
                 applied_version_id: None,
+                token_set: None,
+                mcp_servers: None,
             }],
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(json["configurations"][0]["applied_version_id"].is_null());
+    }
+
+    #[test]
+    fn config_state_carries_token_presence_and_mcp_server_state() {
+        // Spec 015 FR-003/FR-004: the provider entry reports set/unset; the
+        // mcp entry reports live per-server state; kinds with neither carry
+        // no extra fields at all (skip-if-none).
+        let payload = ConfigStatePayload {
+            configurations: vec![
+                ConfigurationStateEntry {
+                    configuration_id: Uuid::nil(),
+                    applied_version_id: Some(Uuid::nil()),
+                    token_set: Some(true),
+                    mcp_servers: None,
+                },
+                ConfigurationStateEntry {
+                    configuration_id: Uuid::nil(),
+                    applied_version_id: Some(Uuid::nil()),
+                    token_set: None,
+                    mcp_servers: Some(vec![McpServerStateEntry {
+                        name: "alpha".to_string(),
+                        state: "retrying".to_string(),
+                        tools: 3,
+                    }]),
+                },
+                ConfigurationStateEntry {
+                    configuration_id: Uuid::nil(),
+                    applied_version_id: Some(Uuid::nil()),
+                    token_set: None,
+                    mcp_servers: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["configurations"][0]["token_set"], true);
+        let mcp = &json["configurations"][1];
+        assert_eq!(mcp["mcp_servers"][0]["name"], "alpha");
+        assert_eq!(mcp["mcp_servers"][0]["state"], "retrying");
+        assert_eq!(mcp["mcp_servers"][0]["tools"], 3);
+        assert!(mcp.get("token_set").is_none());
+        assert!(
+            json["configurations"][2].get("token_set").is_none()
+                && json["configurations"][2].get("mcp_servers").is_none(),
+            "a kind with no extras carries no extra fields at all"
+        );
     }
 }

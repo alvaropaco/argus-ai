@@ -370,17 +370,64 @@ impl Daemon {
         // registers the configured servers' discovered tools beside the
         // bootstrap set — the tool's own schema, HighRisk by default, the
         // operator's per-tool override otherwise (ADR-0044 §1). Zero
-        // configured servers means no wiring, no runtime, byte-identical
-        // behavior (ADR-0044 §5).
+        // configured servers means no connects and no capabilities — the
+        // wiring stays available so a delivered `mcp` document (spec 015)
+        // can reconcile a topology in live, without a restart or an executor
+        // rebuild.
         let mcp = match mcp {
             Some(wiring) => Some(wiring),
             None => {
-                let servers = crate::mcp::enabled_servers(&config.mcp);
-                if servers.is_empty() {
-                    None
-                } else {
-                    Some(crate::mcp::McpWiring::production(servers))
+                // Spec 015 FR-005: the cloud-delivered servers document
+                // re-seeds at startup, merged over the file section — cloud
+                // supersedes file on server-name conflict, file-only servers
+                // keep working. A read or parse failure is fail-soft: the
+                // file configuration stands alone (logged). Note the same
+                // startup-order tolerance the brain levers carry: work
+                // already in flight in the first cycle after a restart may
+                // still see the pre-reseed state for one cycle; the topology
+                // itself is reconciled here, before any server connects.
+                let mut delivered = None;
+                match repository.get_mcp_delivery().await {
+                    Ok(Some(record)) => {
+                        match serde_json::from_value::<crate::config::McpConfig>(record.content) {
+                            Ok(document) => {
+                                let merged = config.mcp.merged_over(&document);
+                                match merged.validate() {
+                                    Ok(()) => delivered = Some(document),
+                                    Err(error) => tracing::warn!(
+                                        %error,
+                                        "the delivered mcp document merged over the file section \
+                                         is invalid; the file configuration stands"
+                                    ),
+                                }
+                            }
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "the persisted mcp delivery is malformed; the file configuration \
+                                 stands"
+                            ),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "the delivered mcp document could not be read; the file configuration \
+                         stands"
+                    ),
                 }
+                // The startup topology carries its ownership split: file
+                // servers and delivered ones (a name in both is the cloud's —
+                // that is the merge's supersede). A later delivery may take
+                // away only the cloud's share (ADR-0045 §4).
+                let file_enabled = crate::mcp::enabled_servers(&config.mcp);
+                let cloud_enabled = delivered
+                    .as_ref()
+                    .map(crate::mcp::enabled_servers)
+                    .unwrap_or_default();
+                Some(crate::mcp::McpWiring::production_with_ownership(
+                    file_enabled,
+                    cloud_enabled,
+                ))
             }
         };
         if let Some(wiring) = &mcp {
@@ -452,7 +499,18 @@ impl Daemon {
         )
         .await;
         let (cluster, kubernetes_executor) = connect_cluster(&config);
-        let decision_provider = crate::brain::build_provider(&config, &secret_store);
+        // Spec 015 AC-005's provider half: the decision provider builds from
+        // the EFFECTIVE model configuration — the file's [model] with the
+        // persisted managed provider settings merged over (cloud supersedes
+        // file per key) — so delivered base_url/model survive a restart. The
+        // same table re-seeds the brain levers below; one read, two consumers.
+        let managed_settings: Option<toml::Table> =
+            CloudSettingsStore::default_location().read().ok().flatten();
+        let mut effective_config = config.clone();
+        if let Some(settings) = &managed_settings {
+            crate::cloud::apply_managed_model_settings(&mut effective_config.model, settings);
+        }
+        let decision_provider = crate::brain::build_provider(&effective_config, &secret_store);
         let runbooks = load_runbooks(&config, Arc::clone(&repository)).await;
         let (brain_state, brain_control) = {
             use crate::brain_state::{BrainControl, BrainControlHandle, BrainState};
@@ -463,8 +521,8 @@ impl Daemon {
             });
             // A deployed `brain` configuration outlives a restart: the
             // persisted managed settings re-seed the levers (spec 006 FR-002).
-            if let Ok(Some(settings)) = CloudSettingsStore::default_location().read() {
-                for (key, value) in &settings {
+            if let Some(settings) = &managed_settings {
+                for (key, value) in settings {
                     if key.starts_with("brain.")
                         && let Err(reason) = control
                             .apply_setting(key, &serde_json::to_value(value).unwrap_or_default())
@@ -701,6 +759,15 @@ impl Daemon {
     /// lifecycle task hangs off it.
     pub fn mcp(&self) -> Option<Arc<crate::mcp::McpWiring>> {
         self.mcp.clone()
+    }
+
+    /// The desired enabled MCP servers — the topology the wiring maintains
+    /// (file-declared plus delivered, spec 015). Empty means no servers.
+    pub fn mcp_servers(&self) -> Vec<crate::config::McpServerConfig> {
+        self.mcp
+            .as_ref()
+            .map(|wiring| wiring.desired_servers())
+            .unwrap_or_default()
     }
 
     /// The cloud-visible capability surface handle: the supervisor publishes
@@ -1101,6 +1168,40 @@ impl Daemon {
             .provider
             .write()
             .expect("provider lock is not poisoned") = provider;
+    }
+
+    /// The effective `[model]` configuration the decision provider builds
+    /// from: the file section with the managed provider settings merged over,
+    /// key by key (spec 015 — cloud supersedes file). The startup build and
+    /// every live rebuild read this same view.
+    pub fn effective_model(&self) -> argus_ai_core::model::ModelProviderConfig {
+        let mut model = self.config.model.clone();
+        if let Ok(Some(settings)) = self.managed_settings.read() {
+            crate::cloud::apply_managed_model_settings(&mut model, &settings);
+        }
+        model
+    }
+
+    /// Rebuilds the decision provider from [`Self::effective_model`] and
+    /// swaps it in live, no restart (spec 015: a delivered provider delivery
+    /// whose settings changed has a consumer). An unbuildable provider
+    /// degrades to observe-only, logged — never a panic or a stale provider.
+    pub fn rebuild_decision_provider(&self) {
+        let mut effective = self.config.clone();
+        effective.model = self.effective_model();
+        let provider = crate::brain::build_provider(&effective, &self.secrets);
+        match &provider {
+            Some(_) => tracing::info!(
+                provider = %effective.model.provider,
+                model = %effective.model.model,
+                "provider configuration applied live; the decision provider was rebuilt"
+            ),
+            None => tracing::warn!(
+                "provider configuration applied; no usable provider resulted — the brain runs \
+                 observe-only"
+            ),
+        }
+        self.set_provider(provider);
     }
 
     /// The runbook manager: the library the delivery channel, the
@@ -2277,6 +2378,66 @@ impl crate::cloud::ApprovalSink for Daemon {
     }
 }
 
+impl crate::cloud::McpServerApplier for Daemon {
+    fn apply_servers<'a>(
+        &'a self,
+        servers: Vec<crate::config::McpServerConfig>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::mcp::McpReconcileReport, String>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let wiring = self
+                .mcp
+                .as_ref()
+                .ok_or_else(|| "no MCP runtime is running".to_string())?;
+            // The reconcile runs against a STAGED registry — an owned clone —
+            // because its connects may take seconds and the registry guard
+            // must never live across an await (the MCP lifecycle's
+            // late-registrations share this lock). The staged result swaps in
+            // under a short write guard; a lifecycle registration that lands
+            // mid-apply is re-adopted by the next probe pass.
+            let mut staged = self
+                .registry
+                .read()
+                .expect("capability registry lock is not poisoned")
+                .clone();
+            let report = wiring.apply_servers(servers, &mut staged).await;
+            *self
+                .registry
+                .write()
+                .expect("capability registry lock is not poisoned") = staged;
+            // The published surface must follow the reconcile without a
+            // restart (spec 015 AC-001): the session republishes on its next
+            // tick.
+            self.refresh_capability_surface();
+            Ok(report)
+        })
+    }
+
+    fn server_states<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<crate::mcp::McpServerRuntimeState>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            match self.mcp.as_ref() {
+                Some(wiring) => wiring.server_states().await,
+                None => Vec::new(),
+            }
+        })
+    }
+}
+
+impl crate::cloud::ProviderRebuilder for Daemon {
+    fn rebuild_provider(&self) {
+        self.rebuild_decision_provider();
+    }
+}
+
 pub struct InMemoryDedup {
     seen: std::sync::Mutex<std::collections::HashSet<String>>,
     max_keys: usize,
@@ -2439,6 +2600,112 @@ mod tests {
         }
     }
 
+    fn stdio_server(name: &str, command: &str) -> crate::config::McpServerConfig {
+        crate::config::McpServerConfig {
+            name: name.to_string(),
+            transport: crate::config::McpTransportConfig::Stdio {
+                command: command.to_string(),
+                args: Vec::new(),
+            },
+            enabled: true,
+            timeout_seconds: 30,
+            tools: None,
+            overrides: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_delivered_mcp_document_reseeds_over_the_file_section() {
+        // Spec 015 FR-005 / AC-005: a restart re-applies the delivered
+        // servers document beside the file's — cloud supersedes file per
+        // server NAME, file-only servers keep working. (The unreachable
+        // commands fail their startup connects instantly; that path is the
+        // lifecycle's, already covered.)
+        let config = DaemonConfig {
+            mcp: crate::config::McpConfig {
+                servers: vec![
+                    stdio_server("shared", "/nonexistent-argus-file-version"),
+                    stdio_server("file-only", "/nonexistent-argus-file-only"),
+                ],
+            },
+            ..test_config()
+        };
+        {
+            let repository = SqliteRepository::open(&config.state_path).unwrap();
+            repository
+                .put_mcp_delivery(&argus_domain::McpDeliveryRecord {
+                    configuration_id: Uuid::new_v4(),
+                    version_id: Uuid::new_v4(),
+                    version_number: 3,
+                    delivered_at: Utc::now(),
+                    content: serde_json::json!({
+                        "kind": "mcp",
+                        "servers": [
+                            { "name": "shared", "enabled": true, "timeout_seconds": 42,
+                              "transport": { "type": "stdio",
+                                             "command": "/nonexistent-argus-cloud-version" } },
+                            { "name": "cloud-only", "enabled": true,
+                              "transport": { "type": "stdio",
+                                             "command": "/nonexistent-argus-cloud-only" } }
+                        ],
+                    }),
+                })
+                .await
+                .unwrap();
+        }
+
+        let daemon = Daemon::init(config).await.unwrap();
+        let desired = daemon.mcp_servers();
+        assert_eq!(
+            desired.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["shared", "file-only", "cloud-only"],
+            "file-only survives; the delivered-only server is appended"
+        );
+        let shared = &desired[0];
+        assert_eq!(shared.timeout_seconds, 42);
+        assert!(
+            matches!(
+                &shared.transport,
+                crate::config::McpTransportConfig::Stdio { command, .. }
+                    if command == "/nonexistent-argus-cloud-version"
+            ),
+            "the delivered server replaces the file's same-named one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_delivered_mcp_document_leaves_the_file_configuration_standing() {
+        // The fail-soft reading: an unparsable persisted delivery is logged
+        // and skipped — the file-declared servers run (spec 015 FR-005).
+        let config = DaemonConfig {
+            mcp: crate::config::McpConfig {
+                servers: vec![stdio_server("file-only", "/nonexistent-argus-file-only")],
+            },
+            ..test_config()
+        };
+        {
+            let repository = SqliteRepository::open(&config.state_path).unwrap();
+            repository
+                .put_mcp_delivery(&argus_domain::McpDeliveryRecord {
+                    configuration_id: Uuid::new_v4(),
+                    version_id: Uuid::new_v4(),
+                    version_number: 1,
+                    delivered_at: Utc::now(),
+                    content: serde_json::json!({ "servers": "not-a-list" }),
+                })
+                .await
+                .unwrap();
+        }
+
+        let daemon = Daemon::init(config).await.unwrap();
+        let desired = daemon.mcp_servers();
+        assert_eq!(
+            desired.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["file-only"],
+            "the corrupt delivery contributes nothing"
+        );
+    }
+
     #[test]
     fn service_guardrails_refuse_the_configured_unit_and_malformed_names() {
         let registry = service_guardrails("customd");
@@ -2518,6 +2785,45 @@ allowed_actions = ["host.service.restart"]
         let runbook = daemon.runbooks().by_name("restart-failed").unwrap();
         assert_eq!(runbook.attempts(), 1);
         assert_eq!(runbook.historical_success_rate(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn the_provider_rebuild_consumes_the_managed_model_settings() {
+        // AC-005's provider half, observed at the seam the construction
+        // reads: the effective model merges the persisted managed settings
+        // over the file's [model] — key by key — and the live rebuild builds
+        // from exactly that view.
+        let mut config = test_config();
+        config.model.provider = "laya".to_string();
+        config.model.model = "file-model".to_string();
+        config.model.base_url = Some("http://127.0.0.1:8000".to_string());
+        let mut daemon = Daemon::init(config).await.unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("cloud-settings.toml");
+        std::fs::write(
+            &settings_path,
+            "model = \"managed-model\"\nbase_url = \"https://managed.example.com\"\n",
+        )
+        .unwrap();
+        // The tests' seam for the store the startup and the rebuild read.
+        daemon.managed_settings = crate::cloud::ManagedSettingsStore::new(&settings_path);
+
+        let model = daemon.effective_model();
+        assert_eq!(model.model, "managed-model");
+        assert_eq!(
+            model.base_url.as_deref(),
+            Some("https://managed.example.com")
+        );
+        assert_eq!(
+            model.provider, "laya",
+            "an absent key keeps the file's value"
+        );
+
+        // The live rebuild consumes the same view: the provider is rebuilt
+        // (laya needs no credential) and swapped in, no restart.
+        crate::cloud::ProviderRebuilder::rebuild_provider(&daemon);
+        assert!(daemon.provider().is_some(), "the rebuilt provider is live");
     }
 
     #[test]

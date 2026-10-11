@@ -68,9 +68,11 @@ async fn main() -> Result<()> {
 
     let _cloud_stop = spawn_cloud_supervisor(&daemon, &config, Arc::clone(&events));
     spawn_observation_loop(&daemon, &events);
-    // Spec 014: one lifecycle task per configured MCP server (probe,
-    // disconnect, reconnect with backoff), late-registering re-discovered
-    // tools into the daemon's registry. Absent servers spawn nothing.
+    // Spec 014: the MCP lifecycle (probe, disconnect, reconnect with
+    // backoff), late-registering re-discovered tools into the daemon's
+    // registry; spec 015: every pass re-reads the desired servers, so a
+    // delivered `mcp` document is adopted live. No configured servers means
+    // passes that do nothing — the loop stays available for a delivery.
     if let Some(mcp) = daemon.mcp() {
         mcp.spawn_lifecycle(Arc::clone(&daemon));
     }
@@ -106,6 +108,10 @@ fn spawn_cloud_supervisor(
     let sentinel: Arc<dyn argus_daemon::cloud::SentinelSource> = daemon_arc;
     let daemon_arc: Arc<Daemon> = Arc::clone(daemon);
     let decisions: Arc<dyn argus_daemon::cloud::ApprovalSink> = daemon_arc;
+    let daemon_arc: Arc<Daemon> = Arc::clone(daemon);
+    let mcp_applier: Arc<dyn argus_daemon::cloud::McpServerApplier> = daemon_arc;
+    let daemon_arc: Arc<Daemon> = Arc::clone(daemon);
+    let provider_rebuild: Arc<dyn argus_daemon::cloud::ProviderRebuilder> = daemon_arc;
     let (stop, stop_rx) = watch::channel(false);
     let deps = SupervisorDeps {
         config: config.cloud.clone(),
@@ -123,6 +129,8 @@ fn spawn_cloud_supervisor(
         sentinel,
         decisions,
         runbooks: daemon.runbooks(),
+        mcp: Some(mcp_applier),
+        provider_rebuild: Some(provider_rebuild),
         brain_control: daemon.brain_control(),
         environment_id: daemon.environment_id(),
         policy: daemon.cloud_policy(),

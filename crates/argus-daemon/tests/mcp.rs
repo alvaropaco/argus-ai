@@ -345,12 +345,19 @@ async fn a_down_server_fails_the_step_typed_and_the_daemon_stays_healthy() {
     );
 }
 
-/// AC-006: zero `[mcp]` servers — no wiring, no runtime, byte-identical
-/// capabilities to the pre-spec surface.
+/// AC-006: zero `[mcp]` servers — no connects, no discovered tools, and
+/// byte-identical capabilities to the pre-spec surface. (Since spec 015 the
+/// wiring itself stays available so a delivered `mcp` document can reconcile
+/// a topology in live, without a restart or an executor rebuild; the
+/// observable guarantee is the capability surface, which is what this
+/// asserts.)
 #[tokio::test]
 async fn zero_mcp_servers_is_byte_identical_to_today() {
     let daemon = Daemon::init(config()).await.unwrap();
-    assert!(daemon.mcp().is_none(), "no runtime is spawned");
+    assert!(
+        daemon.mcp_servers().is_empty(),
+        "no server is desired when nothing is configured"
+    );
 
     let descriptors = daemon.capability_descriptors();
     assert_eq!(
