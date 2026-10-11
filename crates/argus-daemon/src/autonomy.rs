@@ -241,8 +241,15 @@ impl AutonomyManager {
                         // alone promotes nothing). Below the ceiling the
                         // gate keeps accumulating; the effective level is
                         // capped by the ceiling anyway.
-                        if state.validated_actions_since_rung >= 1
-                            && state.rung_clean_cycles >= self.config.rung_clean_cycles
+                        // The validated-work requirement applies to
+                        // authority ESCALATION (L2→L3→L4). The re-earn of the
+                        // base rung (L0→L2) is clean-cycles only: at L2 the
+                        // daemon executes nothing, so demanding validated
+                        // work there would deadlock recovery after any
+                        // SafeMode (spec 010 review, ADR-0040 §3).
+                        let needs_validated_work = next.rank() > AutonomyMode::L2Recommend.rank();
+                        if state.rung_clean_cycles >= self.config.rung_clean_cycles
+                            && (state.validated_actions_since_rung >= 1 || !needs_validated_work)
                             && next.rank() <= signals.ceiling.rank()
                         {
                             state.rung_clean_cycles = 0;
