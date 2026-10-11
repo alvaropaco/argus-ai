@@ -247,6 +247,7 @@ dependencies = [
  "argus-validate",
  "async-trait",
  "chrono",
+ "rustls",
  "semver",
  "serde",
  "serde_json",
