@@ -41,7 +41,24 @@ ProtectSystem=strict
 # the settings file does not exist until the first configuration is applied and
 # systemd refuses to start a unit whose ReadWritePaths entry is missing. Naming
 # the file would make a fresh install fail to boot.
-ReadWritePaths=/etc/argus
+#
+# /proc/sys/vm is the second carve-out, added with the spec-012 pressure
+# actions: `host.memory.reclaim` writes the single byte `1` (page cache only)
+# to /proc/sys/vm/drop_caches. ProtectKernelTunables=true makes every kernel
+# tunable read-only, which fails that write with EROFS at its first step. The
+# grant is the narrowest that works — the vm subdirectory, not /proc/sys — and
+# it justifies exactly one written file whose payload is a constant; a
+# misconfigured write path ([capabilities] drop_caches_path) pointing outside
+# this subtree fails closed with a typed error instead of widening the unit.
+#
+# /sys/fs/cgroup is the FIRST carve-out (spec 003 M3): cgroup freeze/thaw
+# writes the kernel's cgroup.freeze file, and ProtectControlGroups=true makes
+# that EROFS without the grant. /run/dbus is the third (2026-10-10): the
+# systemd D-Bus — including journald's Vacuum — dials the system bus, which
+# strict ProtectSystem otherwise refuses. All three are narrowest-possible
+# grants; a fresh install fails closed on a missing path, so each is
+# documented beside its capability.
+ReadWritePaths=/etc/argus /proc/sys/vm /run/dbus /sys/fs/cgroup
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

@@ -48,6 +48,13 @@ impl BootstrapPolicyEvaluator {
             CapabilityId::CONTAINER_RESTART,
             CapabilityId::HOST_CGROUP_FREEZE,
             CapabilityId::HOST_CGROUP_THAW,
+            // Spec 012 pressure actions: the page-cache reclaim and the
+            // journald vacuum, the local brain/procedure path's answers to
+            // memory and disk pressure. Deny-by-default over the cloud
+            // channel by the host-changing rule — plain `new()` never
+            // permits them.
+            CapabilityId::HOST_MEMORY_RECLAIM,
+            CapabilityId::HOST_JOURNAL_VACUUM,
             // Spec 003 M4 Kubernetes surface: the read-only intelligence and
             // the controlled self-healing effects. Deliberately absent:
             // `k8s.pod.delete` (high risk) and the deferred
@@ -188,6 +195,29 @@ mod tests {
         ] {
             let decision = policy.evaluate(&request_for(capability, RiskClass::LowRisk));
             assert_eq!(decision.outcome, PolicyOutcome::Allow, "{capability}");
+        }
+    }
+
+    #[test]
+    fn the_pressure_actions_are_local_only() {
+        // Spec 012 AC-003: the pressure actions are policy-compatible on the
+        // local remediation path, and denied over the cloud channel's plain
+        // bootstrap policy — the host-changing rule holds.
+        for capability in [
+            CapabilityId::HOST_MEMORY_RECLAIM,
+            CapabilityId::HOST_JOURNAL_VACUUM,
+        ] {
+            let local = BootstrapPolicyEvaluator::with_local_remediation();
+            let decision = local.evaluate(&request_for(capability, RiskClass::Controlled));
+            assert_eq!(decision.outcome, PolicyOutcome::Allow, "{capability}");
+
+            let cloud = BootstrapPolicyEvaluator::new();
+            let decision = cloud.evaluate(&request_for(capability, RiskClass::Controlled));
+            assert_eq!(
+                decision.outcome,
+                PolicyOutcome::Deny,
+                "the cloud channel never executes '{capability}'"
+            );
         }
     }
 

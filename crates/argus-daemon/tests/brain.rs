@@ -25,8 +25,26 @@ fn test_config(name: &str) -> DaemonConfig {
             .join(format!("argus-brain-{name}-{}.db", std::process::id()))
             .to_string_lossy()
             .into_owned(),
+        // The daemon wires the REAL kernel-write controller from config; a
+        // per-test temp file keeps every brain test off the real sysctl.
+        capabilities: argus_daemon::config::CapabilitiesConfig {
+            drop_caches_path: drop_caches_path_for(name),
+            ..argus_daemon::config::CapabilitiesConfig::default()
+        },
         ..DaemonConfig::default()
     }
+}
+
+/// The drop_caches stand-in [`test_config`] wires — the same derivation, so
+/// a test can assert on the file the controller wrote.
+fn drop_caches_path_for(name: &str) -> String {
+    std::env::temp_dir()
+        .join(format!(
+            "argus-brain-{name}-drop-caches.{}",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn restarting_provider() -> Arc<FakeDecisionProvider> {
@@ -996,6 +1014,308 @@ async fn a_promoted_memory_pressure_runbook_drives_an_acting_attributed_procedur
     assert_eq!(
         daemon.runbooks().by_name("drain-cache").unwrap().attempts(),
         0
+    );
+}
+
+// --- Spec 012: the real pressure actions complete the chain ---
+
+/// A promoted runbook authored for the memory-pressure signature, driving the
+/// REAL page-cache reclaim — the production bootstrap registers it, so no
+/// extra capability is injected (the spec-011 stand-in test above keeps its
+/// `init_with_extra_capabilities` seam coverage).
+fn promoted_reclaim_runbook_dir(name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("procedure.toml"),
+        format!(
+            r#"
+name = "{name}"
+trigger = {{ symptom = "memory-pressure" }}
+allowed_actions = ["host.memory.reclaim"]
+gates = ["evaluation", "simulation", "validation", "policy", "approval", "promotion"]
+
+[[validation]]
+description = "the write was accepted by the kernel"
+attribute = "unit.active_state"
+comparison = {{ equal = "active" }}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+/// A promoted runbook authored for the disk-pressure signature, driving the
+/// real journald vacuum.
+fn promoted_vacuum_runbook_dir(name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("procedure.toml"),
+        format!(
+            r#"
+name = "{name}"
+trigger = {{ symptom = "disk-pressure" }}
+allowed_actions = ["host.journal.vacuum"]
+gates = ["evaluation", "simulation", "validation", "policy", "approval", "promotion"]
+
+[[validation]]
+description = "the D-Bus call returned"
+attribute = "unit.active_state"
+comparison = {{ equal = "active" }}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+/// A disk-pressure situation — the pure collector's exact shape: subject the
+/// pressured mount.
+fn disk_pressure(reading: f64, mount: &str) -> brain::Situation {
+    brain::Situation {
+        signature: brain::DISK_PRESSURE.into(),
+        subject: mount.into(),
+        detail: format!("{mount} at {reading:.1}%"),
+    }
+}
+
+#[tokio::test]
+async fn the_real_reclaim_capability_completes_the_memory_pressure_chain() {
+    // Spec 012 AC-001's plan half: the spec-011 stand-in test above,
+    // upgraded — `host.memory.reclaim` is registered by the production
+    // bootstrap with the optional-subject schema, so a memory-pressure
+    // crossing plus a promoted runbook builds the schema-valid step.
+    let dir = promoted_reclaim_runbook_dir("reclaim-page-cache");
+    let mut config = test_config("pressure-reclaim");
+    config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+    let daemon = Daemon::init(config).await.unwrap();
+    assert_eq!(
+        daemon
+            .runbooks()
+            .by_name("reclaim-page-cache")
+            .unwrap()
+            .status(),
+        argus_runbooks::RunbookStatus::Promoted
+    );
+    let reclaim = CapabilityId::new(CapabilityId::HOST_MEMORY_RECLAIM).unwrap();
+    assert!(
+        daemon.registry().get(&reclaim).is_some(),
+        "the real capability is registered by the bootstrap"
+    );
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        record.plan_objective.as_deref(),
+        Some("procedure: reclaim-page-cache")
+    );
+    assert_eq!(record.steps, ["host.memory.reclaim"]);
+    let outcome = record.outcome.expect("the plan ran through the boundary");
+    assert!(
+        outcome.starts_with("Denied") || outcome.starts_with("awaiting approval"),
+        "L0 executes nothing, but the procedure crossed the boundary: {outcome}"
+    );
+
+    // The persisted step's argument is the pressure subject — schema-valid
+    // against the optional-informational schema (a non-conforming step would
+    // have meant no plan at all).
+    let plans = daemon.repository().list_plans().await.unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].1.runbook.as_deref(), Some("reclaim-page-cache"));
+    assert_eq!(plans[0].1.steps[0].action.capability, reclaim);
+    assert_eq!(
+        plans[0].1.steps[0].action.arguments,
+        serde_json::json!({ "subject": "mem" })
+    );
+
+    // The episode's symptom is the situation's signature; a plan that never
+    // executes is not an attempt (spec 010's zero-execution guard).
+    let episodes = daemon.repository().list_episodes().await.unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].1.symptom, "memory-pressure");
+    assert_eq!(
+        daemon
+            .runbooks()
+            .by_name("reclaim-page-cache")
+            .unwrap()
+            .attempts(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn the_real_vacuum_capability_completes_the_disk_pressure_chain() {
+    // Spec 012 AC-002's plan half: a disk-pressure crossing plus a promoted
+    // runbook builds a schema-valid `host.journal.vacuum` step; the subject
+    // is the pressured mount.
+    let dir = promoted_vacuum_runbook_dir("vacuum-journal");
+    let mut config = test_config("pressure-vacuum");
+    config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+    let daemon = Daemon::init(config).await.unwrap();
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![disk_pressure(95.0, "/")],
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        record.plan_objective.as_deref(),
+        Some("procedure: vacuum-journal")
+    );
+    assert_eq!(record.steps, ["host.journal.vacuum"]);
+    let outcome = record.outcome.expect("the plan ran through the boundary");
+    assert!(
+        outcome.starts_with("Denied") || outcome.starts_with("awaiting approval"),
+        "L0 executes nothing: {outcome}"
+    );
+
+    let plans = daemon.repository().list_plans().await.unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(
+        plans[0].1.steps[0].action.capability.as_str(),
+        "host.journal.vacuum"
+    );
+    assert_eq!(
+        plans[0].1.steps[0].action.arguments,
+        serde_json::json!({ "subject": "/" })
+    );
+    let episodes = daemon.repository().list_episodes().await.unwrap();
+    assert_eq!(episodes[0].1.symptom, "disk-pressure");
+}
+
+#[tokio::test]
+async fn a_granted_reclaim_round_trip_executes_and_completes() {
+    // AC-001's granted half, end to end: the pressure actions are
+    // approval-gated at every autonomy level, so the plan pauses for the
+    // human gate; the operator's grant is the execution path, and the resume
+    // drives the real controller against the per-test temp file — never the
+    // sysctl.
+    let name = "reclaim-roundtrip";
+    let dir = promoted_reclaim_runbook_dir(name);
+    let mut config = test_config(name);
+    config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+    let drop_caches = drop_caches_path_for(name);
+    std::fs::write(&drop_caches, "stale").unwrap();
+    let daemon = Daemon::init(config).await.unwrap();
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+    assert!(
+        record
+            .outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("awaiting approval")),
+        "the human gate pauses the procedure: {:?}",
+        record.outcome
+    );
+    assert_eq!(
+        std::fs::read_to_string(&drop_caches).unwrap(),
+        "stale",
+        "a paused plan executes nothing"
+    );
+
+    // Grant → resume: the single-use token is the execution path.
+    let pending = daemon.list_pending_approvals().into_iter().next().unwrap();
+    let pending = daemon.grant_approval(pending.token, "operator").unwrap();
+    let events = argus_events::LocalEventBus::new(16);
+    let outcome = daemon.resume_remediation(&pending, &events).await;
+    let argus_daemon::control::ResumeOutcome::Finished(report) = outcome else {
+        panic!("a granted plan resumes to a finish");
+    };
+
+    assert_eq!(report.status, argus_domain::PlanStatus::Completed);
+    assert_eq!(report.executions.len(), 1);
+    assert_eq!(
+        report.executions[0].evidence["operation"],
+        "page-cache-reclaim"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&drop_caches).unwrap(),
+        "1",
+        "the reclaim wrote page-cache-only to the injected temp file"
+    );
+
+    // The pause recorded the situation; the completed run is the attempt.
+    let episodes = daemon.repository().list_episodes().await.unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].1.symptom, "memory-pressure");
+    assert_eq!(daemon.runbooks().by_name(name).unwrap().attempts(), 1);
+
+    std::fs::remove_file(&drop_caches).ok();
+}
+
+#[tokio::test]
+async fn a_failed_reclaim_write_fails_the_procedure_and_records_the_unsuccessful_outcome() {
+    // AC-004 end to end: a missing write path is a typed executor error on
+    // the resumed run — the procedure terminates Failed, the runbook records
+    // the unsuccessful outcome once, and nothing is retried within the cycle.
+    let name = "reclaim-fails";
+    let dir = promoted_reclaim_runbook_dir(name);
+    let mut config = test_config(name);
+    config.brain.runbooks_dir = Some(dir.path().to_string_lossy().into_owned());
+    // A path whose parent directory does not exist: the write fails closed.
+    config.capabilities.drop_caches_path = std::env::temp_dir()
+        .join(format!("argus-brain-missing-{}", uuid::Uuid::new_v4()))
+        .join("drop_caches")
+        .to_string_lossy()
+        .into_owned();
+    let daemon = Daemon::init(config).await.unwrap();
+
+    let record = brain::cycle_with_situations(
+        &daemon,
+        &BrainConfig::default(),
+        vec![memory_pressure(91.4)],
+        true,
+    )
+    .await;
+    assert!(
+        record
+            .outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("awaiting approval")),
+        "the pause comes first: {:?}",
+        record.outcome
+    );
+
+    let pending = daemon.list_pending_approvals().into_iter().next().unwrap();
+    let pending = daemon.grant_approval(pending.token, "operator").unwrap();
+    let events = argus_events::LocalEventBus::new(16);
+    let outcome = daemon.resume_remediation(&pending, &events).await;
+    let argus_daemon::control::ResumeOutcome::Finished(report) = outcome else {
+        panic!("a granted plan resumes to a finish");
+    };
+
+    // Typed failure, terminal: one attempt, no retry within the cycle.
+    assert_eq!(report.status, argus_domain::PlanStatus::Failed);
+    assert_eq!(report.executions.len(), 1);
+    assert_eq!(
+        report.executions[0].status,
+        argus_domain::ExecutionStatus::Failed
+    );
+    let runbook = daemon.runbooks().by_name(name).unwrap();
+    assert_eq!(
+        runbook.attempts(),
+        1,
+        "the unsuccessful outcome is recorded exactly once"
+    );
+    assert_eq!(
+        runbook.status(),
+        argus_runbooks::RunbookStatus::Promoted,
+        "an unsuccessful outcome moves no gate"
     );
 }
 

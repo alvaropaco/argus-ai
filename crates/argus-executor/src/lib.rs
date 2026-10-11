@@ -29,6 +29,7 @@ pub use privileged::{CompositeExecutor, PrivilegedExecutor};
 pub use provider::CapabilityProvider;
 pub use remediation::{
     CgroupController, CgroupV2Controller, ContainerController, DockerContainerController,
+    DropCachesController, JournalController, KernelWriteController, MAX_KEEP_DAYS, MIN_KEEP_DAYS,
     NeverSignalSelf, NeverTarget, PidAboveOne, ProcessController, ProcessSignal, RemediationError,
     RemediationExecutor, UnixProcessController, ValidCgroupPath, remediation_guardrails,
     validate_cgroup_path,

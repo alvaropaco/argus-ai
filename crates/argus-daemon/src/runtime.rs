@@ -21,8 +21,9 @@ use argus_domain::{
 use argus_events::{EventBus, LedgerSink};
 use argus_executor::{
     BootstrapExecutor, CapabilityProvider, CgroupController, CgroupV2Controller,
-    ContainerController, DockerContainerController, ExecutionError, Executor, ProcessController,
-    RemediationExecutor, ServiceController, UnixProcessController, remediation_guardrails,
+    ContainerController, DockerContainerController, DropCachesController, ExecutionError, Executor,
+    ProcessController, RemediationExecutor, ServiceController, UnixProcessController,
+    remediation_guardrails,
 };
 use argus_observability::SelfObservability;
 use argus_policy::{ApprovalStore, AutopilotGovernor, BootstrapPolicyEvaluator, PolicyEvaluator};
@@ -346,10 +347,21 @@ impl Daemon {
         let processes: Arc<dyn ProcessController> = Arc::new(UnixProcessController::new());
         let containers: Arc<dyn ContainerController> = Arc::new(DockerContainerController::new());
         let cgroups: Arc<dyn CgroupController> = Arc::new(CgroupV2Controller::default());
+        // Spec 012: the pressure-action controllers. The reclaim writes `1`
+        // to the configured sysctl (the default needs the deployed unit's
+        // `ReadWritePaths` carve-out for /proc/sys/vm); the vacuum rides
+        // argus-systemd's system-bus client, connected at execution — an
+        // unreachable journald is a typed error then, never a silent success.
+        let kernel = Arc::new(DropCachesController::with_path(
+            config.capabilities.drop_caches_path.clone(),
+        ));
         let remediation_executor = Arc::new(RemediationExecutor::new(
             processes.clone(),
             containers.clone(),
             cgroups.clone(),
+            kernel,
+            Arc::new(DbusJournalController),
+            config.capabilities.journal_keep_days,
             remediation_guardrails(&[], &[]),
         ));
         let governor = Arc::new(AutopilotGovernor::default());
@@ -1641,6 +1653,12 @@ fn bootstrap_capabilities() -> Vec<CapabilityId> {
         CapabilityId::CONTAINER_RESTART,
         CapabilityId::HOST_CGROUP_FREEZE,
         CapabilityId::HOST_CGROUP_THAW,
+        // Spec 012 pressure actions (FR-003): the page-cache reclaim and the
+        // journald vacuum — the honest answers to memory and disk pressure.
+        // The cloud policy does not permit them (the host-changing rule);
+        // they execute only through the local brain/procedure path.
+        CapabilityId::HOST_MEMORY_RECLAIM,
+        CapabilityId::HOST_JOURNAL_VACUUM,
         // Spec 003 M4 Kubernetes surface (ADR-0037 §4). Registration
         // publishes and gates them; the deferred drain/reschedule stay
         // unregistered — they have no executor and no policy path.
@@ -1669,6 +1687,7 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
             let service = is_service_capability(&id);
             let remediation = is_remediation_capability(&id);
             let kubernetes = is_kubernetes_capability(&id);
+            let pressure = is_pressure_capability(&id);
             let input_schema = if service {
                 serde_json::json!({
                     "type": "object",
@@ -1698,6 +1717,17 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
                     "type": "object",
                     "required": ["path"],
                     "properties": { "path": { "type": "string" } },
+                    "additionalProperties": false,
+                })
+            } else if pressure {
+                // Spec 012: the pressure subject is optional-informational —
+                // both actions are host-wide, so `{"subject": …}` names what
+                // the procedure was about without carrying targeting
+                // authority, and spec 010's per-signature derivation builds
+                // schema-valid steps without special-casing.
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "subject": { "type": "string" } },
                     "additionalProperties": false,
                 })
             } else if kubernetes {
@@ -1770,6 +1800,36 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
                     BlastRadius::Host,
                     false,
                 )
+            } else if id.as_str() == CapabilityId::HOST_MEMORY_RECLAIM {
+                // Spec 012 FR-001: page-cache reclaim is Controlled and
+                // partially reversible in effect (the cache repopulates
+                // naturally), host-wide. The pressure actions are
+                // approval-gated at every autonomy level by design — a
+                // one-way kernel write gets a human gate, and the operator's
+                // grant is the execution path (grant-backed execution is
+                // deliberately outside the blast-radius budget). FR-005:
+                // reclaim validates when the write is accepted by the
+                // kernel.
+                (
+                    RiskClass::Controlled,
+                    Reversibility::PartiallyReversible,
+                    BlastRadius::Host,
+                    true,
+                )
+            } else if id.as_str() == CapabilityId::HOST_JOURNAL_VACUUM {
+                // Spec 012 FR-002: vacuumed logs are gone — irreversible,
+                // bounded only by the configured retention; host-wide.
+                // Approval-gated at every autonomy level like the reclaim: a
+                // one-way action gets a human gate, the operator's grant is
+                // the execution path, and grant-backed execution is
+                // deliberately outside the blast-radius budget. FR-005:
+                // vacuum validates when the D-Bus call returns.
+                (
+                    RiskClass::Controlled,
+                    Reversibility::None,
+                    BlastRadius::Host,
+                    true,
+                )
             } else if kubernetes {
                 // Per contracts/capabilities.md: reads are READ with no
                 // approval, the self-healing effects are CONTROLLED with a
@@ -1828,6 +1888,48 @@ fn bootstrap_descriptors() -> Vec<CapabilityDescriptor> {
 #[derive(Debug, Default)]
 struct NoKubernetesExecutor;
 
+/// The journald vacuum controller (spec 012 FR-002): the typed
+/// `Vacuum(since_usec)` call through `argus-systemd`'s system-bus client,
+/// connected at execution so a daemon never holds an idle privileged bus
+/// connection for months between vacuums — a fresh unreachable bus is a
+/// typed error at the moment it matters, fail-closed (AC-004). The executor
+/// boundary is synchronous; the async D-Bus call bridges via the same
+/// hand-off `connect_cluster` uses (multi-threaded runtime).
+#[derive(Debug, Default)]
+struct DbusJournalController;
+
+impl DbusJournalController {
+    /// AC-004's first mapping, pure so it is testable without a bus: an
+    /// unreachable system bus / journald is `Unavailable` — degraded, the
+    /// effect never began.
+    fn map_connect_error(error: argus_systemd::SystemdError) -> argus_executor::RemediationError {
+        argus_executor::RemediationError::Unavailable(error.to_string())
+    }
+
+    /// AC-004's second mapping, pure for the same reason: a reached journal1
+    /// that refused the vacuum is `Failed` — the effect did not happen.
+    fn map_journal_error(error: argus_systemd::SystemdError) -> argus_executor::RemediationError {
+        argus_executor::RemediationError::Failed(format!("journal1 Vacuum failed: {error}"))
+    }
+}
+
+impl argus_executor::JournalController for DbusJournalController {
+    fn vacuum(&self, since_usec: u64) -> Result<(), argus_executor::RemediationError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let client = argus_systemd::SystemdClient::connect()
+                    .await
+                    .map_err(Self::map_connect_error)?;
+                client
+                    .vacuum_journal(since_usec)
+                    .await
+                    .map(|_freed| ())
+                    .map_err(Self::map_journal_error)
+            })
+        })
+    }
+}
+
 impl argus_executor::Executor for NoKubernetesExecutor {
     fn execute(
         &self,
@@ -1854,6 +1956,14 @@ fn is_remediation_capability(id: &CapabilityId) -> bool {
             | CapabilityId::CONTAINER_RESTART
             | CapabilityId::HOST_CGROUP_FREEZE
             | CapabilityId::HOST_CGROUP_THAW
+    )
+}
+
+/// Whether the capability belongs to the spec-012 pressure-action surface.
+fn is_pressure_capability(id: &CapabilityId) -> bool {
+    matches!(
+        id.as_str(),
+        CapabilityId::HOST_MEMORY_RECLAIM | CapabilityId::HOST_JOURNAL_VACUUM
     )
 }
 
@@ -2109,6 +2219,32 @@ fn service_guardrails(daemon_unit: &str) -> argus_executor::GuardrailRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreachable_bus_maps_to_unavailable_not_failed() {
+        // AC-004's mapping: a connect failure means the effect never began —
+        // degraded, not a failed effect.
+        let error = DbusJournalController::map_connect_error(
+            argus_systemd::SystemdError::Unavailable("no system bus".to_string()),
+        );
+        assert!(
+            matches!(error, argus_executor::RemediationError::Unavailable(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_vacuum_maps_to_failed_not_unavailable() {
+        // AC-004's mapping: a reached journal1 that refused the call is a
+        // failed effect, carrying the typed prefix.
+        let error = DbusJournalController::map_journal_error(argus_systemd::SystemdError::Other(
+            "no such interface".to_string(),
+        ));
+        assert!(
+            matches!(error, argus_executor::RemediationError::Failed(ref reason) if reason.contains("journal1 Vacuum")),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn provider_health_starts_ready_and_tracks_transitions() {

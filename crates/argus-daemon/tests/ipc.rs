@@ -130,6 +130,10 @@ async fn capabilities_lists_bootstrap_set() {
             "container.restart".to_string(),
             "host.cgroup.freeze".to_string(),
             "host.cgroup.thaw".to_string(),
+            // Spec 012 pressure actions (FR-003): registered, executed only
+            // through the local brain/procedure path.
+            "host.journal.vacuum".to_string(),
+            "host.memory.reclaim".to_string(),
             "host.process.signal".to_string(),
             "host.service.restart".to_string(),
             "host.service.start".to_string(),

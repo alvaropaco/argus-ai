@@ -120,6 +120,14 @@ impl CapabilityId {
     /// subtree; the declared rollback of a freeze.
     pub const HOST_CGROUP_THAW: &'static str = "host.cgroup.thaw";
 
+    /// Pressure-action capability (spec 012, FR-001): kernel page-cache
+    /// reclaim — `sync`, then write `1` (page cache only) to the drop_caches
+    /// sysctl.
+    pub const HOST_MEMORY_RECLAIM: &'static str = "host.memory.reclaim";
+    /// Pressure-action capability (spec 012, FR-002): vacuum systemd-journald
+    /// to the configured retention bound via the journald D-Bus API.
+    pub const HOST_JOURNAL_VACUUM: &'static str = "host.journal.vacuum";
+
     /// Read-only Kubernetes intelligence (spec 003 M4, FR-014): cluster summary.
     pub const K8S_CLUSTER_READ: &'static str = "k8s.cluster.read";
     /// Read-only Kubernetes intelligence: nodes.
@@ -245,6 +253,8 @@ mod tests {
             CapabilityId::ARGUS_HEALTH_READ,
             CapabilityId::ARGUS_CONFIG_READ,
             CapabilityId::ARGUS_PLUGINS_LIST,
+            CapabilityId::HOST_MEMORY_RECLAIM,
+            CapabilityId::HOST_JOURNAL_VACUUM,
         ] {
             assert!(CapabilityId::new(path).is_ok(), "{path} should be valid");
         }

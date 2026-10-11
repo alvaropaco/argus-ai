@@ -50,6 +50,11 @@ pub struct DaemonConfig {
     /// configuration observes exactly as today.
     #[serde(default)]
     pub situations: SituationsConfig,
+    /// The pressure-action settings (spec 012 FR-001/FR-002). Absent means
+    /// the defaults: the standard drop_caches sysctl and a 7-day journal
+    /// retention.
+    #[serde(default)]
+    pub capabilities: CapabilitiesConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -70,6 +75,7 @@ impl Default for DaemonConfig {
             ledger: LedgerConfig::default(),
             autonomy: AutonomyConfig::default(),
             situations: SituationsConfig::default(),
+            capabilities: CapabilitiesConfig::default(),
         }
     }
 }
@@ -109,6 +115,8 @@ pub struct ConfigFile {
     pub autonomy: Option<AutonomyConfig>,
     #[serde(default)]
     pub situations: Option<SituationsConfig>,
+    #[serde(default)]
+    pub capabilities: Option<CapabilitiesConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -349,6 +357,57 @@ impl<'de> Deserialize<'de> for SituationsConfig {
     }
 }
 
+/// The standard drop_caches sysctl — the default write path
+/// `host.memory.reclaim` puts `1` to (spec 012 FR-001).
+pub const DEFAULT_DROP_CACHES_PATH: &str = "/proc/sys/vm/drop_caches";
+
+/// Pressure-action settings (`[capabilities]` in argus.toml, spec 012
+/// FR-001/FR-002).
+///
+/// Absent section → defaults; the retention bound is clamped, so a typo'd
+/// extreme degrades to the nearest valid bound rather than vacuuming the
+/// journal to nothing (the `AutonomyConfig` pattern). The write path is
+/// config-injectable for tests — tests point it at a temp file; production
+/// writes the standard sysctl and needs the unit's `ReadWritePaths` carve-out
+/// for `/proc/sys/vm` (ADR-0021).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilitiesConfig {
+    /// The drop_caches sysctl `host.memory.reclaim` writes `1` to — page
+    /// cache only (default `/proc/sys/vm/drop_caches`).
+    pub drop_caches_path: String,
+    /// The `host.journal.vacuum` retention bound in days: the call vacuums
+    /// everything older than `now − keep_days` (default 7, clamped 1–365).
+    pub journal_keep_days: u32,
+}
+
+impl Default for CapabilitiesConfig {
+    fn default() -> Self {
+        Self {
+            drop_caches_path: DEFAULT_DROP_CACHES_PATH.to_string(),
+            journal_keep_days: 7,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilitiesConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct CapabilitiesWire {
+            #[serde(default)]
+            drop_caches_path: Option<String>,
+            #[serde(default)]
+            journal_keep_days: Option<u32>,
+        }
+        let wire = CapabilitiesWire::deserialize(deserializer)?;
+        Ok(Self {
+            drop_caches_path: wire
+                .drop_caches_path
+                .unwrap_or_else(|| DEFAULT_DROP_CACHES_PATH.to_string()),
+            journal_keep_days: wire.journal_keep_days.unwrap_or(7).clamp(1, 365),
+        })
+    }
+}
+
 /// Precedence is `defaults < file < flags`; flags are applied afterwards by the
 /// caller, which is why only the first two are handled here.
 ///
@@ -456,6 +515,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.situations {
         config.situations = value;
+    }
+    if let Some(value) = file.capabilities {
+        config.capabilities = value;
     }
 }
 
@@ -933,6 +995,59 @@ telemetry_interval_seconds = 30
         let loaded = load(Some(&path)).expect("valid");
         assert_eq!(loaded.config.situations.memory_used_percent, 50.0);
         assert_eq!(loaded.config.situations.disk_used_percent, 99.0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_capabilities_section_loads_with_defaults_and_clamps() {
+        let dir = temp_dir();
+
+        // Absent section: the defaults — the standard sysctl, 7 days of
+        // journal (spec 012 FR-001/FR-002).
+        let path = write_config(&dir, "argus.toml", "environment_name = \"x\"\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.capabilities, CapabilitiesConfig::default());
+        assert_eq!(
+            loaded.config.capabilities.drop_caches_path,
+            "/proc/sys/vm/drop_caches"
+        );
+
+        // Explicit values ride through.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[capabilities]\ndrop_caches_path = \"/tmp/argus-test-drop\"\njournal_keep_days = 30\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(
+            loaded.config.capabilities.drop_caches_path,
+            "/tmp/argus-test-drop"
+        );
+        assert_eq!(loaded.config.capabilities.journal_keep_days, 30);
+
+        // Extremes clamp to the documented bounds (1–365): never vacuum the
+        // journal to nothing, never keep it forever.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[capabilities]\njournal_keep_days = 0\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(
+            loaded.config.capabilities.journal_keep_days, 1,
+            "clamped to the floor"
+        );
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[capabilities]\njournal_keep_days = 10_000\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(
+            loaded.config.capabilities.journal_keep_days, 365,
+            "clamped to the ceiling"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

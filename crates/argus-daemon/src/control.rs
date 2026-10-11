@@ -255,7 +255,12 @@ fn risk_for(capability: &CapabilityId) -> RiskClass {
         | CapabilityId::K8S_WORKLOAD_SCALE
         | CapabilityId::K8S_NODE_CORDON
         | CapabilityId::K8S_NODE_UNCORDON
-        | CapabilityId::K8S_JOB_CLEANUP => RiskClass::Controlled,
+        | CapabilityId::K8S_JOB_CLEANUP
+        // Spec 012: the pressure actions are Controlled by their descriptors
+        // (explicit here so the loop's classification cannot drift from the
+        // registry).
+        | CapabilityId::HOST_MEMORY_RECLAIM
+        | CapabilityId::HOST_JOURNAL_VACUUM => RiskClass::Controlled,
         CapabilityId::K8S_NODE_DRAIN | CapabilityId::K8S_WORKLOAD_RESCHEDULE => RiskClass::HighRisk,
         _ => RiskClass::Controlled,
     }

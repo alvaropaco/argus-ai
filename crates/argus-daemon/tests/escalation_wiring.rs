@@ -45,6 +45,17 @@ impl argus_executor::ContainerController for MockContainers {
     }
 }
 
+/// The spec-012 journal port, unwired here: these tests never drive a
+/// `host.journal.vacuum` step, and an absent port fails closed.
+struct NoJournal;
+impl argus_executor::JournalController for NoJournal {
+    fn vacuum(&self, _since_usec: u64) -> Result<(), RemediationError> {
+        Err(RemediationError::Unavailable(
+            "no journal controller is wired".to_string(),
+        ))
+    }
+}
+
 fn registry() -> CapabilityRegistry {
     let mut registry = CapabilityRegistry::new();
     for (capability, risk) in [
@@ -145,6 +156,11 @@ fn harness() -> (AutopilotGovernor, Arc<MockCgroups>, RemediationExecutor) {
         Arc::new(argus_executor::UnixProcessController::new()),
         Arc::new(MockContainers),
         cgroups.clone(),
+        Arc::new(argus_executor::DropCachesController::with_path(
+            "/argus-tests/unused",
+        )),
+        Arc::new(NoJournal),
+        7,
         remediation_guardrails(&[], &[]),
     );
     (governor, cgroups, executor)

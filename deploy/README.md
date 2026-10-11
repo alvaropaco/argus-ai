@@ -39,6 +39,18 @@ before extraction, and installs `argus`/`argusd` plus the systemd unit.
 - `deploy/apt/` — Debian repository metadata and signing (see
   `deploy/apt/README.md`).
 
+## Unit sandbox carve-outs
+
+The hardened unit starts read-only everywhere it can; each `ReadWritePaths`
+addition is one writable path with one owner (ADR-0021):
+
+- `/sys/fs/cgroup` — `host.cgroup.freeze`/`thaw`, the freezer's `cgroup.freeze` write.
+- `/run/dbus` — the system-bus socket for the systemd/journald D-Bus surface.
+- `/proc/sys/vm` — `host.memory.reclaim`, the one-byte page-cache-reclaim write.
+
+Anything else a capability needs is a typed error at execution, never a wider
+sandbox.
+
 ## Cargo installs
 
 `cargo install --path crates/argus-daemon` puts `argusd` in `~/.cargo/bin`, which

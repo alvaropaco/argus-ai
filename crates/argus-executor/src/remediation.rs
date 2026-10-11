@@ -1,11 +1,13 @@
 //! Typed remediation capabilities (spec 003 M3, CAP-14 host, FR-017).
 //!
-//! Three controller families back the remediation capabilities:
+//! Five controller families back the remediation capabilities:
 //! [`ProcessController`] (`host.process.signal`), [`ContainerController`]
-//! (`container.restart`), and [`CgroupController`] (`host.cgroup.freeze` /
-//! `host.cgroup.thaw`, the resource-control adjustment). Each is a port so
-//! tests run against deterministic mocks and the kernel-facing implementations
-//! stay thin (Principle 9, ADR-0032).
+//! (`container.restart`), [`CgroupController`] (`host.cgroup.freeze` /
+//! `host.cgroup.thaw`, the resource-control adjustment), and — spec 012's
+//! pressure actions — [`KernelWriteController`] (`host.memory.reclaim`) and
+//! [`JournalController`] (`host.journal.vacuum`). Each is a port so tests run
+//! against deterministic mocks and the kernel-facing implementations stay
+//! thin (Principle 9, ADR-0032).
 //!
 //! Every effect crosses the same boundary as the bootstrap executors: only an
 //! [`AuthorizedAction`] reaches [`RemediationExecutor`], and guardrails run at
@@ -16,7 +18,7 @@ use std::sync::Arc;
 
 use argus_domain::CapabilityId;
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::action::{AuthorizedAction, ExecutionError, ExecutionResult};
 use crate::executor::Executor;
@@ -258,6 +260,64 @@ pub fn validate_cgroup_path(path: &str) -> Result<(), RemediationError> {
     Ok(())
 }
 
+/// Reclaims kernel page cache backing `host.memory.reclaim` (spec 012
+/// FR-001). A port so tests run against an injected write path and the
+/// kernel-facing implementation stays a thin, typed file write.
+pub trait KernelWriteController: Send + Sync {
+    /// Performs the reclaim: `sync`, then the drop_caches write.
+    fn reclaim_page_cache(&self) -> Result<(), RemediationError>;
+}
+
+/// The drop_caches sysctl writer: `sync` first (`rustix::fs::sync` — the
+/// syscall boundary, never a spawned command), then writes `1` — page cache
+/// ONLY — to the configured path. The write path is config-injectable so
+/// tests point it at a temp file; production writes
+/// `/proc/sys/vm/drop_caches` (the deployed unit's `ReadWritePaths`
+/// carve-out, ADR-0021).
+#[derive(Debug, Clone)]
+pub struct DropCachesController {
+    path: String,
+}
+
+impl DropCachesController {
+    pub fn with_path(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The written payload: `1`, page cache only. `3` (slabs and dentries
+    /// too) is forbidden by spec 012; this constant is the whole write
+    /// surface.
+    pub const PAGE_CACHE_ONLY: &'static str = "1";
+}
+
+impl Default for DropCachesController {
+    fn default() -> Self {
+        Self::with_path("/proc/sys/vm/drop_caches")
+    }
+}
+
+impl KernelWriteController for DropCachesController {
+    fn reclaim_page_cache(&self) -> Result<(), RemediationError> {
+        // sync(2) flushes cached filesystem data so the reclaim takes the
+        // dirty pages too (spec 012 FR-001). The kernel syncs drop_caches
+        // internally as well; the explicit call is the documented primitive.
+        rustix::fs::sync();
+        std::fs::write(&self.path, Self::PAGE_CACHE_ONLY).map_err(|e| {
+            RemediationError::Failed(format!("drop_caches write to '{}' failed: {e}", self.path))
+        })
+    }
+}
+
+/// Vacuates the systemd journal backing `host.journal.vacuum` (spec 012
+/// FR-002). A port: the typed executor tests seam it with a fake; the real
+/// implementation is the journald D-Bus `Vacuum(since_usec)` call behind the
+/// existing `argus-systemd` connection, wired at the composition root.
+pub trait JournalController: Send + Sync {
+    /// Removes journal entries older than `since_usec` (epoch microseconds).
+    /// Age-based on purpose: it is the D-Bus interface's actual semantics.
+    fn vacuum(&self, since_usec: u64) -> Result<(), RemediationError>;
+}
+
 /// Executes the typed remediation capabilities through their controllers.
 ///
 /// Routing is by capability family, and every family's guardrails run here, at
@@ -266,20 +326,38 @@ pub struct RemediationExecutor {
     processes: Arc<dyn ProcessController>,
     containers: Arc<dyn ContainerController>,
     cgroups: Arc<dyn CgroupController>,
+    kernel: Arc<dyn KernelWriteController>,
+    journal: Arc<dyn JournalController>,
+    /// The journal vacuum retention bound in days; the vacuum removes
+    /// everything older than `now − keep_days`. Clamped to 1–365 (spec 012).
+    journal_keep_days: u32,
     guardrails: GuardrailRegistry,
 }
 
+/// The retention bounds for [`RemediationExecutor::new`] — a typo'd extreme
+/// degrades to the nearest valid bound, never to "vacuum everything".
+pub const MIN_KEEP_DAYS: u32 = 1;
+/// See [`MIN_KEEP_DAYS`].
+pub const MAX_KEEP_DAYS: u32 = 365;
+
 impl RemediationExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         processes: Arc<dyn ProcessController>,
         containers: Arc<dyn ContainerController>,
         cgroups: Arc<dyn CgroupController>,
+        kernel: Arc<dyn KernelWriteController>,
+        journal: Arc<dyn JournalController>,
+        journal_keep_days: u32,
         guardrails: GuardrailRegistry,
     ) -> Self {
         Self {
             processes,
             containers,
             cgroups,
+            kernel,
+            journal,
+            journal_keep_days: journal_keep_days.clamp(MIN_KEEP_DAYS, MAX_KEEP_DAYS),
             guardrails,
         }
     }
@@ -292,6 +370,8 @@ impl RemediationExecutor {
                 | CapabilityId::CONTAINER_RESTART
                 | CapabilityId::HOST_CGROUP_FREEZE
                 | CapabilityId::HOST_CGROUP_THAW
+                | CapabilityId::HOST_MEMORY_RECLAIM
+                | CapabilityId::HOST_JOURNAL_VACUUM
         )
     }
 
@@ -391,6 +471,85 @@ impl RemediationExecutor {
             finished_at: Utc::now(),
         })
     }
+
+    /// The optional, informational pressure subject (`{"subject": …}`, spec
+    /// 012): both pressure actions are host-wide, so the argument carries no
+    /// targeting authority — it names what the procedure was about. Absent is
+    /// schema-valid and accepted.
+    fn pressure_subject(action: &AuthorizedAction) -> Option<String> {
+        action
+            .request()
+            .arguments
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// Performs the page-cache reclaim (spec 012 FR-001). No target to
+    /// re-resolve — the action is host-wide and the guardrail registry holds
+    /// no predicate for it; the typed write path is the whole surface.
+    fn reclaim_page_cache(
+        &self,
+        action: &AuthorizedAction,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        let capability = action.capability();
+        let subject = Self::pressure_subject(action);
+
+        let started_at = Utc::now();
+        self.kernel
+            .reclaim_page_cache()
+            .map_err(|e| ExecutionError::Failed(e.to_string()))?;
+        let mut evidence = json!({
+            "operation": "page-cache-reclaim",
+            "value": DropCachesController::PAGE_CACHE_ONLY,
+        });
+        if let Some(subject) = subject
+            && let Some(object) = evidence.as_object_mut()
+        {
+            object.insert("subject".into(), Value::String(subject));
+        }
+        Ok(ExecutionResult {
+            capability: capability.clone(),
+            evidence,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    /// Vacuates the journal to the configured retention bound (spec 012
+    /// FR-002): everything older than `now − keep_days`, epoch microseconds —
+    /// the D-Bus interface's age-based semantics. Irreversible: the evidence
+    /// records the bound that was asked.
+    fn vacuum_journal(&self, action: &AuthorizedAction) -> Result<ExecutionResult, ExecutionError> {
+        let capability = action.capability();
+        let subject = Self::pressure_subject(action);
+
+        let cutoff_usec = Utc::now().timestamp_micros()
+            - i64::from(self.journal_keep_days) * 24 * 60 * 60 * 1_000_000i64;
+        let since_usec = u64::try_from(cutoff_usec.max(0)).unwrap_or(0);
+
+        // Host-wide, like the reclaim: no target to re-resolve, no predicate.
+        let started_at = Utc::now();
+        self.journal
+            .vacuum(since_usec)
+            .map_err(|e| ExecutionError::Failed(e.to_string()))?;
+        let mut evidence = json!({
+            "operation": "journal-vacuum",
+            "keep_days": self.journal_keep_days,
+            "since_usec": since_usec,
+        });
+        if let Some(subject) = subject
+            && let Some(object) = evidence.as_object_mut()
+        {
+            object.insert("subject".into(), Value::String(subject));
+        }
+        Ok(ExecutionResult {
+            capability: capability.clone(),
+            evidence,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
 }
 
 impl Executor for RemediationExecutor {
@@ -401,6 +560,8 @@ impl Executor for RemediationExecutor {
             CapabilityId::CONTAINER_RESTART => self.restart_container(action),
             CapabilityId::HOST_CGROUP_FREEZE => self.set_cgroup_freeze(action, true),
             CapabilityId::HOST_CGROUP_THAW => self.set_cgroup_freeze(action, false),
+            CapabilityId::HOST_MEMORY_RECLAIM => self.reclaim_page_cache(action),
+            CapabilityId::HOST_JOURNAL_VACUUM => self.vacuum_journal(action),
             _ => Err(ExecutionError::Unsupported(capability.clone())),
         }
     }
@@ -415,6 +576,10 @@ impl Executor for RemediationExecutor {
 ///   configured protected container is refused.
 /// - `host.cgroup.freeze`/`thaw`: the path must be traversal-free, and any
 ///   configured protected path is refused.
+/// - `host.memory.reclaim`/`host.journal.vacuum`: deliberately none — the
+///   pressure actions are host-wide with no target to re-resolve (spec 012);
+///   the registry holds no predicate for them, and an absent predicate is
+///   safe.
 pub fn remediation_guardrails(
     protected_containers: &[String],
     protected_cgroups: &[String],
@@ -568,6 +733,34 @@ mod tests {
         }
     }
 
+    /// A journal port whose calls a test can assert on; `fail` turns every
+    /// vacuum into the typed failure the executor must propagate.
+    #[derive(Default)]
+    struct RecordingJournal {
+        calls: Mutex<Vec<u64>>,
+        fail: bool,
+    }
+
+    impl JournalController for RecordingJournal {
+        fn vacuum(&self, since_usec: u64) -> Result<(), RemediationError> {
+            if self.fail {
+                return Err(RemediationError::Failed(
+                    "journal1 Vacuum failed: no such interface".to_string(),
+                ));
+            }
+            self.calls.lock().unwrap().push(since_usec);
+            Ok(())
+        }
+    }
+
+    /// A temp file standing in for the drop_caches sysctl (spec 012: the
+    /// write path is config-injectable; tests never touch the real sysctl).
+    fn temp_drop_caches() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("argus-executor-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("drop_caches")
+    }
+
     fn action_for(capability: &str, arguments: serde_json::Value) -> AuthorizedAction {
         let request = CapabilityRequest::new(
             CapabilityId::new(capability).unwrap(),
@@ -599,6 +792,11 @@ mod tests {
             Arc::new(MockProcesses::default()),
             Arc::new(MockContainers),
             Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path(
+                "/argus-tests/never-written/drop_caches",
+            )),
+            Arc::new(RecordingJournal::default()),
+            7,
             guardrails,
         )
     }
@@ -610,6 +808,8 @@ mod tests {
             CapabilityId::CONTAINER_RESTART,
             CapabilityId::HOST_CGROUP_FREEZE,
             CapabilityId::HOST_CGROUP_THAW,
+            CapabilityId::HOST_MEMORY_RECLAIM,
+            CapabilityId::HOST_JOURNAL_VACUUM,
         ] {
             assert!(RemediationExecutor::handles(
                 &CapabilityId::new(capability).unwrap()
@@ -627,6 +827,9 @@ mod tests {
             Arc::new(processes),
             Arc::new(MockContainers),
             Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path("/argus-tests/unused")),
+            Arc::new(RecordingJournal::default()),
+            7,
             remediation_guardrails(&[], &[]),
         );
         let result = executor
@@ -765,6 +968,176 @@ mod tests {
             ))
             .unwrap_err();
         assert!(matches!(err, ExecutionError::Unsupported(_)), "{err:?}");
+    }
+
+    // --- Spec 012: the pressure actions ---
+
+    #[test]
+    fn reclaim_writes_page_cache_only_to_the_injected_path() {
+        // AC-001's controller half: sync + write `1` to the configured path,
+        // evidence carrying the write and the informational subject.
+        let path = temp_drop_caches();
+        std::fs::write(&path, "stale").unwrap();
+        let journal = RecordingJournal::default();
+        let executor = RemediationExecutor::new(
+            Arc::new(MockProcesses::default()),
+            Arc::new(MockContainers),
+            Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path(
+                path.to_string_lossy().into_owned(),
+            )),
+            Arc::new(journal),
+            7,
+            remediation_guardrails(&[], &[]),
+        );
+
+        let result = executor
+            .execute(&action_for(
+                CapabilityId::HOST_MEMORY_RECLAIM,
+                json!({ "subject": "mem" }),
+            ))
+            .expect("reclaim executes");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            DropCachesController::PAGE_CACHE_ONLY,
+            "the write is `1` — page cache only, never `3`"
+        );
+        assert_eq!(result.evidence["operation"], "page-cache-reclaim");
+        assert_eq!(result.evidence["value"], "1");
+        assert_eq!(result.evidence["subject"], "mem");
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_absent_subject_is_schema_valid_and_accepted() {
+        // The subject is optional-informational (spec 012): `{}` arguments
+        // execute, and the evidence carries no subject key.
+        let path = temp_drop_caches();
+        let executor = RemediationExecutor::new(
+            Arc::new(MockProcesses::default()),
+            Arc::new(MockContainers),
+            Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path(
+                path.to_string_lossy().into_owned(),
+            )),
+            Arc::new(RecordingJournal::default()),
+            7,
+            remediation_guardrails(&[], &[]),
+        );
+
+        let result = executor
+            .execute(&action_for(CapabilityId::HOST_MEMORY_RECLAIM, json!({})))
+            .expect("an absent subject is accepted");
+        assert!(result.evidence.get("subject").is_none());
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_missing_write_path_is_a_typed_failure_never_a_silent_success() {
+        let executor = RemediationExecutor::new(
+            Arc::new(MockProcesses::default()),
+            Arc::new(MockContainers),
+            Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path(
+                "/argus-tests/missing/drop_caches",
+            )),
+            Arc::new(RecordingJournal::default()),
+            7,
+            remediation_guardrails(&[], &[]),
+        );
+
+        let err = executor
+            .execute(&action_for(CapabilityId::HOST_MEMORY_RECLAIM, json!({})))
+            .unwrap_err();
+        assert!(matches!(err, ExecutionError::Failed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn vacuum_reaches_its_controller_with_the_configured_bound() {
+        // AC-002's controller half: Vacuum(since_usec = now − keep_days), the
+        // age-based bound, recorded as evidence.
+        let journal = Arc::new(RecordingJournal::default());
+        let executor = RemediationExecutor::new(
+            Arc::new(MockProcesses::default()),
+            Arc::new(MockContainers),
+            Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path("/argus-tests/unused")),
+            journal.clone(),
+            7,
+            remediation_guardrails(&[], &[]),
+        );
+
+        let before = Utc::now().timestamp_micros() - 7 * 24 * 60 * 60 * 1_000_000i64;
+        let result = executor
+            .execute(&action_for(
+                CapabilityId::HOST_JOURNAL_VACUUM,
+                json!({ "subject": "/" }),
+            ))
+            .expect("vacuum executes");
+        let after = Utc::now().timestamp_micros() - 7 * 24 * 60 * 60 * 1_000_000i64;
+
+        let calls = journal.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly one Vacuum reached the port");
+        let since = calls[0] as i64;
+        assert!(
+            since >= before && since <= after,
+            "the cutoff is now − keep_days: {since} not in [{before}, {after}]"
+        );
+        assert_eq!(result.evidence["operation"], "journal-vacuum");
+        assert_eq!(result.evidence["keep_days"], 7);
+        assert_eq!(
+            result.evidence["since_usec"].as_u64(),
+            Some(calls[0]),
+            "the evidence records the bound that was asked"
+        );
+        assert_eq!(result.evidence["subject"], "/");
+    }
+
+    #[test]
+    fn the_vacuum_bound_is_clamped_to_the_documented_bounds() {
+        for (configured, expected) in [(0, 1), (10_000, 365)] {
+            let journal = RecordingJournal::default();
+            let executor = RemediationExecutor::new(
+                Arc::new(MockProcesses::default()),
+                Arc::new(MockContainers),
+                Arc::new(MockCgroups),
+                Arc::new(DropCachesController::with_path("/argus-tests/unused")),
+                Arc::new(journal),
+                configured,
+                remediation_guardrails(&[], &[]),
+            );
+            let result = executor
+                .execute(&action_for(CapabilityId::HOST_JOURNAL_VACUUM, json!({})))
+                .expect("vacuum executes");
+            assert_eq!(
+                result.evidence["keep_days"], expected,
+                "a typo'd extreme degrades to the nearest valid bound"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_vacuum_is_a_typed_failure() {
+        let executor = RemediationExecutor::new(
+            Arc::new(MockProcesses::default()),
+            Arc::new(MockContainers),
+            Arc::new(MockCgroups),
+            Arc::new(DropCachesController::with_path("/argus-tests/unused")),
+            Arc::new(RecordingJournal {
+                fail: true,
+                ..RecordingJournal::default()
+            }),
+            7,
+            remediation_guardrails(&[], &[]),
+        );
+
+        let err = executor
+            .execute(&action_for(CapabilityId::HOST_JOURNAL_VACUUM, json!({})))
+            .unwrap_err();
+        assert!(matches!(err, ExecutionError::Failed(_)), "{err:?}");
     }
 
     #[test]

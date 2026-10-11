@@ -15,7 +15,8 @@ use argus_domain::{
 use argus_events::LocalEventBus;
 use argus_executor::{
     CgroupController, CompositeExecutor, ContainerController, ExecutionError, ExecutionResult,
-    Executor, MockServiceController, RemediationError, RemediationExecutor, remediation_guardrails,
+    Executor, JournalController, MockServiceController, RemediationError, RemediationExecutor,
+    remediation_guardrails,
 };
 use argus_policy::{
     ApprovalStore, AutopilotGovernor, BootstrapPolicyEvaluator, Criticality, GovernanceDecision,
@@ -75,6 +76,17 @@ impl ContainerController for MockContainers {
 
     fn is_running(&self, _id: &str) -> Result<bool, RemediationError> {
         Ok(true)
+    }
+}
+
+/// The spec-012 journal port, unwired here: these tests never drive a
+/// `host.journal.vacuum` step, and an absent port fails closed.
+struct NoJournal;
+impl JournalController for NoJournal {
+    fn vacuum(&self, _since_usec: u64) -> Result<(), RemediationError> {
+        Err(RemediationError::Unavailable(
+            "no journal controller is wired".to_string(),
+        ))
     }
 }
 
@@ -336,6 +348,11 @@ async fn the_memory_pressure_scenario_protects_the_service_and_adjusts_the_consu
         Arc::new(argus_executor::UnixProcessController::new()),
         Arc::new(MockContainers),
         cgroups.clone(),
+        Arc::new(argus_executor::DropCachesController::with_path(
+            "/argus-tests/unused",
+        )),
+        Arc::new(NoJournal),
+        7,
         remediation_guardrails(&[], &[]),
     );
 
@@ -616,6 +633,11 @@ async fn a_failed_freeze_rolls_back_the_earlier_freeze() {
         Arc::new(argus_executor::UnixProcessController::new()),
         Arc::new(MockContainers),
         cgroups.clone(),
+        Arc::new(argus_executor::DropCachesController::with_path(
+            "/argus-tests/unused",
+        )),
+        Arc::new(NoJournal),
+        7,
         remediation_guardrails(&[], &[]),
     );
 
@@ -670,6 +692,11 @@ async fn an_unfreezable_target_without_rollback_leaves_the_plan_needs_manual() {
         Arc::new(argus_executor::UnixProcessController::new()),
         Arc::new(MockContainers),
         cgroups.clone(),
+        Arc::new(argus_executor::DropCachesController::with_path(
+            "/argus-tests/unused",
+        )),
+        Arc::new(NoJournal),
+        7,
         remediation_guardrails(&[], &[]),
     );
 
