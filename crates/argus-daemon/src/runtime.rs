@@ -57,7 +57,10 @@ pub struct Daemon {
     /// daemon re-observes a unit's active state through `ServiceController` and
     /// records it as evidence.
     service: Arc<dyn ServiceController>,
-    registry: CapabilityRegistry,
+    /// The capability registry, behind a lock so the MCP lifecycle (spec 014)
+    /// can late-register a server's tools beside the bootstrap set: reads take
+    /// short guards or clones; only the MCP registration path writes.
+    registry: std::sync::RwLock<CapabilityRegistry>,
     plugins: Vec<PluginManifest>,
     /// The local kill switch, shared with the cloud supervisor so that changing it
     /// takes effect without a restart.
@@ -122,6 +125,15 @@ pub struct Daemon {
     /// state, the earned rung, and the blast-radius budget. The brain loop
     /// ticks it; `run_plan` consumes its budget gate and effective level.
     autonomy: Arc<crate::autonomy::AutonomyManager>,
+    /// The external MCP wiring (spec 014): the runtime behind the registry's
+    /// `mcp.*` descriptors and the executor's tool port. `None` — zero
+    /// configured servers — is byte-identical to a build without the feature
+    /// (ADR-0044 §5).
+    mcp: Option<Arc<crate::mcp::McpWiring>>,
+    /// The cloud-visible capability surface: replaced in place when the MCP
+    /// lifecycle registers tools, so the published surface stays truthful
+    /// without a restart.
+    capability_surface: crate::cloud::CapabilitySurface,
 }
 
 /// Errors from the capability dispatch boundary.
@@ -286,10 +298,14 @@ async fn load_runbooks(
 }
 
 impl Daemon {
-    /// Initializes the daemon, opening the state store and persisting/loading
-    /// environment identity and an initial health record.
+    /// [`Self::init`]: the persisted state, the bootstrap registry, and —
+    /// spec 014 — the external MCP tools when `[mcp]` servers are configured:
+    /// a startup connect-with-timeout registers their descriptors beside the
+    /// bootstrap set. A failure to reach a server is logged and retried by
+    /// the lifecycle task; it never delays startup beyond the server's own
+    /// timeout and never contributes capabilities.
     pub async fn init(config: DaemonConfig) -> Result<Self, RepositoryError> {
-        Self::init_inner(config, Vec::new()).await
+        Self::init_inner(config, Vec::new(), None).await
     }
 
     /// [`Self::init`] plus `extra` capability descriptors registered after
@@ -301,12 +317,23 @@ impl Daemon {
         config: DaemonConfig,
         extra: Vec<CapabilityDescriptor>,
     ) -> Result<Self, RepositoryError> {
-        Self::init_inner(config, extra).await
+        Self::init_inner(config, extra, None).await
+    }
+
+    /// [`Self::init`] with an injected MCP wiring (spec 014) — the daemon
+    /// tests' seam: a deterministic fake runtime and controller whose tools
+    /// register beside the bootstrap set, no subprocess involved.
+    pub async fn init_with_mcp(
+        config: DaemonConfig,
+        wiring: Arc<crate::mcp::McpWiring>,
+    ) -> Result<Self, RepositoryError> {
+        Self::init_inner(config, Vec::new(), Some(wiring)).await
     }
 
     async fn init_inner(
         config: DaemonConfig,
         extra: Vec<CapabilityDescriptor>,
+        mcp: Option<Arc<crate::mcp::McpWiring>>,
     ) -> Result<Self, RepositoryError> {
         let repository: Arc<dyn DomainRepository> =
             Arc::new(SqliteRepository::open(&config.state_path)?);
@@ -339,6 +366,35 @@ impl Daemon {
                 .expect("extra capability descriptors are unique");
         }
 
+        // Spec 014: the external MCP wiring. A startup connect-with-timeout
+        // registers the configured servers' discovered tools beside the
+        // bootstrap set — the tool's own schema, HighRisk by default, the
+        // operator's per-tool override otherwise (ADR-0044 §1). Zero
+        // configured servers means no wiring, no runtime, byte-identical
+        // behavior (ADR-0044 §5).
+        let mcp = match mcp {
+            Some(wiring) => Some(wiring),
+            None => {
+                let servers = crate::mcp::enabled_servers(&config.mcp);
+                if servers.is_empty() {
+                    None
+                } else {
+                    Some(crate::mcp::McpWiring::production(servers))
+                }
+            }
+        };
+        if let Some(wiring) = &mcp {
+            // One connect per enabled server, concurrently, each bounded by
+            // its own configured timeout; the live sessions stay in the
+            // runtime's slots for the lifecycle task to inherit.
+            wiring.connect_startup(&mut registry).await;
+        }
+        let surface_seed: Vec<CapabilityDescriptor> = registry.list().cloned().collect();
+        let registry = std::sync::RwLock::new(registry);
+        // The surface the cloud supervisor publishes — seeded with everything
+        // registered above, replaceable in place by the MCP lifecycle.
+        let capability_surface = crate::cloud::CapabilitySurface::new(surface_seed);
+
         // The remediation surface (spec 003 M3, FR-016/FR-017): typed
         // controllers behind their ports, guardrails wired at the executor
         // boundary, and the autopilot governor that gates every governed
@@ -355,15 +411,24 @@ impl Daemon {
         let kernel = Arc::new(DropCachesController::with_path(
             config.capabilities.drop_caches_path.clone(),
         ));
-        let remediation_executor = Arc::new(RemediationExecutor::new(
-            processes.clone(),
-            containers.clone(),
-            cgroups.clone(),
-            kernel,
-            Arc::new(DbusJournalController),
-            config.capabilities.journal_keep_days,
-            remediation_guardrails(&[], &[]),
-        ));
+        let remediation_executor = Arc::new({
+            let executor = RemediationExecutor::new(
+                processes.clone(),
+                containers.clone(),
+                cgroups.clone(),
+                kernel,
+                Arc::new(DbusJournalController),
+                config.capabilities.journal_keep_days,
+                remediation_guardrails(&[], &[]),
+            );
+            // Spec 014: the external MCP tools execute through the wiring's
+            // controller port; without a wiring the executor keeps its
+            // fail-closed NoMcpTools stand-in.
+            match &mcp {
+                Some(wiring) => executor.with_mcp_controller(wiring.controller()),
+                None => executor,
+            }
+        });
         let governor = Arc::new(AutopilotGovernor::default());
 
         let buffer_capacity = config.cloud.report_buffer_max_records;
@@ -445,6 +510,8 @@ impl Daemon {
             brain_control,
             ledger,
             autonomy,
+            mcp,
+            capability_surface,
         })
     }
 
@@ -579,15 +646,76 @@ impl Daemon {
 
     pub fn capabilities(&self) -> Value {
         serde_json::json!(
-            self.registry
-                .list()
+            self.capability_descriptors()
+                .iter()
                 .map(|d| d.id().as_str())
                 .collect::<Vec<_>>()
         )
     }
 
-    pub fn registry(&self) -> &CapabilityRegistry {
-        &self.registry
+    /// A snapshot of the capability registry: the registered descriptors at
+    /// this instant. The lock is held only for the clone, so a concurrent
+    /// MCP lifecycle registration never blocks a reader.
+    pub fn capability_descriptors(&self) -> Vec<CapabilityDescriptor> {
+        self.registry
+            .read()
+            .expect("capability registry lock is not poisoned")
+            .list()
+            .cloned()
+            .collect()
+    }
+
+    /// A cloned registry snapshot for a plan run: the loop borrows the
+    /// snapshot across awaits, so it must own its descriptors rather than
+    /// hold the lock.
+    pub fn registry_snapshot(&self) -> CapabilityRegistry {
+        self.registry
+            .read()
+            .expect("capability registry lock is not poisoned")
+            .clone()
+    }
+
+    /// Late-registers MCP descriptors (spec 014 FR-004): the lifecycle task's
+    /// reconnect path calls this with a re-discovered tool set. Already-
+    /// registered ids are left untouched — a re-advertised tool keeps its
+    /// ladder and audit state by capability id — and only genuinely new ids
+    /// are adopted. Returns how many were new.
+    pub fn register_mcp_descriptors(&self, descriptors: Vec<CapabilityDescriptor>) -> usize {
+        let mut registry = self
+            .registry
+            .write()
+            .expect("capability registry lock is not poisoned");
+        let mut fresh = 0;
+        for descriptor in descriptors {
+            if registry.contains(descriptor.id()) {
+                continue;
+            }
+            if registry.register(descriptor).is_ok() {
+                fresh += 1;
+            }
+        }
+        fresh
+    }
+
+    /// The external MCP wiring, when `[mcp]` servers are configured; the
+    /// lifecycle task hangs off it.
+    pub fn mcp(&self) -> Option<Arc<crate::mcp::McpWiring>> {
+        self.mcp.clone()
+    }
+
+    /// The cloud-visible capability surface handle: the supervisor publishes
+    /// from it, and the MCP lifecycle replaces it on late registration.
+    pub fn capability_surface(&self) -> crate::cloud::CapabilitySurface {
+        self.capability_surface.clone()
+    }
+
+    /// Publishes the current registry to the shared capability surface and
+    /// marks it dirty, so a running cloud session republishes on its next
+    /// tick (spec 014: late-registered tools reach the cloud without a
+    /// restart).
+    pub fn refresh_capability_surface(&self) {
+        self.capability_surface
+            .replace(self.capability_descriptors());
     }
 
     /// The executor the cloud channel routes invocations to.
@@ -692,7 +820,15 @@ impl Daemon {
         &self,
         request: CapabilityRequest,
     ) -> Result<Value, DispatchError> {
-        authorize_and_execute_with(&self.registry, &self.policy, &self.executor, request)
+        // The lock is held only for the clone: authorization resolves against
+        // an owned snapshot, so a slow effect on this path (a reclaim, an MCP
+        // tool call) never blocks the MCP lifecycle's registration writes.
+        authorize_and_execute_with(
+            &self.registry_snapshot(),
+            &self.policy,
+            &self.executor,
+            request,
+        )
     }
 
     /// The autopilot governor gating governed adjustments (FR-017).
@@ -718,10 +854,11 @@ impl Daemon {
         events: &dyn EventBus,
     ) -> RunOutcome {
         let policy = BootstrapPolicyEvaluator::with_local_remediation();
+        let registry = self.registry_snapshot();
         let ports = self.remediation_ports();
         let outcome = crate::control::authorize_and_run_with_ports(
             plan,
-            &self.registry,
+            &registry,
             &policy,
             self.service.as_ref(),
             events,
@@ -832,11 +969,12 @@ impl Daemon {
         events: &dyn EventBus,
     ) -> ResumeOutcome {
         let policy = BootstrapPolicyEvaluator::with_local_remediation();
+        let registry = self.registry_snapshot();
         let ports = self.remediation_ports();
         let outcome = crate::control::resume_and_run_with_ports(
             pending,
             &self.approvals,
-            &self.registry,
+            &registry,
             &policy,
             self.service.as_ref(),
             events,
@@ -883,7 +1021,7 @@ impl Daemon {
             return;
         }
         if report.status == PlanStatus::Completed {
-            let descriptors: Vec<CapabilityDescriptor> = self.registry.list().cloned().collect();
+            let descriptors: Vec<CapabilityDescriptor> = self.capability_descriptors();
             let policy = argus_policy::BootstrapPolicyEvaluator::with_local_remediation();
             self.runbooks
                 .on_attributed_plan_validated(name, &descriptors, &policy)
@@ -1097,7 +1235,7 @@ impl Daemon {
             // situation resolved; the procedure path dedups identically.
             return Ok(None);
         }
-        let descriptors: Vec<CapabilityDescriptor> = self.registry.list().cloned().collect();
+        let descriptors: Vec<CapabilityDescriptor> = self.capability_descriptors();
         match crate::brain::procedure_plan(runbook, situation, &descriptors) {
             Some(plan) => Ok(Some((plan, dedup_key.to_string()))),
             None => {

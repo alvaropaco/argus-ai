@@ -9,6 +9,7 @@ mod bootstrap;
 mod cluster;
 mod executor;
 mod guardrail;
+mod mcp;
 mod privileged;
 mod provider;
 mod remediation;
@@ -25,6 +26,7 @@ pub use guardrail::{
     AllowedTargets, Guardrail, GuardrailRegistry, GuardrailViolation, NeverTargetArgusd,
     ValidServiceUnit, pid_above_one,
 };
+pub use mcp::{McpToolController, NoMcpTools, is_mcp_capability};
 pub use privileged::{CompositeExecutor, PrivilegedExecutor};
 pub use provider::CapabilityProvider;
 pub use remediation::{

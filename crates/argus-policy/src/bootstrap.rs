@@ -13,6 +13,14 @@ use crate::PolicyEvaluator;
 /// operations) by default.
 pub struct BootstrapPolicyEvaluator {
     allowed: HashSet<CapabilityId>,
+    /// Capability namespaces the local remediation loop may permit even though
+    /// they are not enumerated: the external MCP tools (spec 014) register
+    /// dynamically, so the local policy admits the `mcp.` PREFIX — never a
+    /// specific tool — and the descriptor's own approval flag and the
+    /// autonomy matrix still gate every call. Plain [`Self::new`] (the cloud
+    /// channel's policy) holds no prefix, so a cloud-issued `mcp.*` request
+    /// is denied outright by the host-changing rule.
+    allowed_prefixes: Vec<&'static str>,
 }
 
 impl BootstrapPolicyEvaluator {
@@ -30,7 +38,10 @@ impl BootstrapPolicyEvaluator {
         .map(|id| CapabilityId::new(id).expect("capability ids are valid"))
         .collect();
 
-        Self { allowed }
+        Self {
+            allowed,
+            allowed_prefixes: Vec::new(),
+        }
     }
 
     /// A policy that also permits the spec-003 M3 remediation capabilities.
@@ -43,6 +54,13 @@ impl BootstrapPolicyEvaluator {
     /// granted implicitly.
     pub fn with_local_remediation() -> Self {
         let mut evaluator = Self::new();
+        // Spec 014: the external MCP tools. The prefix is admitted on the
+        // LOCAL remediation path only; the descriptor's approval flag (HighRisk
+        // by default → approval required) and the autonomy matrix gate every
+        // call exactly as for native capabilities. The cloud channel's plain
+        // `new()` holds no prefix — the host-changing rule denies `mcp.*`
+        // over the control channel (ADR-0044 §3).
+        evaluator.allowed_prefixes.push("mcp.");
         for id in [
             CapabilityId::HOST_PROCESS_SIGNAL,
             CapabilityId::CONTAINER_RESTART,
@@ -95,7 +113,13 @@ impl PolicyEvaluator for BootstrapPolicyEvaluator {
     fn evaluate(&self, request: &AuthorizationRequest) -> PolicyDecision {
         let capability = &request.capability_request.capability;
 
-        if !self.allowed.contains(capability) {
+        let locally_permitted = self.allowed.contains(capability)
+            || self
+                .allowed_prefixes
+                .iter()
+                .any(|prefix| capability.as_str().starts_with(prefix));
+
+        if !locally_permitted {
             return PolicyDecision::deny(
                 "bootstrap.read-only",
                 format!(
@@ -226,6 +250,41 @@ mod tests {
         let policy = BootstrapPolicyEvaluator::new();
         let decision = policy.evaluate(&request_for("container.restart", RiskClass::Controlled));
         assert_eq!(decision.outcome, PolicyOutcome::Deny);
+    }
+
+    #[test]
+    fn external_mcp_tools_are_local_only() {
+        // Spec 014, ADR-0044 §3: the `mcp.*` capabilities cross the ordinary
+        // boundary on the LOCAL remediation path — the descriptor's approval
+        // flag and the autonomy matrix still gate them — and the cloud
+        // channel's plain bootstrap policy denies them outright by the
+        // host-changing rule.
+        let local = BootstrapPolicyEvaluator::with_local_remediation();
+
+        // A HighRisk-by-default tool declares approval → RequireApproval.
+        let mut request = request_for("mcp.metrics.query", RiskClass::HighRisk);
+        request = request.requiring_approval(true);
+        assert_eq!(
+            local.evaluate(&request).outcome,
+            PolicyOutcome::RequireApproval,
+            "an unknown-provenance tool is never allowed outright"
+        );
+
+        // An operator-overridden tool (no approval flag) is allowed on the
+        // local path, where the matrix governs it.
+        let request = request_for("mcp.my-server.get_weather", RiskClass::Controlled);
+        assert_eq!(local.evaluate(&request).outcome, PolicyOutcome::Allow);
+
+        // The cloud channel never permits any of it.
+        let cloud = BootstrapPolicyEvaluator::new();
+        for path in ["mcp.metrics.query", "mcp.my-server.get_weather"] {
+            let decision = cloud.evaluate(&request_for(path, RiskClass::HighRisk));
+            assert_eq!(
+                decision.outcome,
+                PolicyOutcome::Deny,
+                "the cloud channel never executes '{path}'"
+            );
+        }
     }
 
     #[test]

@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use crate::action::{AuthorizedAction, ExecutionError, ExecutionResult};
 use crate::executor::Executor;
 use crate::guardrail::GuardrailRegistry;
+use crate::mcp::{McpToolController, NoMcpTools, is_mcp_capability};
 
 /// The signals a remediation plan may deliver. The set is closed: anything
 /// outside it is refused before it becomes a syscall argument.
@@ -321,13 +322,20 @@ pub trait JournalController: Send + Sync {
 /// Executes the typed remediation capabilities through their controllers.
 ///
 /// Routing is by capability family, and every family's guardrails run here, at
-/// the execution boundary, before the effect (ADR-0028 §1-§2).
+/// the execution boundary, before the effect (ADR-0028 §1-§2). The external
+/// MCP surface (spec 014) rides the same executor: `mcp.<server>.<tool>`
+/// capabilities route through the [`McpToolController`] port, whose
+/// implementation returns the already-bounded evidence.
 pub struct RemediationExecutor {
     processes: Arc<dyn ProcessController>,
     containers: Arc<dyn ContainerController>,
     cgroups: Arc<dyn CgroupController>,
     kernel: Arc<dyn KernelWriteController>,
     journal: Arc<dyn JournalController>,
+    /// The external MCP tool port (spec 014). Defaults to the fail-closed
+    /// [`NoMcpTools`] stand-in; the daemon wires the real runtime with
+    /// [`Self::with_mcp_controller`] when `[mcp]` servers are configured.
+    mcp: Arc<dyn McpToolController>,
     /// The journal vacuum retention bound in days; the vacuum removes
     /// everything older than `now − keep_days`. Clamped to 1–365 (spec 012).
     journal_keep_days: u32,
@@ -357,12 +365,25 @@ impl RemediationExecutor {
             cgroups,
             kernel,
             journal,
+            mcp: Arc::new(NoMcpTools),
             journal_keep_days: journal_keep_days.clamp(MIN_KEEP_DAYS, MAX_KEEP_DAYS),
             guardrails,
         }
     }
 
+    /// Wires the external MCP tool port (spec 014). Called by the daemon when
+    /// `[mcp]` servers are configured; absent wiring every MCP effect fails
+    /// typed with `Unavailable` (the [`NoMcpTools`] stand-in).
+    pub fn with_mcp_controller(mut self, controller: Arc<dyn McpToolController>) -> Self {
+        self.mcp = controller;
+        self
+    }
+
     /// Whether this executor performs the named capability.
+    ///
+    /// The remediation families plus the external MCP namespace (spec 014):
+    /// every `mcp.`-prefixed capability routes through the
+    /// [`McpToolController`] port.
     pub fn handles(capability: &CapabilityId) -> bool {
         matches!(
             capability.as_str(),
@@ -372,7 +393,7 @@ impl RemediationExecutor {
                 | CapabilityId::HOST_CGROUP_THAW
                 | CapabilityId::HOST_MEMORY_RECLAIM
                 | CapabilityId::HOST_JOURNAL_VACUUM
-        )
+        ) || is_mcp_capability(capability)
     }
 
     fn signal_pid(&self, action: &AuthorizedAction) -> Result<ExecutionResult, ExecutionError> {
@@ -550,6 +571,28 @@ impl RemediationExecutor {
             finished_at: Utc::now(),
         })
     }
+    /// Invokes the external MCP tool behind an `mcp.<server>.<tool>`
+    /// capability (spec 014 FR-003). No target to re-resolve and no guardrail
+    /// predicate; the arguments' schema gate lives in the controller — this
+    /// executor holds no registry — where the runtime re-validates the step's
+    /// arguments against the adopted descriptor's input schema and returns
+    /// the bounded evidence. A disconnected, timed-out, tool-reported, or
+    /// schema-violating failure is a typed error — the step terminates
+    /// `Failed`, fail-closed.
+    fn call_mcp_tool(&self, action: &AuthorizedAction) -> Result<ExecutionResult, ExecutionError> {
+        let capability = action.capability();
+        let started_at = Utc::now();
+        let evidence = self
+            .mcp
+            .call(capability, &action.request().arguments)
+            .map_err(|e| ExecutionError::Failed(e.to_string()))?;
+        Ok(ExecutionResult {
+            capability: capability.clone(),
+            evidence,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
 }
 
 impl Executor for RemediationExecutor {
@@ -562,6 +605,7 @@ impl Executor for RemediationExecutor {
             CapabilityId::HOST_CGROUP_THAW => self.set_cgroup_freeze(action, false),
             CapabilityId::HOST_MEMORY_RECLAIM => self.reclaim_page_cache(action),
             CapabilityId::HOST_JOURNAL_VACUUM => self.vacuum_journal(action),
+            id if id.starts_with("mcp.") => self.call_mcp_tool(action),
             _ => Err(ExecutionError::Unsupported(capability.clone())),
         }
     }
@@ -1156,5 +1200,90 @@ mod tests {
         let controller = UnixProcessController::new();
         // Probing with signal 0: a pid that cannot exist reports ESRCH.
         assert!(!controller.exists(i32::MAX).unwrap());
+    }
+
+    // --- Spec 014: the external MCP tool surface ---
+
+    /// An MCP port whose calls a test can assert on; `fail` turns every call
+    /// into the typed `Unavailable` a disconnected server produces.
+    struct MockMcpTools {
+        calls: Mutex<Vec<(String, Value)>>,
+        fail: bool,
+    }
+
+    impl McpToolController for MockMcpTools {
+        fn call(
+            &self,
+            capability: &CapabilityId,
+            arguments: &Value,
+        ) -> Result<Value, RemediationError> {
+            if self.fail {
+                return Err(RemediationError::Unavailable(
+                    "mcp server 'metrics' is not connected".to_string(),
+                ));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((capability.as_str().to_string(), arguments.clone()));
+            Ok(json!({ "output": "echo" }))
+        }
+    }
+
+    #[test]
+    fn the_executor_handles_every_mcp_capability_and_nothing_else() {
+        assert!(RemediationExecutor::handles(
+            &CapabilityId::new("mcp.metrics.query").unwrap()
+        ));
+        assert!(RemediationExecutor::handles(
+            &CapabilityId::new("mcp.my-server.get_weather").unwrap()
+        ));
+        assert!(!RemediationExecutor::handles(
+            &CapabilityId::new(CapabilityId::HOST_SERVICE_RESTART).unwrap()
+        ));
+    }
+
+    #[test]
+    fn an_mcp_call_reaches_its_controller_and_lands_as_evidence() {
+        let tools = Arc::new(MockMcpTools {
+            calls: Mutex::new(Vec::new()),
+            fail: false,
+        });
+        let executor = executor(&[], &[]).with_mcp_controller(tools.clone());
+
+        let result = executor
+            .execute(&action_for("mcp.metrics.query", json!({ "query": "up" })))
+            .expect("the mcp call executes");
+
+        let calls = tools.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "exactly one tool call reached the port");
+        assert_eq!(calls[0].0, "mcp.metrics.query");
+        assert_eq!(calls[0].1["query"], "up");
+        assert_eq!(result.evidence["output"], "echo");
+    }
+
+    #[test]
+    fn a_disconnected_server_is_a_typed_failure_never_a_silent_success() {
+        let tools = Arc::new(MockMcpTools {
+            calls: Mutex::new(Vec::new()),
+            fail: true,
+        });
+        let executor = executor(&[], &[]).with_mcp_controller(tools);
+
+        let err = executor
+            .execute(&action_for("mcp.metrics.query", json!({})))
+            .unwrap_err();
+        assert!(matches!(err, ExecutionError::Failed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn without_a_wired_runtime_mcp_effects_fail_closed() {
+        // The default controller is the refusing stand-in: no test or caller
+        // can accidentally execute an external tool it never wired.
+        let executor = executor(&[], &[]);
+        let err = executor
+            .execute(&action_for("mcp.metrics.query", json!({})))
+            .unwrap_err();
+        assert!(matches!(err, ExecutionError::Failed(_)), "{err:?}");
     }
 }

@@ -239,7 +239,10 @@ fn escalation_permits(
 
 /// Risk class for an executable capability. Service actions are low-risk and
 /// reversible; anything unknown is treated as `Controlled` and therefore never
-/// auto-executed.
+/// auto-executed. The external MCP tools (spec 014) are HighRisk by default —
+/// unknown provenance never auto-executes at any level (ADR-0044 §1); the
+/// operator's per-tool config override lives on the registered descriptor and
+/// is what `run_plan` consults for `mcp.` steps instead of this default.
 fn risk_for(capability: &CapabilityId) -> RiskClass {
     match capability.as_str() {
         CapabilityId::HOST_SERVICE_RESTART
@@ -262,8 +265,32 @@ fn risk_for(capability: &CapabilityId) -> RiskClass {
         | CapabilityId::HOST_MEMORY_RECLAIM
         | CapabilityId::HOST_JOURNAL_VACUUM => RiskClass::Controlled,
         CapabilityId::K8S_NODE_DRAIN | CapabilityId::K8S_WORKLOAD_RESCHEDULE => RiskClass::HighRisk,
+        // Spec 014: the fail-closed default for an external tool.
+        id if id.starts_with("mcp.") => RiskClass::HighRisk,
         _ => RiskClass::Controlled,
     }
+}
+
+/// Whether the action names one of the external MCP tools (spec 014). Their
+/// risk is what the registered descriptor carries — HighRisk by default, the
+/// operator's config override otherwise — so the loop reads the descriptor
+/// instead of the static table.
+fn is_mcp_capability(capability: &CapabilityId) -> bool {
+    argus_executor::is_mcp_capability(capability)
+}
+
+/// The risk class the plan loop governs a step by: the static family table,
+/// except the external MCP tools, whose descriptors are the operator's own
+/// trust decisions (spec 014 AC-002's override semantics). An unregistered
+/// `mcp.` id fails closed to HighRisk.
+fn governed_risk(capability: &CapabilityId, registry: &CapabilityRegistry) -> RiskClass {
+    if is_mcp_capability(capability) {
+        return registry
+            .get(capability)
+            .map(|descriptor| descriptor.risk_class())
+            .unwrap_or_else(|| risk_for(capability));
+    }
+    risk_for(capability)
 }
 
 /// Whether the action names one of the Kubernetes self-healing capabilities.
@@ -644,7 +671,7 @@ async fn run_plan(
             continue;
         }
         let action = &step.action;
-        let risk = risk_for(&action.capability);
+        let risk = governed_risk(&action.capability, registry);
 
         // The autopilot gate: governed families pass the governor first, and a
         // refusal is final for the step regardless of what policy would say.
@@ -1445,6 +1472,24 @@ mod tests {
     use argus_events::LocalEventBus;
     use argus_executor::MockServiceController;
     use argus_policy::{ApprovalStore, BootstrapPolicyEvaluator};
+
+    #[test]
+    fn external_mcp_tools_are_high_risk_by_default() {
+        // Spec 014, ADR-0044 §1: unknown provenance never auto-executes at
+        // any autonomy level. The fail-closed default; the operator's config
+        // override lives on the registered descriptor and is what
+        // `governed_risk` consults for `mcp.` steps instead.
+        let id = CapabilityId::new("mcp.metrics.query").unwrap();
+        assert!(matches!(risk_for(&id), RiskClass::HighRisk));
+        assert!(matches!(
+            governed_risk(&id, &CapabilityRegistry::new()),
+            RiskClass::HighRisk
+        ));
+        assert!(!may_execute_without_approval(
+            AutonomyMode::L4Autonomous,
+            RiskClass::HighRisk
+        ));
+    }
 
     fn restart_action(unit: &str) -> Action {
         Action {

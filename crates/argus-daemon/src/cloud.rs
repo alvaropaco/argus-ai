@@ -574,12 +574,11 @@ pub struct SupervisorDeps {
     /// periodic telemetry report. Shared so the collection step reads a live
     /// snapshot rather than a value captured at startup.
     pub metrics: Arc<RuntimeMetrics>,
-    /// The capability surface to publish on connect (T062).
-    ///
-    /// A snapshot taken at startup: the bootstrap registers no plugins, so the
-    /// surface cannot change while running. Live change detection arrives with
-    /// the plugin manager.
-    pub capabilities: Arc<Vec<CapabilityDescriptor>>,
+    /// The capability surface to publish on connect (T062) — and to
+    /// republish mid-session when it changes (spec 014): the MCP lifecycle's
+    /// late registrations replace the surface and mark it dirty, and the
+    /// session's tick publishes the fresh set without a restart.
+    pub capabilities: CapabilitySurface,
     /// Where a cloud-managed configuration is applied (T069).
     pub managed_settings: Arc<ManagedSettingsStore>,
     /// The installation identity a cloud-issued command is recorded against.
@@ -654,6 +653,65 @@ const SESSION_TICK: Duration = Duration::from_secs(1);
 /// start, so an absent, unreachable, or misconfigured cloud delays nothing
 /// (FR-013). Every failure path either backs off or stops deliberately; none of
 /// them blocks local operation.
+/// The capability surface the cloud sees, refreshable in place.
+///
+/// Readers clone the current snapshot under a short guard; the MCP lifecycle
+/// (spec 014) replaces it when a server (re)registers tools, which also marks
+/// the surface dirty so the running session republishes it on its next tick.
+#[derive(Clone, Default)]
+pub struct CapabilitySurface {
+    inner: Arc<CapabilitySurfaceInner>,
+}
+
+#[derive(Default)]
+struct CapabilitySurfaceInner {
+    current: std::sync::RwLock<Arc<Vec<CapabilityDescriptor>>>,
+    dirty: std::sync::atomic::AtomicBool,
+}
+
+impl CapabilitySurface {
+    /// A surface seeded with the startup registrations — the seed is not a
+    /// change, so the first session publishes it through the ordinary
+    /// session-start path, not a spurious tick republish.
+    pub fn new(descriptors: Vec<CapabilityDescriptor>) -> Self {
+        let surface = Self::default();
+        *surface
+            .inner
+            .current
+            .write()
+            .expect("capability surface lock is not poisoned") = Arc::new(descriptors);
+        surface
+    }
+
+    /// The current snapshot; the guard is held only for the clone.
+    pub fn get(&self) -> Arc<Vec<CapabilityDescriptor>> {
+        self.inner
+            .current
+            .read()
+            .expect("capability surface lock is not poisoned")
+            .clone()
+    }
+
+    /// Replaces the surface and marks it changed.
+    pub fn replace(&self, descriptors: Vec<CapabilityDescriptor>) {
+        *self
+            .inner
+            .current
+            .write()
+            .expect("capability surface lock is not poisoned") = Arc::new(descriptors);
+        self.inner
+            .dirty
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the surface changed since the last take; consumes the flag.
+    fn take_dirty(&self) -> bool {
+        self.inner
+            .dirty
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 pub async fn supervise(deps: SupervisorDeps, mut stop: watch::Receiver<bool>) {
     let base = Duration::from_secs(deps.config.reconnect_base_seconds.max(1));
     let max = Duration::from_secs(deps.config.reconnect_max_seconds.max(1));
@@ -1151,7 +1209,7 @@ async fn apply_runbook_delivery(
             version_id,
             payload.version_number,
             &episodes,
-            deps.capabilities.as_slice(),
+            deps.capabilities.get().as_slice(),
         )
         .await
     {
@@ -1276,20 +1334,24 @@ async fn publish_capabilities(
     transport: &dyn Transport,
     published_this_session: bool,
 ) -> Result<(), TransportError> {
-    let descriptors = deps.capabilities.as_ref();
+    let descriptors = deps.capabilities.get();
 
     if published_this_session
         && let Ok(Some(previous)) = deps.repository.get_capability_publication().await
-        && previous.is_noop_for(descriptors)
+        && previous.is_noop_for(descriptors.as_slice())
     {
         return Ok(());
     }
 
-    let publication =
-        CapabilityPublication::new(CAPABILITY_SCHEMA_VERSION, descriptors.clone(), Utc::now());
+    let publication = CapabilityPublication::new(
+        CAPABILITY_SCHEMA_VERSION,
+        descriptors.as_ref().clone(),
+        Utc::now(),
+    );
 
-    let payload = capability_mapping::publication(&publication.version, descriptors, |_| false)
-        .map_err(|error| TransportError::Send(error.to_string()))?;
+    let payload =
+        capability_mapping::publication(&publication.version, descriptors.as_slice(), |_| false)
+            .map_err(|error| TransportError::Send(error.to_string()))?;
 
     let value =
         serde_json::to_value(&payload).map_err(|error| TransportError::Send(error.to_string()))?;
@@ -1365,8 +1427,8 @@ async fn handle_command_invoke(deps: &SupervisorDeps, transport: &dyn Transport,
     }
 
     // Check 2: the capability must be part of the published surface.
-    let Some(descriptor) = deps
-        .capabilities
+    let surface = deps.capabilities.get();
+    let Some(descriptor) = surface
         .iter()
         .find(|candidate| candidate.id().as_str() == payload.capability_id)
     else {
@@ -1851,6 +1913,17 @@ async fn run_session(
 
                 collect_bus_events(deps, event_rx).await;
 
+                // Spec 014: the MCP lifecycle's late registrations mark the
+                // capability surface dirty; the tick republishes it, so the
+                // cloud learns new tools without a restart. The content-hash
+                // no-op check inside keeps an unchanged surface silent.
+                if deps.capabilities.take_dirty()
+                    && let Err(error) = publish_capabilities(deps, transport, true).await
+                {
+                    requeue_in_flight(deps, &mut in_flight).await;
+                    return ConnectionOutcome::TransportFailed(error.to_string());
+                }
+
                 // Ledger flush (spec 007 FR-005/FR-006): every tick, so an
                 // action reaches the cloud within ~1 s of occurring.
                 if !deps.ledger.buffer().lock().await.is_empty()
@@ -1931,7 +2004,7 @@ async fn collect_telemetry_and_health(deps: &SupervisorDeps, now: DateTime<Utc>)
             warning: snapshot.warning,
             error: snapshot.error,
         },
-        capability_count: deps.capabilities.len(),
+        capability_count: deps.capabilities.get().len(),
         plugin_count: 0,
         connectivity,
         buffered_reports: buffer.count,
@@ -2977,7 +3050,7 @@ mod tests {
             events: Arc::new(LocalEventBus::new(16)),
             queue: Arc::new(Mutex::new(ReportQueue::new(256))),
             metrics: Arc::new(RuntimeMetrics::new()),
-            capabilities: Arc::new(Vec::new()),
+            capabilities: CapabilitySurface::new(Vec::new()),
             sentinel: Arc::new(NullSentinel),
             decisions: Arc::new(NullDecisions),
             runbooks,
@@ -3396,7 +3469,7 @@ mod tests {
 
             (
                 SupervisorDeps {
-                    capabilities: Arc::new(capabilities),
+                    capabilities: CapabilitySurface::new(capabilities),
                     executor,
                     ..deps
                 },

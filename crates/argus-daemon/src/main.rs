@@ -63,6 +63,12 @@ async fn main() -> Result<()> {
 
     let _cloud_stop = spawn_cloud_supervisor(&daemon, &config, Arc::clone(&events));
     spawn_observation_loop(&daemon, &events);
+    // Spec 014: one lifecycle task per configured MCP server (probe,
+    // disconnect, reconnect with backoff), late-registering re-discovered
+    // tools into the daemon's registry. Absent servers spawn nothing.
+    if let Some(mcp) = daemon.mcp() {
+        mcp.spawn_lifecycle(Arc::clone(&daemon));
+    }
     argus_daemon::brain::spawn(
         Arc::clone(&daemon),
         config.brain.clone(),
@@ -107,7 +113,7 @@ fn spawn_cloud_supervisor(
             config.cloud.report_buffer_max_records,
         ))),
         metrics: Arc::new(RuntimeMetrics::new()),
-        capabilities: Arc::new(daemon.registry().list().cloned().collect()),
+        capabilities: daemon.capability_surface(),
         managed_settings: Arc::new(daemon.managed_settings().clone()),
         sentinel,
         decisions,

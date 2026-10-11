@@ -28,12 +28,15 @@ members = [
     "crates/argus-memory",
     "crates/argus-runbooks",
     "crates/argus-reporting",
+    "crates/argus-mcp",
 ]
 
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+# Spec 014: rmcp 3.5 (the official MCP Rust SDK) declares MSRV 1.88, which
+# the locked `argus-mcp` dependency therefore imposes on the whole workspace.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/alvaropaco/argus-ai"
 
@@ -80,6 +83,8 @@ argus-kubernetes = { version = "0.2.0", path = "crates/argus-kubernetes" }
 argus-memory = { version = "0.2.0", path = "crates/argus-memory" }
 argus-runbooks = { version = "0.2.0", path = "crates/argus-runbooks" }
 argus-reporting = { version = "0.2.0", path = "crates/argus-reporting" }
+argus-mcp = { version = "0.2.0", path = "crates/argus-mcp" }
+rmcp = "3.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

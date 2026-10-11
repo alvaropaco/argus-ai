@@ -268,6 +268,30 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_ids_are_valid_capability_ids() {
+        // Spec 014, ADR-0044 §2: the deterministic `mcp.<server>.<tool>`
+        // namespace. Server and tool names may carry `-`/`_` after a
+        // lowercase-led segment; the namespacing is what keeps external ids
+        // collision-free by construction.
+        for path in [
+            "mcp.metrics.query",
+            "mcp.my-server.get_weather",
+            "mcp.srv.echo-2",
+        ] {
+            assert!(
+                CapabilityId::new(path).is_ok(),
+                "{path} must be a valid capability id"
+            );
+        }
+        for path in ["mcp.-server.tool", "mcp._srv.tool", "mcp.srv..tool", "mcp"] {
+            assert!(
+                CapabilityId::new(path).is_err(),
+                "{path} must be rejected by the grammar"
+            );
+        }
+    }
+
+    #[test]
     fn capability_id_rejects_invalid_paths_on_deserialize() {
         for path in ["host", "Host.status", "host."] {
             let json = serde_json::to_string(path).unwrap();

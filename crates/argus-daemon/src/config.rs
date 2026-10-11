@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use argus_cloud::config::{CloudConfig, CloudConfigError};
-use argus_domain::EffectiveSource;
+use argus_domain::{CapabilityId, EffectiveSource};
 use argus_observability::LogFormat;
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +55,10 @@ pub struct DaemonConfig {
     /// retention.
     #[serde(default)]
     pub capabilities: CapabilitiesConfig,
+    /// The external MCP servers (spec 014 FR-001). Absent or empty means no
+    /// runtime, no capabilities — byte-identical behavior (ADR-0044 §5).
+    #[serde(default)]
+    pub mcp: McpConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
 }
@@ -76,6 +80,7 @@ impl Default for DaemonConfig {
             autonomy: AutonomyConfig::default(),
             situations: SituationsConfig::default(),
             capabilities: CapabilitiesConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -117,6 +122,8 @@ pub struct ConfigFile {
     pub situations: Option<SituationsConfig>,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesConfig>,
+    #[serde(default)]
+    pub mcp: Option<McpConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +142,9 @@ pub enum ConfigError {
 
     #[error("invalid cloud configuration: {0}")]
     Cloud(#[from] CloudConfigError),
+
+    #[error("invalid mcp configuration: {0}")]
+    Mcp(String),
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +418,182 @@ impl<'de> Deserialize<'de> for CapabilitiesConfig {
     }
 }
 
+/// External MCP server settings (`[mcp]` in argus.toml, spec 014 FR-001).
+///
+/// Deny-by-default and config-driven: no server, no tool, no call exists
+/// unless the operator declared it here. An absent or empty `[mcp]` section
+/// means no runtime and no capabilities — byte-identical behavior
+/// (ADR-0044 §5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct McpConfig {
+    /// The configured servers. An unlisted or `enabled = false` server
+    /// contributes nothing.
+    pub servers: Vec<McpServerConfig>,
+}
+
+impl<'de> Deserialize<'de> for McpConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct McpWire {
+            #[serde(default)]
+            servers: Vec<McpServerConfig>,
+        }
+        Ok(Self {
+            servers: McpWire::deserialize(deserializer)?.servers,
+        })
+    }
+}
+
+impl McpConfig {
+    /// The configured server that is actually enabled.
+    pub fn enabled_servers(&self) -> impl Iterator<Item = &McpServerConfig> {
+        self.servers.iter().filter(|server| server.enabled)
+    }
+
+    /// Fails closed on a declaration the runtime could not honor: duplicate
+    /// or malformed names, a transport missing its endpoint, or an override
+    /// naming an unrepresentable tool. Called at load, so a typo fails the
+    /// startup loudly instead of silently contributing nothing.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut seen = std::collections::HashSet::new();
+        for server in &self.servers {
+            if !is_capability_segment(&server.name) {
+                return Err(ConfigError::Mcp(format!(
+                    "server name '{}' must be a lowercase capability-id segment without dots",
+                    server.name
+                )));
+            }
+            if !seen.insert(server.name.clone()) {
+                return Err(ConfigError::Mcp(format!(
+                    "duplicate mcp server name '{}'",
+                    server.name
+                )));
+            }
+            match &server.transport {
+                McpTransportConfig::Stdio { command, .. } => {
+                    if command.trim().is_empty() {
+                        return Err(ConfigError::Mcp(format!(
+                            "server '{}' declares an empty stdio command",
+                            server.name
+                        )));
+                    }
+                }
+                McpTransportConfig::Http { url } => {
+                    if !url.starts_with("http://") && !url.starts_with("https://") {
+                        return Err(ConfigError::Mcp(format!(
+                            "server '{}' http url must start with http:// or https://",
+                            server.name
+                        )));
+                    }
+                }
+            }
+            if let Some(tools) = &server.tools {
+                for tool in tools {
+                    if !is_capability_segment(tool) {
+                        return Err(ConfigError::Mcp(format!(
+                            "server '{}' allowlists '{}', which is not a valid tool segment",
+                            server.name, tool
+                        )));
+                    }
+                }
+            }
+            for tool in &server.overrides {
+                if !is_capability_segment(&tool.name) {
+                    return Err(ConfigError::Mcp(format!(
+                        "server '{}' overrides '{}', which is not a valid tool segment",
+                        server.name, tool.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `name` can serve as ONE segment of `mcp.<server>.<tool>`: the
+/// domain's segment grammar, with dots refused — a dotted name would make the
+/// namespacing ambiguous and break its no-collision-by-construction property
+/// (ADR-0044 §2).
+fn is_capability_segment(name: &str) -> bool {
+    !name.contains('.') && CapabilityId::new(&format!("mcp.{name}.probe")).is_ok()
+}
+
+/// One configured MCP server (`[[mcp.servers]]`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct McpServerConfig {
+    /// The namespace segment: its tools register as `mcp.<name>.<tool>`.
+    pub name: String,
+    pub transport: McpTransportConfig,
+    /// Explicitly off; `true` connects the server at startup. The default is
+    /// the safe one (spec 014 FR-001).
+    #[serde(default)]
+    pub enabled: bool,
+    /// The per-call and connect timeout in seconds (default 30, clamped
+    /// 5–300).
+    pub timeout_seconds: u32,
+    /// The tool allowlist (`tools = [...]`); absent means every tool the
+    /// server advertises (spec 014 FR-001).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    /// Per-tool risk overrides (`[[mcp.servers.overrides]]`) — the operator
+    /// writing law, ADR-0044 §1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<McpToolConfig>,
+}
+
+impl<'de> Deserialize<'de> for McpServerConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct McpServerWire {
+            name: String,
+            transport: McpTransportConfig,
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default)]
+            timeout_seconds: Option<u32>,
+            #[serde(default)]
+            tools: Option<Vec<String>>,
+            #[serde(default)]
+            overrides: Vec<McpToolConfig>,
+        }
+        let wire = McpServerWire::deserialize(deserializer)?;
+        Ok(Self {
+            name: wire.name,
+            transport: wire.transport,
+            enabled: wire.enabled.unwrap_or(false),
+            timeout_seconds: wire.timeout_seconds.unwrap_or(30).clamp(5, 300),
+            tools: wire.tools,
+            overrides: wire.overrides,
+        })
+    }
+}
+
+/// How the daemon reaches one MCP server (spec 014 FR-001).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpTransportConfig {
+    /// A subprocess the runtime owns — the transport, not a shell.
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// A streamable-HTTP endpoint.
+    Http { url: String },
+}
+
+/// One per-tool trust override (`[[mcp.servers.overrides]]`): the ONLY mechanism
+/// that lowers an external tool's authority — the server's self-reports never
+/// reach the runtime (ADR-0044 §1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpToolConfig {
+    /// The MCP tool name exactly as the server advertises it.
+    pub name: String,
+    /// The risk class the operator assigns; `risk = "controlled"` lets the
+    /// autonomy matrix govern the tool at L4+ within budget.
+    pub risk: argus_domain::RiskClass,
+}
+
 /// Precedence is `defaults < file < flags`; flags are applied afterwards by the
 /// caller, which is why only the first two are handled here.
 ///
@@ -471,6 +657,7 @@ fn load_from(path: &Path, explicit: bool) -> Result<LoadedConfig, ConfigError> {
     let mut config = DaemonConfig::default();
     apply(&mut config, file);
     config.cloud.validate()?;
+    config.mcp.validate()?;
 
     Ok(LoadedConfig {
         config,
@@ -518,6 +705,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.capabilities {
         config.capabilities = value;
+    }
+    if let Some(value) = file.mcp {
+        config.mcp = value;
     }
 }
 
@@ -1050,5 +1240,188 @@ telemetry_interval_seconds = 30
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Spec 014: the [mcp] section ---
+
+    #[test]
+    fn the_mcp_section_loads_servers_with_defaults_and_clamps() {
+        let dir = temp_dir();
+
+        // Absent section: no servers — no runtime, no capabilities
+        // (ADR-0044 §5, the byte-identical default).
+        let path = write_config(&dir, "argus.toml", "environment_name = \"x\"\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.mcp, McpConfig::default());
+        assert_eq!(loaded.config.mcp.servers.len(), 0);
+
+        // A stdio server with a per-tool override; disabled is the default.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            r#"
+[[mcp.servers]]
+name = "metrics"
+transport = { type = "stdio", command = "/usr/bin/prometheus-mcp", args = ["--flag"] }
+
+[[mcp.servers.overrides]]
+name = "query"
+risk = "controlled"
+
+[[mcp.servers]]
+name = "search"
+enabled = true
+timeout_seconds = 120
+transport = { type = "http", url = "https://mcp.internal/search" }
+tools = ["query"]
+"#,
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.mcp.servers.len(), 2);
+
+        let metrics = &loaded.config.mcp.servers[0];
+        assert_eq!(metrics.name, "metrics");
+        assert!(!metrics.enabled, "disabled is the default");
+        assert_eq!(metrics.timeout_seconds, 30);
+        assert_eq!(
+            metrics.transport,
+            McpTransportConfig::Stdio {
+                command: "/usr/bin/prometheus-mcp".to_string(),
+                args: vec!["--flag".to_string()],
+            }
+        );
+        assert_eq!(metrics.overrides.len(), 1);
+        assert_eq!(metrics.overrides[0].name, "query");
+        assert_eq!(
+            metrics.overrides[0].risk,
+            argus_domain::RiskClass::Controlled
+        );
+
+        let search = &loaded.config.mcp.servers[1];
+        assert!(search.enabled);
+        assert_eq!(search.timeout_seconds, 120);
+        assert_eq!(
+            search.transport,
+            McpTransportConfig::Http {
+                url: "https://mcp.internal/search".to_string()
+            }
+        );
+        assert_eq!(
+            search.tools.as_deref(),
+            Some(["query".to_string()].as_slice())
+        );
+
+        // The timeout clamps to the documented bounds (5–300).
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"x\"\ntimeout_seconds = 1\ntransport = { type = \"stdio\", command = \"x\" }\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.mcp.servers[0].timeout_seconds, 5);
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"x\"\ntimeout_seconds = 10_000\ntransport = { type = \"stdio\", command = \"x\" }\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.mcp.servers[0].timeout_seconds, 300);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_mcp_section_fails_closed_on_unrepresentable_declarations() {
+        let dir = temp_dir();
+
+        // A dotted name would break the no-collision namespacing.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"my.server\"\ntransport = { type = \"stdio\", command = \"x\" }\n",
+        );
+        let err = load(Some(&path)).expect_err("a dotted server name is invalid");
+        assert!(matches!(err, ConfigError::Mcp(_)), "{err:?}");
+
+        // Duplicate names.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"dup\"\ntransport = { type = \"stdio\", command = \"x\" }\n\n[[mcp.servers]]\nname = \"dup\"\ntransport = { type = \"stdio\", command = \"y\" }\n",
+        );
+        let err = load(Some(&path)).expect_err("duplicate names are invalid");
+        assert!(matches!(err, ConfigError::Mcp(_)), "{err:?}");
+
+        // An http url that is not an url.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"srv\"\ntransport = { type = \"http\", url = \"not-an-url\" }\n",
+        );
+        let err = load(Some(&path)).expect_err("a non-url is invalid");
+        assert!(matches!(err, ConfigError::Mcp(_)), "{err:?}");
+
+        // An empty stdio command.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"srv\"\ntransport = { type = \"stdio\", command = \" \" }\n",
+        );
+        let err = load(Some(&path)).expect_err("an empty command is invalid");
+        assert!(matches!(err, ConfigError::Mcp(_)), "{err:?}");
+
+        // An override naming an unrepresentable tool.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"srv\"\ntransport = { type = \"stdio\", command = \"x\" }\n\n[[mcp.servers.overrides]]\nname = \"bad.name\"\nrisk = \"controlled\"\n",
+        );
+        let err = load(Some(&path)).expect_err("a dotted tool override is invalid");
+        assert!(matches!(err, ConfigError::Mcp(_)), "{err:?}");
+
+        // An unknown risk class.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[[mcp.servers]]\nname = \"srv\"\ntransport = { type = \"stdio\", command = \"x\" }\n\n[[mcp.servers.overrides]]\nname = \"tool\"\nrisk = \"trusted\"\n",
+        );
+        let err = load(Some(&path)).expect_err("an unknown risk class is invalid");
+        assert!(
+            matches!(err, ConfigError::Parse { .. } | ConfigError::Mcp(_)),
+            "{err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enabled_servers_exposes_only_the_enabled_half() {
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "off".to_string(),
+                    transport: McpTransportConfig::Stdio {
+                        command: "x".to_string(),
+                        args: vec![],
+                    },
+                    enabled: false,
+                    timeout_seconds: 30,
+                    tools: None,
+                    overrides: vec![],
+                },
+                McpServerConfig {
+                    name: "on".to_string(),
+                    transport: McpTransportConfig::Http {
+                        url: "https://x".to_string(),
+                    },
+                    enabled: true,
+                    timeout_seconds: 30,
+                    tools: None,
+                    overrides: vec![],
+                },
+            ],
+        };
+        let enabled: Vec<&str> = config.enabled_servers().map(|s| s.name.as_str()).collect();
+        assert_eq!(enabled, vec!["on"]);
     }
 }

@@ -1099,7 +1099,7 @@ async fn the_real_reclaim_capability_completes_the_memory_pressure_chain() {
     );
     let reclaim = CapabilityId::new(CapabilityId::HOST_MEMORY_RECLAIM).unwrap();
     assert!(
-        daemon.registry().get(&reclaim).is_some(),
+        daemon.registry_snapshot().get(&reclaim).is_some(),
         "the real capability is registered by the bootstrap"
     );
 

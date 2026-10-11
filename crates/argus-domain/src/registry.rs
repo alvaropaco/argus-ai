@@ -11,7 +11,7 @@ use crate::{CapabilityDescriptor, CapabilityId, PrivilegeDeclaration};
 /// whose declared privileges the sandbox does not grant is rejected rather than
 /// published, so the installation never advertises a capability it cannot
 /// actually perform (ADR-0021 §2).
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CapabilityRegistry {
     descriptors: BTreeMap<CapabilityId, CapabilityDescriptor>,
     sandbox: Option<PrivilegeDeclaration>,

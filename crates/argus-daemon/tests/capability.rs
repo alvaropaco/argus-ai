@@ -115,8 +115,8 @@ async fn service_capability_schema_accepts_the_unit_and_rejects_empty_arguments(
     .await
     .unwrap();
 
-    let descriptor = daemon
-        .registry()
+    let registry = daemon.registry_snapshot();
+    let descriptor = registry
         .get(&CapabilityId::new("host.service.restart").unwrap())
         .expect("host.service.restart is registered");
     let schema = descriptor.input_schema();

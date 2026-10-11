@@ -11,6 +11,7 @@ pub mod config;
 pub mod control;
 pub mod handler;
 pub mod ledger;
+pub mod mcp;
 pub mod observe;
 pub mod privileged;
 pub mod runbooks;
