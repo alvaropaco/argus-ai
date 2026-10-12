@@ -1022,7 +1022,18 @@ fn split_provider_content(
                 credential = Some(ProviderCredential::new(text));
             }
             known if MANAGED_PROVIDER_SETTINGS.contains(&known) => {
-                settings.insert(key.clone(), json_to_toml(value)?);
+                // One-level nesting is the dashboard's grammar (`model:
+                // {base_url, model}`): an object's scalar leaves flatten to
+                // the FLAT managed keys (`base_url`, `model`) that
+                // apply_managed_model_settings merges over the file's
+                // [model] section. Deeper nesting is refused.
+                if let serde_json::Value::Object(leaves) = value {
+                    for (leaf, leaf_value) in leaves {
+                        settings.insert(leaf.clone(), json_to_toml(leaf_value)?);
+                    }
+                } else {
+                    settings.insert(key.clone(), json_to_toml(value)?);
+                }
             }
             // Brain levers ride the same settings table: validate_all applies
             // the brain.* entries against the live control handle and skips
@@ -2808,6 +2819,35 @@ async fn wait_or_stop(stop: &mut watch::Receiver<bool>, wake: &Notify, delay: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dashboard_s_nested_model_object_flattens_to_flat_managed_keys() {
+        // Spec 015 live finding: the Settings panel sends `model` as a nested
+        // object (`model: {base_url, model}`); the split flattens its scalar
+        // leaves to the FLAT managed keys (`base_url`, `model`) that
+        // apply_managed_model_settings merges over the file's [model]
+        // section. Deeper nesting is refused.
+        let content = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            r#"{
+                "kind": "provider",
+                "model": { "base_url": "https://litellm.example", "model": "deepseek/deepseek-v4-flash" },
+                "base_url": "https://litellm.example",
+                "api_token": "sk-test"
+            }"#,
+        )
+        .unwrap();
+        let (settings, credential) =
+            split_provider_content(&content).expect("the nested grammar splits");
+        assert!(credential.is_some(), "the token rides as the credential");
+        assert_eq!(
+            settings.get("base_url").and_then(|v| v.as_str()),
+            Some("https://litellm.example")
+        );
+        assert_eq!(
+            settings.get("model").and_then(|v| v.as_str()),
+            Some("deepseek/deepseek-v4-flash")
+        );
+    }
 
     #[test]
     fn brain_levers_survive_the_provider_split() {
