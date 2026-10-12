@@ -827,6 +827,24 @@ impl DomainRepository for SqliteRepository {
         })
     }
 
+    async fn retain_observations(&self, max_rows: i64) -> Result<(), RepositoryError> {
+        // Observation rows carry no time column — the cap is a rowid range:
+        // rows are appended in time order, so "newest max_rows" is the tail.
+        // The OFFSET subquery on an empty table yields NULL and the DELETE
+        // becomes a no-op.
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM observations WHERE rowid < (
+                     SELECT MIN(rowid) FROM (
+                         SELECT rowid FROM observations ORDER BY rowid DESC LIMIT 1 OFFSET ?1
+                     )
+                 )",
+                rusqlite::params![max_rows.max(0)],
+            )?;
+            Ok(())
+        })
+    }
+
     async fn put_autonomy_state(&self, state: &AutonomyState) -> Result<(), RepositoryError> {
         // One row per environment: the record carries its environment key and
         // a re-put supersedes (spec 008 FR-001).
@@ -1078,6 +1096,36 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].event_id, new.event_id);
         assert!(repo.list_token_usage(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retain_observations_keeps_only_the_newest_cap() {
+        let repo = SqliteRepository::open_in_memory().unwrap();
+        let subject = argus_domain::ResourceId::new("host", "abc").unwrap();
+        let mut written = Vec::new();
+        for _index in 0..5 {
+            let observation = argus_domain::Observation::new(
+                uuid::Uuid::new_v4(),
+                "argusd",
+                subject.clone(),
+                "service.active",
+                argus_domain::ObservedValue::Bool(true),
+                1.0,
+                argus_domain::Provenance::new("systemd", "is_active", Utc::now()),
+                Utc::now(),
+            )
+            .unwrap();
+            repo.put_observation(&observation).await.unwrap();
+            written.push(observation);
+        }
+
+        repo.retain_observations(3).await.unwrap();
+
+        assert_eq!(
+            repo.list_observations().await.unwrap(),
+            written.split_off(2),
+            "the cap keeps the newest rows; the oldest give way"
+        );
     }
 
     #[tokio::test]

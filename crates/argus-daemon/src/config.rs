@@ -50,6 +50,11 @@ pub struct DaemonConfig {
     /// configuration observes exactly as today.
     #[serde(default)]
     pub situations: SituationsConfig,
+    /// Bounded-growth caps for the append-only local tables outside the
+    /// ledger. Absent means the defaults: the caps exist so a stream with no
+    /// reader cannot fill the disk.
+    #[serde(default)]
+    pub retention: RetentionConfig,
     /// The pressure-action settings (spec 012 FR-001/FR-002). Absent means
     /// the defaults: the standard drop_caches sysctl and a 7-day journal
     /// retention.
@@ -79,6 +84,7 @@ impl Default for DaemonConfig {
             ledger: LedgerConfig::default(),
             autonomy: AutonomyConfig::default(),
             situations: SituationsConfig::default(),
+            retention: RetentionConfig::default(),
             capabilities: CapabilitiesConfig::default(),
             mcp: McpConfig::default(),
         }
@@ -120,6 +126,8 @@ pub struct ConfigFile {
     pub autonomy: Option<AutonomyConfig>,
     #[serde(default)]
     pub situations: Option<SituationsConfig>,
+    #[serde(default)]
+    pub retention: Option<RetentionConfig>,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesConfig>,
     #[serde(default)]
@@ -270,6 +278,41 @@ impl<'de> Deserialize<'de> for LedgerConfig {
         Ok(Self {
             upload_enabled: wire.upload_enabled.unwrap_or(true),
             retention_days: wire.retention_days.unwrap_or(30).clamp(1, 3650),
+        })
+    }
+}
+
+/// Bounded local growth for the append-only tables outside the ledger: hard
+/// row caps so a stream written every tick but read only for recent forensics
+/// cannot fill the disk. Absent section → the defaults; the caps are clamped,
+/// so a typo'd extreme degrades to the nearest bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RetentionConfig {
+    /// The newest N observation rows the local store keeps.
+    pub observations_max: i64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            observations_max: 100_000,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RetentionConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct RetentionWire {
+            #[serde(default)]
+            observations_max: Option<i64>,
+        }
+        let wire = RetentionWire::deserialize(deserializer)?;
+        Ok(Self {
+            observations_max: wire
+                .observations_max
+                .unwrap_or(100_000)
+                .clamp(1_000, 10_000_000),
         })
     }
 }
@@ -732,6 +775,9 @@ fn apply(config: &mut DaemonConfig, file: ConfigFile) {
     }
     if let Some(value) = file.situations {
         config.situations = value;
+    }
+    if let Some(value) = file.retention {
+        config.retention = value;
     }
     if let Some(value) = file.capabilities {
         config.capabilities = value;
@@ -1288,6 +1334,33 @@ telemetry_interval_seconds = 30
         let loaded = load(Some(&path)).expect("valid");
         assert_eq!(loaded.config.situations.memory_used_percent, 50.0);
         assert_eq!(loaded.config.situations.disk_used_percent, 99.0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_retention_section_loads_with_defaults_and_clamps() {
+        let dir = temp_dir();
+
+        // Absent section: the defaults — a bounded observation stream that
+        // recent forensics still answers.
+        let path = write_config(&dir, "argus.toml", "environment_name = \"x\"\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.retention, RetentionConfig::default());
+
+        // Explicit values ride through.
+        let path = write_config(
+            &dir,
+            "argus.toml",
+            "[retention]\nobservations_max = 250_000\n",
+        );
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.retention.observations_max, 250_000);
+
+        // Extremes clamp to the documented bounds (1,000–10,000,000).
+        let path = write_config(&dir, "argus.toml", "[retention]\nobservations_max = 5\n");
+        let loaded = load(Some(&path)).expect("valid");
+        assert_eq!(loaded.config.retention.observations_max, 1_000);
 
         std::fs::remove_dir_all(&dir).ok();
     }

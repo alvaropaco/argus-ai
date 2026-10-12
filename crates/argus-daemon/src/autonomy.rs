@@ -487,7 +487,12 @@ mod tests {
         Arc<AutonomyManager>,
         tokio::sync::broadcast::Receiver<DomainEvent>,
     ) {
-        let ledger = DaemonLedger::new(Arc::clone(&repo) as Arc<dyn DomainRepository>, false, 30);
+        let ledger = DaemonLedger::new(
+            Arc::clone(&repo) as Arc<dyn DomainRepository>,
+            false,
+            30,
+            100_000,
+        );
         // Subscribing before any tick means the broadcast buffer already
         // holds every promotion/demotion event when the test drains it —
         // no scheduling race.
@@ -880,7 +885,7 @@ mod tests {
     async fn a_restart_resumes_from_the_persisted_state() {
         let repo: Arc<dyn DomainRepository> = Arc::new(InMemoryRepository::new());
         let environment = EnvironmentId::new();
-        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30);
+        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30, 100_000);
         let first =
             AutonomyManager::load(environment, config(10, 20), Arc::clone(&repo), ledger).await;
 
@@ -891,7 +896,7 @@ mod tests {
 
         // The daemon restarts: a fresh manager resumes the same persisted
         // counters (AC-007).
-        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30);
+        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30, 100_000);
         let second =
             AutonomyManager::load(environment, config(10, 20), Arc::clone(&repo), ledger).await;
         let state = second.snapshot().await;
@@ -907,7 +912,7 @@ mod tests {
     async fn a_foreign_environment_starts_fresh() {
         let repo: Arc<dyn DomainRepository> = Arc::new(InMemoryRepository::new());
         let environment = EnvironmentId::new();
-        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30);
+        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30, 100_000);
         let first =
             AutonomyManager::load(environment, config(2, 2), Arc::clone(&repo), ledger).await;
         first.on_cycle(clean(AutonomyMode::L2Recommend)).await;
@@ -915,7 +920,7 @@ mod tests {
 
         // A different environment id reads as a fresh environment: state is
         // per environment, so nothing carries over.
-        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30);
+        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30, 100_000);
         let second = AutonomyManager::load(
             EnvironmentId::new(),
             config(2, 2),
@@ -987,7 +992,7 @@ mod tests {
         let store: Arc<dyn DomainRepository> = Arc::new(FailingStore {
             autonomy_fails: true,
         });
-        let ledger = DaemonLedger::new(Arc::clone(&store), false, 30);
+        let ledger = DaemonLedger::new(Arc::clone(&store), false, 30, 100_000);
         let machine = AutonomyManager::load(
             EnvironmentId::new(),
             config(2, 2),
@@ -1083,7 +1088,7 @@ mod tests {
         );
 
         // The consumed counters persist for a restarted manager (AC-007).
-        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30);
+        let ledger = DaemonLedger::new(Arc::clone(&repo), false, 30, 100_000);
         let restarted = AutonomyManager::load(
             machine.environment_id(),
             config(2, 2),

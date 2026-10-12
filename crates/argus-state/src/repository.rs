@@ -320,6 +320,13 @@ pub trait DomainRepository: Send + Sync {
         Err(ledger_unsupported("retain_ledger"))
     }
 
+    /// Bounded growth: keeps only the newest `max_rows` observation rows. The
+    /// observation stream is append-only and written every tick; without a cap
+    /// it grows without bound.
+    async fn retain_observations(&self, _max_rows: i64) -> Result<(), RepositoryError> {
+        Err(ledger_unsupported("retain_observations"))
+    }
+
     // --- Graduated autonomy (spec 008): the persisted assimilation state ---
 
     /// Persists the per-environment autonomy state (phase, earned rung, gate

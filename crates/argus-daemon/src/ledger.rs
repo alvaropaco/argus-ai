@@ -48,6 +48,7 @@ pub struct DaemonLedger {
     buffer: Arc<Mutex<LedgerBuffer>>,
     upload_enabled: bool,
     retention_days: i64,
+    observation_max_rows: i64,
     events: Arc<LocalEventBus>,
     cycle: std::sync::Mutex<Vec<CycleFrame>>,
 }
@@ -57,12 +58,14 @@ impl DaemonLedger {
         repository: Arc<dyn DomainRepository>,
         upload_enabled: bool,
         retention_days: i64,
+        observation_max_rows: i64,
     ) -> Arc<Self> {
         Arc::new(Self {
             repository,
             buffer: Arc::new(Mutex::new(LedgerBuffer::new())),
             upload_enabled,
             retention_days,
+            observation_max_rows,
             events: Arc::new(LocalEventBus::new(64)),
             cycle: std::sync::Mutex::new(Vec::new()),
         })
@@ -103,10 +106,18 @@ impl DaemonLedger {
         }
     }
 
-    /// Drops ledger rows older than the configured retention (bounded growth).
+    /// Drops ledger rows older than the configured retention and caps the
+    /// append-only observation stream (bounded growth).
     pub async fn prune(&self) {
         if let Err(error) = self.repository.retain_ledger(self.retention_days).await {
             tracing::warn!(%error, "ledger retention prune failed");
+        }
+        if let Err(error) = self
+            .repository
+            .retain_observations(self.observation_max_rows)
+            .await
+        {
+            tracing::warn!(%error, "observation retention prune failed");
         }
     }
 
@@ -393,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn actions_persist_raw_locally_and_buffer_redacted_upstream() {
-        let ledger = DaemonLedger::new(Arc::new(InMemoryRepository::new()), true, 30);
+        let ledger = DaemonLedger::new(Arc::new(InMemoryRepository::new()), true, 30, 100_000);
         let event = record();
         ledger.record_action(event.clone()).await;
 
@@ -421,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_inside_a_cycle_carry_its_id_and_feed_the_plan_linkage() {
-        let ledger = DaemonLedger::new(Arc::new(InMemoryRepository::new()), false, 30);
+        let ledger = DaemonLedger::new(Arc::new(InMemoryRepository::new()), false, 30, 100_000);
         let cycle = Uuid::new_v4();
         ledger.enter_cycle(cycle).await;
 
@@ -483,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_disabled_upload_persists_without_buffering() {
-        let ledger = DaemonLedger::new(Arc::new(InMemoryRepository::new()), false, 30);
+        let ledger = DaemonLedger::new(Arc::new(InMemoryRepository::new()), false, 30, 100_000);
         ledger.record_action(record()).await;
         assert!(ledger.buffer.lock().await.is_empty());
         assert_eq!(
@@ -495,6 +506,35 @@ mod tests {
                 .len(),
             1,
             "the ledger is always local, upload or not"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_caps_the_observation_stream() {
+        let repository: Arc<dyn DomainRepository> = Arc::new(InMemoryRepository::new());
+        let ledger = DaemonLedger::new(Arc::clone(&repository), false, 30, 3);
+        let subject = argus_domain::ResourceId::new("host", "abc").unwrap();
+        for _index in 0..5u32 {
+            let observation = argus_domain::Observation::new(
+                uuid::Uuid::new_v4(),
+                "argusd",
+                subject.clone(),
+                "service.active",
+                argus_domain::ObservedValue::Bool(true),
+                1.0,
+                argus_domain::Provenance::new("systemd", "is_active", Utc::now()),
+                Utc::now(),
+            )
+            .unwrap();
+            repository.put_observation(&observation).await.unwrap();
+        }
+
+        ledger.prune().await;
+
+        assert_eq!(
+            repository.list_observations().await.unwrap().len(),
+            3,
+            "the cap bounds the observation stream"
         );
     }
 }

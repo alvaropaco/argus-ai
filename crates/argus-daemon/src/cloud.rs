@@ -3446,7 +3446,7 @@ fallback_models = ["managed-a", "managed-b"]
             limiter: Arc::new(PrivilegedLimiter::new(2)),
             privileged_execution,
             wake: Arc::new(Notify::new()),
-            ledger: crate::ledger::DaemonLedger::new(ledger_repository, true, 30),
+            ledger: crate::ledger::DaemonLedger::new(ledger_repository, true, 30, 100_000),
         }
     }
 

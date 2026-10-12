@@ -487,6 +487,7 @@ impl Daemon {
             Arc::clone(&repository),
             config.ledger.upload_enabled,
             config.ledger.retention_days,
+            config.retention.observations_max,
         );
         // The assimilation machine (spec 008): persisted state resumes where
         // the daemon left off; corrupt/absent/foreign state re-assimilates

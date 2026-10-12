@@ -393,6 +393,19 @@ impl DomainRepository for InMemoryRepository {
         Ok(())
     }
 
+    async fn retain_observations(&self, max_rows: i64) -> Result<(), RepositoryError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| RepositoryError::Failed("lock poisoned".into()))?;
+        let max = max_rows.max(0) as usize;
+        if inner.observations.len() > max {
+            let excess = inner.observations.len() - max;
+            inner.observations.drain(..excess);
+        }
+        Ok(())
+    }
+
     async fn put_autonomy_state(&self, state: &AutonomyState) -> Result<(), RepositoryError> {
         self.inner
             .lock()
@@ -486,6 +499,36 @@ mod tests {
         repo.put_observation(&observation).await.unwrap();
 
         assert_eq!(repo.list_observations().await.unwrap(), vec![observation]);
+    }
+
+    #[tokio::test]
+    async fn retain_observations_keeps_only_the_newest_cap() {
+        let repo = InMemoryRepository::new();
+        let subject = argus_domain::ResourceId::new("host", "abc").unwrap();
+        let mut written = Vec::new();
+        for _index in 0..5 {
+            let observation = argus_domain::Observation::new(
+                uuid::Uuid::new_v4(),
+                "argusd",
+                subject.clone(),
+                "service.active",
+                argus_domain::ObservedValue::Bool(true),
+                1.0,
+                argus_domain::Provenance::new("systemd", "is_active", Utc::now()),
+                Utc::now(),
+            )
+            .unwrap();
+            repo.put_observation(&observation).await.unwrap();
+            written.push(observation);
+        }
+
+        repo.retain_observations(3).await.unwrap();
+
+        assert_eq!(
+            repo.list_observations().await.unwrap(),
+            written.split_off(2),
+            "the cap keeps the newest rows; the oldest give way"
+        );
     }
 
     #[tokio::test]
