@@ -872,19 +872,29 @@ async fn run_plan(
 
                 if !may_execute_without_approval(autonomy, risk) {
                     // The matrix rejected the step, so it never executes:
-                    // surrender the reservation taken above.
+                    // surrender the reservation taken above. A refusal is a
+                    // denial, not a pause — no token exists to grant — so the
+                    // ledger row must never read as awaiting-approval.
                     if !grant_backed {
                         ports.budget.refund(risk, plan.blast_radius, now).await;
                     }
-                    outcome.requires_approval.push(action.capability.clone());
+                    outcome.denied.push(action.capability.clone());
+                    let _ = events
+                        .publish(&event(
+                            types::PLAN_DENIED,
+                            json!({ "capability": action.capability.as_str() }),
+                            correlation,
+                            None,
+                        ))
+                        .await;
                     ports
                         .ledger
                         .record_action(action_event(
                             action,
                             correlation,
-                            argus_domain::VERDICT_REQUIRES_APPROVAL,
-                            Some(decision.policy_id.clone()),
-                            argus_domain::OUTCOME_AWAITING_APPROVAL,
+                            argus_domain::VERDICT_DENY,
+                            Some("autonomy.matrix".to_string()),
+                            argus_domain::OUTCOME_DENIED,
                             None,
                             None,
                         ))
@@ -1974,9 +1984,90 @@ mod tests {
         };
 
         assert!(outcome.executions.is_empty(), "Propose mode never executes");
-        assert_eq!(outcome.requires_approval.len(), 1);
+        assert_eq!(outcome.denied.len(), 1);
         assert_eq!(outcome.status, PlanStatus::Denied);
         assert!(service.recorded_calls().is_empty());
+    }
+
+    /// Records every action row so a test can assert what the ledger was
+    /// told — the label IS the operator-facing story.
+    struct RecordingLedger {
+        actions: std::sync::Mutex<Vec<argus_domain::ActionEventRecord>>,
+    }
+
+    #[async_trait::async_trait]
+    impl argus_events::LedgerSink for RecordingLedger {
+        async fn record_action(&self, event: argus_domain::ActionEventRecord) {
+            self.actions
+                .lock()
+                .expect("recording ledger is not poisoned")
+                .push(event);
+        }
+
+        async fn record_trace(&self, _trace: argus_domain::BrainTraceRecord) {}
+
+        async fn record_usage(&self, _usage: argus_domain::TokenUsageRecord) {}
+    }
+
+    #[tokio::test]
+    async fn an_autonomy_matrix_refusal_records_a_denial_not_an_open_approval() {
+        let service = MockServiceController::new();
+        let events = Arc::new(LocalEventBus::new(16));
+        let policy = BootstrapPolicyEvaluator::new();
+        let mut registry = service_registry();
+        registry
+            .register(
+                CapabilityDescriptor::new(
+                    CapabilityId::new(CapabilityId::HOST_STATUS_READ).unwrap(),
+                    "argusd",
+                    CapabilityId::HOST_STATUS_READ,
+                    RiskClass::Read,
+                    Version::new(0, 1, 0),
+                    json!({ "type": "object", "additionalProperties": false }),
+                    json!({}),
+                    Reversibility::None,
+                )
+                .with_blast_radius(BlastRadius::None),
+            )
+            .expect("unique descriptor");
+
+        // Policy allows the read; the autonomy matrix (Propose) refuses. The
+        // refusal is a denial with the matrix as its decider — never an
+        // awaiting-approval row hinting at a grantable token that does not
+        // exist.
+        let mut p = plan("nginx.service");
+        p.steps[0].action.capability = CapabilityId::new(CapabilityId::HOST_STATUS_READ).unwrap();
+
+        let recording = RecordingLedger {
+            actions: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut ports = LoopPorts::noop();
+        ports.ledger = &recording;
+
+        let outcome = match authorize_and_run_with_ports(
+            &p,
+            &registry,
+            &policy,
+            &service,
+            events.as_ref(),
+            AutonomyMode::L2Recommend,
+            &ports,
+        )
+        .await
+        {
+            RunOutcome::Finished(outcome) => outcome,
+            RunOutcome::Pending(pending) => panic!("a matrix refusal never pauses: {pending:?}"),
+        };
+
+        assert!(outcome.executions.is_empty());
+        assert_eq!(outcome.denied.len(), 1);
+        assert_eq!(outcome.status, PlanStatus::Denied);
+
+        let actions = recording.actions.into_inner().unwrap();
+        assert_eq!(actions.len(), 1, "the refusal is a first-class ledger row");
+        assert_eq!(actions[0].verdict, argus_domain::VERDICT_DENY);
+        assert_eq!(actions[0].policy_id.as_deref(), Some("autonomy.matrix"));
+        assert_eq!(actions[0].outcome, argus_domain::OUTCOME_DENIED);
     }
 
     #[tokio::test]
