@@ -172,11 +172,27 @@ pub fn collect_events(
     }
 
     if lagged > 0 {
-        let notice = serde_json::json!({
-            "events_lagged": lagged,
-            "note": "the local bus outran the reporter; these events were not buffered",
-        });
-        queue.enqueue(ReportKind::Events, notice, now);
+        // The loss notice rides the events contract itself: a payload without
+        // the `events` array is deterministically invalid against the cloud's
+        // schema, so a raw `{events_lagged: N}` notice would retry until the
+        // give-up cap and the loss would never land. It is reported as an
+        // event instead — one the cloud stores and surfaces like any other.
+        let notice = argus_domain::DomainEvent::new(
+            uuid::Uuid::new_v4(),
+            argus_domain::EventType::new("bus.lagged").expect("valid event type"),
+            now,
+            "argusd",
+            "argusd",
+            argus_domain::Severity::Warning,
+            None,
+            None,
+            serde_json::json!({ "events_lagged": lagged }),
+        );
+        for batch in crate::mapping::event::batches(std::slice::from_ref(&notice)) {
+            if let Ok(payload) = serde_json::to_value(&batch) {
+                queue.enqueue(ReportKind::Events, payload, now);
+            }
+        }
     }
 
     if collected.is_empty() {
@@ -652,14 +668,34 @@ mod tests {
 
             let payloads: Vec<_> = queue.drain(10, at());
             let mentions_loss = payloads.iter().any(|entry| {
-                serde_json::to_string(&entry.payload)
-                    .unwrap_or_default()
-                    .contains("events_lagged")
+                let Ok(notice) = serde_json::from_value::<
+                    crate::protocol::messages::EventsReportPayload,
+                >(entry.payload.clone()) else {
+                    panic!(
+                        "every events payload must satisfy the contract: {}",
+                        serde_json::to_string(&entry.payload).unwrap_or_default()
+                    )
+                };
+                notice
+                    .events
+                    .iter()
+                    .any(|event| event.event_type == "bus.lagged")
+                    && event_lag_count(&notice).is_some()
             });
             assert!(
                 mentions_loss,
                 "events dropped by the bus must be visible to the operator"
             );
+        }
+
+        fn event_lag_count(notice: &crate::protocol::messages::EventsReportPayload) -> Option<u64> {
+            notice
+                .events
+                .iter()
+                .find(|event| event.event_type == "bus.lagged")
+                .and_then(|event| event.payload.as_ref())
+                .and_then(|payload| payload.get("events_lagged"))
+                .and_then(|value| value.as_u64())
         }
     }
 

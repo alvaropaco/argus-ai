@@ -2705,6 +2705,7 @@ async fn handle_inbound(
                     tracing::warn!(
                         kind = entry.kind.as_str(),
                         attempts = entry.attempts,
+                        reason = ?ack.reason,
                         "the cloud keeps rejecting this report; giving up on it"
                     );
                     return;
