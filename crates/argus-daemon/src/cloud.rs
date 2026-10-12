@@ -1113,7 +1113,10 @@ async fn apply_configuration(deps: &SupervisorDeps, transport: &dyn Transport, f
         .ok()
         .flatten()
         .map(|held| held.current_version_number)
-        .unwrap_or(0);
+        // A configuration never applied has no held version: any incoming
+        // version advances. Anchoring at 0 instead would make a first
+        // version numbered 0 permanently unappliable.
+        .unwrap_or(-1);
 
     if !classify_delivery(held, payload.version_number, payload.mode).changes_held_version() {
         reply_config_result(
@@ -4632,7 +4635,29 @@ comparison = {{ equal = "active" }}
             )
         }
 
+        /// Spec 015 live finding: a configuration's first version is numbered
+        /// 0, and the held-version default of 0 made `0 > 0` false — the first
+        /// delivery of every fresh configuration was rejected as "not newer".
+        /// A never-applied configuration has no held version: any incoming
+        /// version advances.
         #[tokio::test]
+        async fn a_first_delivery_of_a_version_zero_configuration_is_not_rejected_as_stale() {
+            let (deps, dir) = deps_and_transport().await;
+
+            let result = apply_and_read_result(
+                &deps,
+                frame(
+                    Uuid::new_v4(),
+                    0,
+                    serde_json::json!({ "kind": "brain", "brain.confidence_threshold": 0.6 }),
+                ),
+            )
+            .await;
+
+            assert_eq!(result["status"], "applied", "{result}");
+            fs::remove_dir_all(&dir).ok();
+        }
+
         async fn a_runbook_configuration_is_applied_and_lands_a_candidate() {
             let (deps, dir) = deps_and_transport().await;
 
